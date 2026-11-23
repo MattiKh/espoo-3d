@@ -11,10 +11,11 @@ export const WMS_SERVICES = {
 };
 export const ESPOO_WMS = WMS_SERVICES.espoo;
 
-// Ilmakuva on valinnainen (oletuksena pois). Ensimmäinen vuosi on oletus. Espoon WMS:ssä on
-// myös vuodet 1950, 1969, 2001, 2007–2013, 2017–2024 (tasot Ortokartta_VVVV).
+// Pohjana on oletuksena vuoden 2024 ilmakuva; sen voi ottaa pois. Ensimmäinen vuosi on oletus.
+// Espoon WMS:ssä on myös vuodet 1950, 1969, 2001, 2007–2013 ja 2017–2023 (tasot Ortokartta_VVVV)
+// sekä uusin kuva (Ortokartta).
 export const ORTHO_YEARS = [
-  [2026, "Ortokartta"], [2015, "Ortokartta_2015"], [2005, "Ortokartta_2005"], [1996, "Ortokartta_1996"],
+  [2024, "Ortokartta_2024"], [2015, "Ortokartta_2015"], [2005, "Ortokartta_2005"], [1996, "Ortokartta_1996"],
   [1976, "Ortokartta_1976"],
 ];
 
@@ -106,7 +107,7 @@ export const LAYERS = [
     ],
   },
   { id: "wms_ajantasa", title: "Ajantasa-asemakaava", wms: "Ajantasa_asemakaava_vektori" },
-  { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta", on: true },
+  { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta" },
   // Vektoriaineistosta (GIS:Vesialueet) puuttuu suuri osa merialueesta; karttakuvassa vedet ovat
   // kokonaisina kunnan rajalle asti.
   { id: "wms_vesistot", title: "Vesialueet", wms: "Vesistot", on: true },
@@ -136,7 +137,16 @@ export const LAYERS = [
   { id: "wms_melu_tie", title: "Tieliikenteen melu (Lden)", wms: "Espoo_tieliikenne Lden_EU (kadut ja maantiet)" },
   { id: "wms_melu_raide", title: "Raideliikenteen melu (Lden)", wms: "Espoo_rautatieliikenne Lden_EU (juna)" },
   { id: "wms_kiinteistot", title: "Kiinteistörajat", wms: "PKSkiinteistokartta" },
-  { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot", on: true },
+  { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot" },
+];
+
+// Maamerkit, jotka näytetään omana 3D-mallinaan (landmarks.js), koska rakennusaineiston pohja ei
+// kuvaa niiden muotoa. building on korvattavan rakennuksen tunnus, joka piilotetaan 3D-rakennuksista.
+export const LANDMARKS = [
+  {
+    id: "haukilahden_vesitorni", name: "Haukilahden vesitorni", lon: 24.764724, lat: 60.161157, building: 1023766320,
+    rows: [["Valmistunut", "1968"], ["Korkeus", "45,3 m (76,3 m merenpinnasta)"], ["Huipulla", "Ravintola Haikaranpesä"]],
+  },
 ];
 
 // Ponnahdusikkunan otsikot ja kenttien nimet tutuimmille tasoille.

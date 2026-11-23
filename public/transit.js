@@ -1,11 +1,14 @@
-// Joukkoliikenne reaaliajassa. Bussien, raitiovaunujen, lähijunien ja metron sijainnit tulevat
-// HSL:n avoimesta HFP-syötteestä, kauko- ja tavarajunien sijainnit Digitrafficista. Ajoneuvot
-// piirretään 3D-malleina MapLibren omalle tasolle three.js:llä, ja niiden liike lasketaan
-// tasaiseksi vastaanotettujen sijaintien välillä.
+// Liikenne reaaliajassa. Bussien, raitiovaunujen, lähijunien ja metron sijainnit tulevat
+// HSL:n avoimesta HFP-syötteestä, kauko- ja tavarajunien sijainnit Digitrafficista ja Espoon
+// yllä lentävät koneet adsb.fi:stä. Ajoneuvot piirretään 3D-malleina MapLibren omalle tasolle
+// three.js:llä, ja niiden liike lasketaan tasaiseksi vastaanotettujen sijaintien välillä.
+// Samalle tasolle piirretään myös maamerkkien 3D-mallit (landmarks.js).
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
+import { LANDMARKS } from "./layers.js";
+import { LANDMARK_MODELS } from "./landmarks.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
 const RAIL_MQTT_URL = "wss://rata.digitraffic.fi:443/mqtt";
@@ -39,6 +42,7 @@ export const TRANSIT_GROUPS = [
   ["ratikat", "Raitiovaunut", "#00985f"],
   ["junat", "Junat", "#8c4799"],
   ["metro", "Metro", "#ff6319"],
+  ["lentokoneet", "Lentokoneet", "#e63946"],
 ];
 
 const COLORS = {
@@ -408,6 +412,14 @@ function nearRing(x, y, ring, d2) {
     if ((ax + t * dx - x) ** 2 + (ay + t * dy - y) ** 2 < d2) return true;
   }
   return false;
+}
+
+// Onko piste Espoossa tai Kauniaisissa tai enintään margin metrin päässä niistä.
+function nearRegion(x, y, margin) {
+  const b = region.box;
+  if (x < b[0] - margin || x > b[2] + margin || y < b[1] - margin || y > b[3] + margin) return false;
+  if (region.polys.some((poly) => poly.reduce((acc, ring) => acc !== inRing(x, y, ring), false))) return true;
+  return region.polys.some((poly) => poly.some((ring) => nearRing(x, y, ring, margin ** 2)));
 }
 
 function inBox(x, y) {
@@ -839,7 +851,12 @@ function removeVehicle(v) {
 // ne näkyvät maaston läpi, mutta rakennukset peittävät ne.
 const scene = new THREE.Scene();
 const undergroundScene = new THREE.Scene();
+const overlayScene = new THREE.Scene(); // yleiskuvan pisteet kaiken päällä
 const camera = new THREE.Camera();
+// Maan alla olevat kohteet ja pisteet piirretään ilman syvyystestiä. Niille käytetään kameraa,
+// jolta syvyysrajaus puuttuu: suoraan ylhäältä katsottaessa kartan kaukotaso on heti maanpinnan
+// alla, ja tunnelissa kulkeva metro jäisi muuten sen taakse näkymättömiin.
+const flatCamera = new THREE.Camera();
 const meshes = {};
 const matT = new THREE.Matrix4(), matS = new THREE.Matrix4();
 let renderer = null;
@@ -942,8 +959,7 @@ const dots = (() => {
   });
   const points = new THREE.Points(g, m);
   points.frustumCulled = false;
-  points.renderOrder = 3;
-  scene.add(points);
+  overlayScene.add(points);
   return points;
 })();
 
@@ -959,6 +975,314 @@ function putInstance(mesh, wx, wy, wz, yaw, pitch, k) {
   a[o + 12] = wx; a[o + 13] = wy; a[o + 14] = wz; a[o + 15] = 1;
 }
 
+// ------------------------------------------------------------ lentokoneet
+
+// Espoon yllä lentävät koneet. Sijainnit tulevat adsb.fi:n avoimesta ADS-B-rajapinnasta
+// (välityspalvelimen kautta) ja reitit adsbdb.comista lentotunnuksen perusteella. Kone
+// näytetään ilmoittamassaan korkeudessa, ja hakujen välissä sen liikettä jatketaan nopeuden,
+// suunnan ja nousunopeuden mukaan; uuden sijainnin tuoma korjaus häivytetään pehmeästi.
+const PLANE_POLL = 4000; // ms
+const PLANE_TIMEOUT = 25000;
+const PLANE_MARGIN = 5000; // m: koneet näkyvät vielä näin kaukana Espoon rajan takana
+const PLANE_CORRECT_MS = 1500;
+const PLANE_CAP = 300;
+const FT = 0.3048, KT = 1852 / 3600;
+const GEOID = 19; // m: GNSS-korkeus on ellipsoidista; geoidi on Etelä-Suomessa noin 19 m sen yläpuolella
+const planes = new Map();
+const planeState = { url: null, ok: true };
+const routes = new Map();
+
+// Lentoyhtiö ja pyrstön väri ICAO-tunnuksen mukaan (lentotunnuksen kolme ensimmäistä kirjainta).
+const AIRLINES = {
+  FIN: ["Finnair", "#0b2265"], SAS: ["SAS", "#000b6b"], NOZ: ["Norwegian", "#d81939"], NSZ: ["Norwegian", "#d81939"],
+  NAX: ["Norwegian", "#d81939"], DLH: ["Lufthansa", "#05164d"], KLM: ["KLM", "#00a1de"], BTI: ["airBaltic", "#a7c62f"],
+  RYR: ["Ryanair", "#073590"], WZZ: ["Wizz Air", "#c6007e"], EZY: ["easyJet", "#ff6600"], THY: ["Turkish Airlines", "#c70a0c"],
+  QTR: ["Qatar Airways", "#5c0632"], BAW: ["British Airways", "#2a5caa"], AFR: ["Air France", "#002157"],
+  AEE: ["Aegean", "#1f4e8c"], LOT: ["LOT", "#0b3d91"], SWR: ["Swiss", "#e2001a"], AUA: ["Austrian", "#e3001b"],
+  ICE: ["Icelandair", "#1a3d7c"], UAE: ["Emirates", "#c8102e"], FDX: ["FedEx", "#4d148c"], UPS: ["UPS", "#351c15"],
+  DHK: ["DHL", "#ffcc00"], BCS: ["DHL", "#ffcc00"], ETD: ["Etihad", "#bd8b13"], CPA: ["Cathay Pacific", "#006564"],
+  JAL: ["Japan Airlines", "#c8102e"], KAL: ["Korean Air", "#5aa7de"], TAP: ["TAP", "#00a650"], IBE: ["Iberia", "#d7192d"],
+};
+const PLANE_COLOR = "#7b8794";
+const airlineOf = (callsign) => (/^[A-Z]{3}\d/.test(callsign ?? "") ? AIRLINES[callsign.slice(0, 3)] : null);
+
+// Kartio y-akselin suuntaan (rungon nokka ja pyrstö).
+function coneY(s, cx, cz, y0, r0, y1, r1, color, n = 14) {
+  const center = [cx, (y0 + y1) / 2, cz];
+  const at = (i, y, r) => [cx + r * Math.cos((i / n) * Math.PI * 2), y, cz + r * Math.sin((i / n) * Math.PI * 2)];
+  for (let i = 0; i < n; i++) {
+    const a0 = at(i, y0, r0), a1 = at(i + 1, y0, r0), b0 = at(i, y1, r1), b1 = at(i + 1, y1, r1);
+    s.tri(a0, a1, b1, color, center);
+    s.tri(a0, b1, b0, color, center);
+  }
+}
+
+// Matkustajakone (A320-kokoluokka, 38 m): origo painopisteessä, keula +y.
+function planeBodyModel() {
+  const s = new Shape(), white = col("#f3f5f7"), grey = col("#aeb6bf"), dark = col("#36414b");
+  s.cyl("y", 0, -2, 0, 2.0, 30, white, 16);
+  coneY(s, 0, 0, 13, 2.0, 18.5, 0.25, white);
+  coneY(s, 0, 0.4, -17, 2.0, -21, 0.45, white);
+  s.box(-1.0, 1.0, 14.6, 15.4, 0.7, 1.25, dark); // ohjaamon ikkunat
+  for (const sx of [-1, 1]) {
+    s.hexa([[sx * 1.8, 3, -1.4], [sx * 1.8, -4.5, -1.4], [sx * 17.5, -10, -0.5], [sx * 17.5, -7.5, -0.5],
+      [sx * 1.8, 3, -0.8], [sx * 1.8, -4.5, -0.8], [sx * 17.5, -10, -0.25], [sx * 17.5, -7.5, -0.25]], white);
+    s.hexa([[sx * 0.8, -15, 0.6], [sx * 0.8, -19, 0.6], [sx * 6.5, -21, 0.9], [sx * 6.5, -19.3, 0.9],
+      [sx * 0.8, -15, 0.9], [sx * 0.8, -19, 0.9], [sx * 6.5, -21, 1.1], [sx * 6.5, -19.3, 1.1]], white);
+    s.cyl("y", sx * 5.8, 2.2, -2.3, 1.05, 4.2, grey, 12); // moottori
+  }
+  return s.geometry();
+}
+
+// Sivuvakaaja erikseen: se väritetään lentoyhtiön värillä.
+function planeTailModel() {
+  const s = new Shape(), w = col("#ffffff");
+  s.hexa([[-0.25, -12, 1.6], [-0.25, -19.5, 1.6], [0.25, -19.5, 1.6], [0.25, -12, 1.6],
+    [-0.15, -17.2, 8.5], [-0.15, -20.5, 8.5], [0.15, -20.5, 8.5], [0.15, -17.2, 8.5]], w);
+  return s.geometry();
+}
+
+function heliModel() {
+  const s = new Shape(), body = col("#d64541"), dark = col("#2b2f33");
+  s.cyl("y", 0, 0.5, 0, 1.3, 5, body, 14);
+  coneY(s, 0, 0, 3, 1.3, 4.6, 0.45, body);
+  s.box(-0.25, 0.25, -7.5, -2, -0.3, 0.3, body); // pyrstöpuomi
+  s.box(-0.1, 0.1, -7.9, -7.0, 0, 1.7, body);
+  s.box(-0.15, 0.15, -0.15, 0.15, 1.2, 1.9, dark);
+  s.box(-5.2, 5.2, -0.15, 0.15, 1.9, 1.98, dark); // roottori
+  s.box(-0.15, 0.15, -5.2, 5.2, 1.9, 1.98, dark);
+  for (const sx of [-1, 1]) s.box(sx * 0.85, sx * 1.0, -2, 2.5, -1.65, -1.5, dark); // jalakset
+  return s.geometry();
+}
+
+// ADS-B:n kokoluokka (category) mallin kokona.
+const PLANE_SIZE = { A1: 0.35, A2: 0.75, A3: 1, A4: 1.15, A5: 1.65, A6: 0.5, B1: 0.4, B4: 0.4, B6: 0.3 };
+
+const planeMeshes = (() => {
+  const material = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const make = (geometry) => {
+    const mesh = new THREE.InstancedMesh(geometry, material, PLANE_CAP);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    scene.add(mesh);
+    return mesh;
+  };
+  const tail = make(planeTailModel());
+  tail.setColorAt(0, new THREE.Color(PLANE_COLOR)); // instanssivärit käyttöön heti
+  return { body: make(planeBodyModel()), tail, heli: make(heliModel()) };
+})();
+
+// Pystyviiva koneesta maahan havainnollistaa korkeutta.
+const dropPos = new Float32Array(PLANE_CAP * 6);
+const dropLines = (() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(dropPos, 3).setUsage(THREE.DynamicDrawUsage));
+  const lines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+  lines.frustumCulled = false;
+  scene.add(lines);
+  return lines;
+})();
+const planeDummy = new THREE.Object3D();
+planeDummy.rotation.order = "ZXY";
+
+const place = (a) => (a ? `${a.municipality || a.name}${a.iata_code ? ` (${a.iata_code})` : ""}` : null);
+
+// Reitti haetaan kerran lentotunnusta kohden. Palauttaa null, kun tietoa haetaan tai sitä ei ole.
+function routeFor(callsign) {
+  if (!callsign) return null;
+  if (routes.has(callsign)) return routes.get(callsign) || null;
+  routes.set(callsign, null);
+  fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      const fr = j?.response?.flightroute;
+      routes.set(callsign, fr ? {
+        airline: fr.airline?.name, flight: fr.callsign_iata, from: place(fr.origin), to: place(fr.destination),
+        icaos: [fr.origin?.icao_code, fr.destination?.icao_code],
+      } : false);
+    })
+    .catch(() => routes.set(callsign, false));
+  return null;
+}
+
+async function pollPlanes() {
+  if (!planeState.url || document.hidden) return;
+  try {
+    const r = await fetch(planeState.url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`adsb.fi ${r.status}`);
+    const data = await r.json(), now = Date.now();
+    for (const a of data.aircraft ?? []) updatePlane(a, now);
+    planeState.ok = true;
+  } catch {
+    planeState.ok = false;
+  }
+}
+
+const angleDiff = (a, b) => ((((a - b) % (2 * Math.PI)) + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+
+function predictFix(f, t) {
+  const dt = Math.min(Math.max((t - f.t) / 1000, 0), 20);
+  return [f.x + f.vx * dt, f.y + f.vy * dt, f.alt + f.vz * dt];
+}
+
+function predictPlane(p, t) {
+  const q = predictFix(p.fix, t), d = Math.exp(-(t - p.errAt) / PLANE_CORRECT_MS);
+  return [q[0] + p.err[0] * d, q[1] + p.err[1] * d, q[2] + p.err[2] * d];
+}
+
+function updatePlane(a, now) {
+  const geom = typeof a.alt_geom === "number", baro = typeof a.alt_baro === "number";
+  if (a.lat == null || a.lon == null || (!geom && !baro)) return; // maassa tai ilman korkeutta
+  const id = `plane/${a.hex}`;
+  const [x, y] = toLocal(a.lon, a.lat);
+  let p = planes.get(id);
+  if (!nearRegion(x, y, PLANE_MARGIN)) { if (p) removePlane(p); return; }
+  const v = (a.gs ?? 0) * KT, track = (a.track ?? a.true_heading ?? 0) * D2R;
+  const fix = {
+    t: now - (a.seen_pos ?? 0) * 1000, x, y, track,
+    alt: geom ? a.alt_geom * FT - GEOID : a.alt_baro * FT,
+    vx: v * Math.sin(track), vy: v * Math.cos(track), vz: ((a.geom_rate ?? a.baro_rate ?? 0) * FT) / 60,
+  };
+  if (!p) {
+    p = { isPlane: true, id, hex: a.hex, fix, err: [0, 0, 0], errAt: now, heading: track, roll: 0, turn: 0, info: {} };
+    planes.set(id, p);
+  } else if (fix.t > p.fix.t) {
+    // Uusi sijainti: ero vanhan ja uuden ennusteen välillä häivytetään, jottei kone hyppää.
+    const old = predictPlane(p, now), nu = predictFix(fix, now);
+    p.err = Math.hypot(old[0] - nu[0], old[1] - nu[1]) < 2000 ? [old[0] - nu[0], old[1] - nu[1], old[2] - nu[2]] : [0, 0, 0];
+    p.errAt = now;
+    p.turn = angleDiff(track, p.fix.track) / Math.max((fix.t - p.fix.t) / 1000, 0.5);
+    p.fix = fix;
+  }
+  p.lastRx = now;
+  const callsign = (a.flight ?? "").trim();
+  const route = routeFor(callsign), airline = airlineOf(callsign);
+  // Kaupallisten reittien tietokanta voi olla vanhentunut: matalalla Espoon yllä lentävä kone on
+  // lähes aina menossa Helsinki-Vantaalle tai tulossa sieltä.
+  const uncertain = route && fix.alt < 3000 && !route.icaos.includes("EFHK");
+  p.info = {
+    callsign, reg: a.r, type: a.desc ?? a.t, category: a.category, alt: fix.alt, spd: v, vz: fix.vz,
+    airline: route?.airline ?? airline?.[0], flight: route?.flight, route: route?.from && route?.to ? `${route.from} → ${route.to}` : null, uncertain,
+  };
+  p.color = new THREE.Color(airline?.[1] ?? PLANE_COLOR);
+  p.colorHex = airline?.[1] ?? PLANE_COLOR;
+  p.label = route?.flight || callsign || a.r || a.hex.toUpperCase();
+  p.roll0 = typeof a.roll === "number" ? a.roll * D2R : null;
+}
+
+function removePlane(p) {
+  planes.delete(p.id);
+  if (selected === p) { selected = null; popup.remove(); }
+}
+
+// Koneet piirretään kaikilla zoomaustasoilla; kaukaa katsottaessa suurennettuina.
+function drawPlanes(map, ctx) {
+  const { zoom, cmx, cmy, sc, cosC, centerElev, e, W, H, now } = ctx;
+  const wall = Date.now(), kh = 1 - Math.exp(-lastDt / 400);
+  const enlarge = Math.min(14, Math.max(1, 2 ** ((14 - zoom) * 0.85)));
+  let nb = 0, nh = 0, nl = 0;
+  for (const p of planes.values()) {
+    const [x, y, alt] = predictPlane(p, wall);
+    p.x = x; p.y = y;
+    const lon = lonOf(x), lat = latOf(y), k = cosC / Math.cos(lat * D2R);
+    p.heading += angleDiff(p.fix.track, p.heading) * kh;
+    // Kallistus ilmoitetusta arvosta tai kääntymisnopeudesta (koordinoitu kaarto).
+    const rollTarget = p.roll0 ?? Math.max(-0.5, Math.min(0.5, Math.atan((Math.hypot(p.fix.vx, p.fix.vy) * p.turn) / 9.81)));
+    p.roll += (rollTarget - p.roll) * kh;
+    const pitch = Math.max(-0.25, Math.min(0.25, Math.atan2(p.fix.vz, Math.max(Math.hypot(p.fix.vx, p.fix.vy), 30))));
+    if (p.groundAt == null || now - p.groundAt > 1000) {
+      p.ground = (map.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
+      p.groundAt = now + Math.random() * 200;
+    }
+    const ground = (p.ground - centerElev) * k;
+    const wx = (mercX(lon) - cmx) / sc, wy = -(mercY(lat) - cmy) / sc;
+    const wz = Math.max((alt - centerElev) * k, ground + 2 * k);
+    const size = k * enlarge * (PLANE_SIZE[p.info.category] ?? 1);
+    planeDummy.position.set(wx, wy, wz);
+    planeDummy.rotation.set(pitch, p.roll, -p.heading);
+    planeDummy.scale.setScalar(size);
+    planeDummy.updateMatrix();
+    if (p.info.category === "A7") {
+      if (nh < PLANE_CAP) planeMeshes.heli.setMatrixAt(nh++, planeDummy.matrix);
+    } else if (nb < PLANE_CAP) {
+      planeMeshes.body.setMatrixAt(nb, planeDummy.matrix);
+      planeMeshes.tail.setMatrixAt(nb, planeDummy.matrix);
+      planeMeshes.tail.setColorAt(nb, p.color);
+      nb++;
+    }
+    if (nl < PLANE_CAP) {
+      dropPos.set([wx, wy, wz, wx, wy, ground], nl * 6);
+      nl++;
+    }
+    p.screen = toScreen(e, wx, wy, wz, W, H);
+    p.screenAt = now;
+    const top = toScreen(e, wx, wy, wz + 10 * size, W, H);
+    if (top && top[0] > -60 && top[0] < W + 60 && top[1] > -30 && top[1] < H + 60) {
+      placeLabel(p.id, p.label, p.colorHex, "vlabel plane", top[0], top[1]);
+    }
+  }
+  for (const [name, n] of [["body", nb], ["tail", nb], ["heli", nh]]) {
+    planeMeshes[name].count = n;
+    planeMeshes[name].instanceMatrix.needsUpdate = true;
+  }
+  if (planeMeshes.tail.instanceColor) planeMeshes.tail.instanceColor.needsUpdate = true;
+  dropLines.geometry.setDrawRange(0, nl * 2);
+  dropLines.geometry.attributes.position.needsUpdate = true;
+}
+
+function planeContent(p) {
+  const i = p.info, fmt = (n) => Math.round(n).toLocaleString("fi-FI");
+  const climb = Math.abs(i.vz) < 0.5 ? "vaakalento" : `${i.vz > 0 ? "nousee" : "laskeutuu"} ${Math.abs(i.vz).toFixed(1).replace(".", ",")} m/s`;
+  const rows = [
+    ["Yhtiö", i.airline],
+    ["Reitti", i.route && (i.uncertain ? `${i.route} (tieto voi olla vanhentunut)` : i.route)],
+    ["Lentotunnus", i.callsign && i.callsign !== p.label ? i.callsign : null],
+    ["Kone", [i.type, i.reg].filter(Boolean).join(", ") || null],
+    ["Korkeus", `${fmt(i.alt)} m`],
+    ["Nopeus", `${fmt(i.spd * 3.6)} km/h`],
+    ["Pystysuunta", climb],
+  ].filter(([, val]) => val);
+  return node("div", { class: "pop" },
+    node("div", { class: "kind" }, i.category === "A7" ? "Helikopteri" : "Lentokone"),
+    node("h3", {}, p.label),
+    node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
+}
+
+// ------------------------------------------------------------ maamerkit
+
+const landmarks = LANDMARKS.map((l) => {
+  const build = LANDMARK_MODELS[l.id];
+  if (!build) return null;
+  const obj = build();
+  obj.matrixAutoUpdate = false;
+  scene.add(obj);
+  return { ...l, isLandmark: true, obj, screen: null };
+}).filter(Boolean);
+
+// Maamerkit näkyvät samalta etäisyydeltä kuin 3D-rakennukset.
+function drawLandmarks(map, ctx) {
+  const { zoom, cmx, cmy, sc, cosC, e, W, H } = ctx;
+  for (const l of landmarks) {
+    l.obj.visible = zoom >= 11;
+    l.screen = null;
+    if (!l.obj.visible) continue;
+    const k = cosC / Math.cos(l.lat * D2R);
+    const wx = (mercX(l.lon) - cmx) / sc, wy = -(mercY(l.lat) - cmy) / sc;
+    const wz = (map.queryTerrainElevation([l.lon, l.lat]) ?? 0) * k;
+    l.obj.matrix.makeScale(k, k, k).setPosition(wx, wy, wz);
+    l.obj.matrixWorldNeedsUpdate = true;
+    l.screen = toScreen(e, wx, wy, wz + 40 * k, W, H);
+  }
+}
+
+function landmarkContent(l) {
+  return node("div", { class: "pop" },
+    node("div", { class: "kind" }, "Maamerkki"),
+    node("h3", {}, l.name),
+    node("table", {}, l.rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
+}
+
 let lastTick = performance.now();
 let lastRender = 0;
 let repaintTimer = null;
@@ -970,12 +1294,24 @@ function tick() {
   lastDt = dt;
   const k = 1 - Math.exp(-dt / SMOOTH_MS), wall = Date.now();
   for (const v of vehicles.values()) advance(v, wall, k);
-  if (selected?.x != null) {
-    // Maan alla kulkevan metron kohdalla ikkuna osoittaa maanpinnan kohtaan, jonka läpi juna näkyy.
-    const scr = KINDS[selected.kind].underground && selected.drawnAt > now - 500 ? selected.screen : null;
-    const n = scr ? scr.length / 2 : 0;
-    popup.setLngLat(n ? mapRef.unproject([scr[2 * (n >> 1)], scr[2 * (n >> 1) + 1]]) : [lonOf(selected.x), latOf(selected.y)]);
+  if (selected) popup.setLngLat(anchorOf(selected, now));
+}
+
+// Ikkunan kohta kartalla. Maan alla kulkevan metron, ilmassa olevan koneen ja tornin huipun kohdalla
+// ikkuna kiinnitetään maanpinnan kohtaan, jonka edessä kohde näkyy ruudulla.
+function anchorOf(sel, now) {
+  let scr = null;
+  if (sel.isLandmark) scr = sel.screen;
+  else if (sel.isPlane) scr = sel.screenAt > now - 500 ? sel.screen : null;
+  else if (KINDS[sel.kind].underground && sel.drawnAt > now - 500 && sel.screen?.length) {
+    const n = sel.screen.length / 2;
+    scr = [sel.screen[2 * (n >> 1)], sel.screen[2 * (n >> 1) + 1]];
   }
+  const own = sel.isLandmark ? [sel.lon, sel.lat] : [lonOf(sel.x), latOf(sel.y)];
+  if (!scr) return own;
+  const ll = mapRef.unproject(scr);
+  // Taivasta vasten näkyvän kohdan maanpinta voi olla kaukana; silloin käytetään kohteen omaa paikkaa.
+  return Math.abs(ll.lng - own[0]) < 0.5 && Math.abs(ll.lat - own[1]) < 0.25 ? ll : own;
 }
 
 const pts = new Float64Array(64);
@@ -1024,16 +1360,15 @@ let labelLayer = null;
 const labels = new Map();
 let frameNo = 0;
 
-function placeLabel(v, sx, sy) {
-  let el = labels.get(v.id);
+function placeLabel(id, text, color, className, sx, sy) {
+  let el = labels.get(id);
   if (!el) {
     el = document.createElement("div");
-    el.className = KINDS[v.kind].underground ? "vlabel underground" : "vlabel";
-    el.style.background = COLORS[v.kind];
+    el.className = className;
     labelLayer.append(el);
-    labels.set(v.id, el);
+    labels.set(id, el);
   }
-  const text = v.info.line ?? "";
+  if (el.style.background !== color) el.style.background = color;
   if (el.textContent !== text) el.textContent = text;
   el.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px) translate(-50%, -100%)`;
   el.hidden = false;
@@ -1043,7 +1378,7 @@ function placeLabel(v, sx, sy) {
 function hideStaleLabels() {
   for (const [id, el] of labels) {
     if (el.frame === frameNo) continue;
-    if (vehicles.has(id)) el.hidden = true;
+    if (vehicles.has(id) || planes.has(id)) el.hidden = true;
     else { el.remove(); labels.delete(id); }
   }
 }
@@ -1060,6 +1395,9 @@ function draw(gl, matrix) {
     .multiply(matT.makeTranslation(cmx, cmy, 0))
     .multiply(matS.makeScale(sc, -sc, sc));
   camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+  flatCamera.projectionMatrix.copy(camera.projectionMatrix);
+  const f = flatCamera.projectionMatrix.elements;
+  f[2] = f[6] = f[10] = f[14] = 0; // syvyys aina näkyvällä välillä
   const centerElev = map.transform.elevation ?? 0;
   const exag = map.getTerrain()?.exaggeration ?? 1;
   const tunnelZ = METRO_TUNNEL_Z * exag - centerElev; // metron raiteiden taso näkymässä
@@ -1152,21 +1490,25 @@ function draw(gl, matrix) {
         if (mid) v.screen.push(mid[0], mid[1]);
         if (i === n >> 1) {
           const top = toScreen(e, wx, wy, wz + (kind.height * scale + 1.2) * k, W, H);
-          if (top && top[0] > -60 && top[0] < W + 60 && top[1] > -30 && top[1] < H + 60) placeLabel(v, top[0], top[1]);
+          if (top && top[0] > -60 && top[0] < W + 60 && top[1] > -30 && top[1] < H + 60) {
+            placeLabel(v.id, v.info.line ?? "", COLORS[v.kind], kind.underground ? "vlabel underground" : "vlabel", top[0], top[1]);
+          }
         }
       }
       v.drawnAt = now;
     }
   }
-  labelLayer.hidden = zoom < MODEL_MINZOOM;
+  const ctx = { zoom, cmx, cmy, sc, cosC, centerElev, e, W, H, now };
+  drawPlanes(map, ctx);
+  drawLandmarks(map, ctx);
   hideStaleLabels();
   for (const mesh of Object.values(meshes)) mesh.instanceMatrix.needsUpdate = true;
 }
 
-function renderScene(gl, sc) {
+function renderScene(gl, sc, cam = camera) {
   renderer.resetState();
   renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-  renderer.render(sc, camera);
+  renderer.render(sc, cam);
 }
 
 // ------------------------------------------------------------ yleiskuva, valinta ja tilastot
@@ -1190,6 +1532,8 @@ function delayText(dl) {
 }
 
 function popupContent(v) {
+  if (v.isPlane) return planeContent(v);
+  if (v.isLandmark) return landmarkContent(v);
   const kind = KINDS[v.kind], i = v.info;
   const rows = [
     ["Nopeus", `${Math.round((i.spd ?? 0) * 3.6)} km/h`],
@@ -1221,22 +1565,34 @@ function pick(point) {
       if (d < bestD) { bestD = d; best = v; }
     }
   }
+  for (const p of planes.values()) {
+    if (!p.screen || p.screenAt < recent) continue;
+    const d = (p.screen[0] - point.x) ** 2 + (p.screen[1] - point.y) ** 2;
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  for (const l of landmarks) {
+    if (!l.screen) continue;
+    const d = ((l.screen[0] - point.x) ** 2 + (l.screen[1] - point.y) ** 2) / 4; // iso kohde: väljempi osuma
+    if (d < bestD) { bestD = d; best = l; }
+  }
   return best;
 }
 
 function stats() {
   const counts = Object.fromEntries(TRANSIT_GROUPS.map(([id]) => [id, 0]));
   for (const v of vehicles.values()) if (v.x != null) counts[KINDS[v.kind].group]++;
+  counts.lentokoneet = planes.size;
   let message = "Sijainnit päivittyvät sekunnin välein. Lähennä karttaa, niin näet ajoneuvot 3D-malleina.";
   if (document.hidden) message = "";
   else if (hfp.client && !hfp.ok) message = "Yhdistetään HSL:n reaaliaikapalveluun…";
   else if (rail.client && !rail.ok) message = "Kaukojunien sijainnit (Digitraffic) eivät juuri nyt päivity.";
+  else if (!planeState.ok) message = "Lentokoneiden sijainnit (adsb.fi) eivät juuri nyt päivity.";
   return { counts, message };
 }
 
 // ------------------------------------------------------------ julkinen rajapinta
 
-export async function createTransit(map, { boundaryUrl, railsUrl, beforeLayer, undergroundBeforeLayer }) {
+export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
   await loadRegion(boundaryUrl);
   // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
@@ -1257,13 +1613,14 @@ export async function createTransit(map, { boundaryUrl, railsUrl, beforeLayer, u
       lastRender = performance.now();
       tick();
       draw(gl, matrix);
-      renderScene(gl, undergroundScene);
+      renderScene(gl, undergroundScene, flatCamera);
     },
   }, undergroundBeforeLayer);
   map.addLayer({
     id: "joukkoliikenne", type: "custom", renderingMode: "3d", onAdd,
     render(gl) {
       renderScene(gl, scene);
+      renderScene(gl, overlayScene, flatCamera);
       // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti. Kaukaa katsottaessa
       // liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
       if (!Object.values(groupOn).some(Boolean)) return;
@@ -1286,15 +1643,19 @@ export async function createTransit(map, { boundaryUrl, railsUrl, beforeLayer, u
     for (const v of vehicles.values()) {
       if (wall - v.lastRx > (KINDS[v.kind].rail != null ? RAIL_TIMEOUT : HFP_TIMEOUT)) removeVehicle(v);
     }
+    for (const p of planes.values()) if (wall - p.lastRx > PLANE_TIMEOUT) removePlane(p);
     if (selected) popup.setDOMContent(popupContent(selected));
     const s = stats();
     for (const fn of listeners) fn(s);
   }, 1000);
 
   syncConnections();
+  planeState.url = planesUrl;
+  pollPlanes();
+  setInterval(pollPlanes, PLANE_POLL);
 
   return {
-    vehicles, scene, // selaimen konsolia varten
+    vehicles, planes, scene, // selaimen konsolia varten
     setGroup(id, on) {
       groupOn[id] = on;
       if (selected && !groupOn[KINDS[selected.kind].group]) popup.remove();
@@ -1302,12 +1663,12 @@ export async function createTransit(map, { boundaryUrl, railsUrl, beforeLayer, u
       map.triggerRepaint();
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },
-    // Palauttaa true, jos klikkaus osui ajoneuvoon (ja sen tiedot avattiin).
+    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai maamerkkiin (ja tiedot avattiin).
     click(point) {
       const v = pick(point);
       if (!v) { popup.remove(); return false; }
       // addTo sulkee aiemman ikkunan (ja nollaa valinnan), joten valinta asetetaan vasta sen jälkeen.
-      popup.setLngLat([lonOf(v.x), latOf(v.y)]).setDOMContent(popupContent(v)).addTo(map);
+      popup.setLngLat(anchorOf(v, performance.now())).setDOMContent(popupContent(v)).addTo(map);
       selected = v;
       return true;
     },

@@ -1,6 +1,6 @@
 import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
-  LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
+  LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
 
@@ -39,7 +39,7 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 });
 
 const state = {
-  ortho: false, // ilmakuva on valinnainen
+  ortho: true, // ilmakuva on oletuspohja, mutta sen voi ottaa pois
   orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
@@ -122,6 +122,7 @@ function buildStyle() {
   layers.push(...overlay.filter((l) => order[l.type] < 4));
   layers.push({
     id: "rakennukset", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
+    filter: buildingFilter(),
     paint: {
       "fill-extrusion-color": buildingColorExpr(state.buildingColor),
       "fill-extrusion-height": ["get", "korkeus"],
@@ -206,11 +207,18 @@ function setOrthoYear(index) {
 
 // Kun ilmakuva on näkyvissä, rakennuksista näytetään ne, jotka olivat valmiina ilmakuvan
 // vuonna. Uusimmalla vuodella ja ilman ilmakuvaa näytetään kaikki; vanhemmilla vuosilla
-// rakennukset, joiden valmistumisvuotta ei tiedetä, jätetään pois.
-function applyTimeFilter() {
+// rakennukset, joiden valmistumisvuotta ei tiedetä, jätetään pois. Maamerkkien rakennukset
+// piilotetaan aina, koska niiden tilalla on oma 3D-malli.
+function buildingFilter() {
   const year = ORTHO_YEARS[state.orthoIndex][0];
   const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
-  map.setFilter("rakennukset", !state.ortho || year >= latest ? null : ["all", ["has", "vuosi"], ["<=", ["get", "vuosi"], year]]);
+  const filter = ["all", ...LANDMARKS.map((l) => ["!=", ["get", "tunnus"], l.building])];
+  if (state.ortho && year < latest) filter.push(["has", "vuosi"], ["<=", ["get", "vuosi"], year]);
+  return filter;
+}
+
+function applyTimeFilter() {
+  map.setFilter("rakennukset", buildingFilter());
 }
 
 function setOverlayOpacity(v) {
@@ -305,9 +313,11 @@ async function initTransit() {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
     transit = await createTransit(map, {
       boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json", undergroundBeforeLayer: "rakennukset",
+      // adsb.fi ei salli selaimen suoria hakuja, joten haku kulkee välityspalvelimen kautta (server.py, netlify.toml).
+      planesUrl: new URL("proxy/adsb/lat/60.21/lon/24.66/dist/25", BASE).href,
     });
     window.espooTransit = transit;
-    // Joukkoliikenne näkyy aina; paneelissa vain ajoneuvojen määrät.
+    // Liikenne näkyy aina; paneelissa vain ajoneuvojen määrät.
     const counts = {};
     box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("div", { class: "stat" },
       el("span", { class: "swatch", style: `background:${color}` }),

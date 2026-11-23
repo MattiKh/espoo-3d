@@ -2,20 +2,19 @@
 
 Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
 kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteistä.
-Espoon bussit, raitiovaunut, junat ja metro liikkuvat kartalla aina reaaliajassa
-3D-malleina.
+Espoon bussit, raitiovaunut, junat ja metro sekä Espoon yllä lentävät koneet liikkuvat
+kartalla aina reaaliajassa 3D-malleina.
 
 ## Paneeli
 
-- Joukkoliikenne näkyy aina; paneelissa näkyy ajoneuvojen määrä lajeittain.
+- Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
 - Aineistoja on yksitoista: asemakaavan käyttötarkoitukset, vireillä olevat kaavat,
   ajantasa-asemakaava, maankäyttökartta, vesialueet, asukkaat 250 m ruuduissa (3D),
   autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat sekä kantakartan
-  maastotiedot. Oletuksena päällä ovat maankäyttökartta, vesialueet ja kantakartan
-  maastotiedot. Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
-- Ilmakuva on valinnainen ja oletuksena pois. Kun se on päällä, voi valita vuoden
-  (2026, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin
-  valmiina.
+  maastotiedot. Oletuksena päällä on vesialueet. Määrittelyt ovat tiedostossa
+  `public/layers.js` (`LAYERS`).
+- Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
+  (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
 
 ## Käynnistys
 
@@ -45,9 +44,10 @@ valmiit tiilet ovat.
 ## Julkaisu (Netlify)
 
 Netlify julkaisee `public/`-kansion sellaisenaan aina, kun GitHubin `main`-haaraan
-tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole. HSY:n
-karttakuville on valmiina välitysreitti `/proxy/hsy/wms` (myös `server.py`), mutta niitä
-ei tällä hetkellä käytetä.
+tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole.
+Lentokoneiden sijainnit (adsb.fi) välitetään reitin `/proxy/adsb/...` kautta, koska palvelu ei
+salli selaimen suoria hakuja; `server.py` tekee saman paikallisesti. HSY:n karttakuville on
+valmiina välitysreitti `/proxy/hsy/wms`, mutta niitä ei tällä hetkellä käytetä.
 
 Vektoritiilet ovat gzip-pakattuja, ja selain purkaa ne itse (`app.js`), joten
 palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
@@ -66,6 +66,9 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
+| Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
+| Lentojen reitit ja lentoyhtiöt | adsbdb.com (lentotunnuksen mukaan) |
+| Haukilahden vesitornin muoto | Wikipedia (Haukilahti water tower), Docomomo Suomi |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
@@ -112,7 +115,8 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   vuorolla. Ne näytetään yhtenä pitkänä junana, jonka keula on edimmäisen yksikön kohdalla.
 - HSL:n lähijunat tulevat HFP-syötteestä, joten Digitrafficista otetaan vain kauko- ja tavarajunat.
 - Metro kulkee Espoossa tunnelissa. Junat piirretään läpikuultavina tunneliputkien sisään
-  yhdelle tasolle (−15 m N2000) maanpinnan muodoista riippumatta. Metro ja tunnelit piirretään ennen rakennuksia ilman syvyystestiä, joten ne
+  yhdelle tasolle (−15 m N2000) maanpinnan muodoista riippumatta. Ne näkyvät myös suoraan
+  ylhäältä katsottaessa, koska maanalaiset kohteet piirretään ilman kartan syvyysrajausta. Metro ja tunnelit piirretään ennen rakennuksia ilman syvyystestiä, joten ne
   näkyvät maaston läpi, mutta rakennukset peittävät ne.
 - Metron sijainti tulee kulunvalvonnasta, ja se päivittyy noin 50 metrin askelin 2,5–3 sekunnin
   välein; välissä syöte toistaa edellistä sijaintia. Toistot ohitetaan (liikkuva juna samassa
@@ -124,6 +128,24 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   ruudussa ajoneuvon mukana.
 - Lähikuvassa tilataan vain näkymän ympäristön HFP-ruudut. Taustalle jääneen välilehden
   yhteydet suljetaan 30 sekunnin kuluttua.
+
+## Lentokoneet
+
+Koneet haetaan neljän sekunnin välein 25 meripeninkulman säteeltä Espoon keskeltä, ja kartalle
+otetaan ne, jotka ovat Espoon yllä tai enintään viiden kilometrin päässä sen rajasta. Kone
+näytetään ilmoittamassaan korkeudessa (GNSS-korkeus geoidiin korjattuna tai painekorkeus), ja
+pystyviiva näyttää kohdan maassa. Hakujen välissä konetta liikutetaan nopeuden, suunnan ja
+nousunopeuden mukaan, ja uuden sijainnin tuoma korjaus häivytetään pehmeästi. Kaukaa katsottaessa
+koneet näytetään suurennettuina. Reitit tulevat lentotunnuksen perusteella tietokannasta, joka
+voi olla vanhentunut; jos matalalla lentävän koneen reitissä ei ole Helsinki-Vantaata, reitti
+merkitään epävarmaksi.
+
+## Maamerkit
+
+Rakennusaineistossa Haukilahden vesitorni on pelkkä 45 metrin varsi, koska pohjana on vain varren
+pinta-ala. Torni piilotetaan 3D-rakennuksista ja piirretään omana mallinaan (`public/landmarks.js`):
+keskivarsi ja kuusi pilaria, kalottimainen "lentävä lautanen" (halkaisija 45 m), ravintolakerros
+ja kupoli. Lautasen paksuutta ei ole julkaistu, joten se on arvio.
 
 ## Sillat
 
@@ -139,11 +161,12 @@ Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 
 ## Rakenne
 
-- `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää HSY:n WMS-pyynnöt
+- `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
 - `netlify.toml`: julkaisuasetukset
 - `scripts/build_data.py`: aineistojen lataus ja muunnos
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
-- `public/transit.js`: reaaliaikaiset ajoneuvot, liikkeen tasoitus ja 3D-mallit (three.js)
+- `public/transit.js`: reaaliaikaiset ajoneuvot ja lentokoneet, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
+- `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)

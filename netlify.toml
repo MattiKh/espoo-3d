@@ -11,3 +11,11 @@
   to = "https://kartta.hsy.fi/geoserver/wms"
   status = 200
   force = true
+
+# Lentokoneiden sijainnit (adsb.fi) eivät myöskään salli selaimen suoria hakuja.
+# Vastaa server.py:n reittiä /proxy/adsb/...
+[[redirects]]
+  from = "/proxy/adsb/*"
+  to = "https://opendata.adsb.fi/api/v2/:splat"
+  status = 200
+  force = true

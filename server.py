@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Paikallinen palvelin Espoo 3D -kartalle.
 
-Jakaa public/-kansion ja välittää HSY:n WMS-kuvat, koska HSY:n palvelin ei salli
-selaimen suoria hakuja muista osoitteista (CORS).
+Jakaa public/-kansion ja välittää HSY:n WMS-kuvat ja adsb.fi:n lentokonesijainnit, koska
+näiden palvelimet eivät salli selaimen suoria hakuja muista osoitteista (CORS).
 
 Käyttö:  python3 server.py [--port 8765]
 """
@@ -15,6 +15,8 @@ import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
 PROXIES = {"/proxy/hsy/wms": "https://kartta.hsy.fi/geoserver/wms"}
+# Polun loppuosa siirtyy mukana: /proxy/adsb/lat/60.2/lon/24.7/dist/25 → .../api/v2/lat/60.2/...
+PREFIX_PROXIES = {"/proxy/adsb/": "https://opendata.adsb.fi/api/v2/"}
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -28,9 +30,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path in PROXIES:
             return self.proxy(PROXIES[path] + "?" + query)
+        for prefix, target in PREFIX_PROXIES.items():
+            if path.startswith(prefix):
+                # Lentokoneiden sijainnit ovat reaaliaikaisia, joten niitä ei tallenneta välimuistiin.
+                return self.proxy(target + path[len(prefix):], cache="no-store")
         return super().do_GET()
 
-    def proxy(self, url):
+    def proxy(self, url, cache="max-age=86400"):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "espoo3d-local-proxy/1.0"})
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -38,7 +44,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(r.status)
                 self.send_header("Content-Type", r.headers.get("Content-Type", "application/octet-stream"))
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "max-age=86400")
+                self.send_header("Cache-Control", cache)
                 self.end_headers()
                 self.wfile.write(body)
         except urllib.error.HTTPError as e:
