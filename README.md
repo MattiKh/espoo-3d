@@ -92,7 +92,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Otaniemen vesitornin muoto | Otaniemen vesitornin rakennushistoriaselvitys (ark-byroo 2017), Espoon LOD2-malli |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
 | Sähköautojen latauspaikat ja latauspisteiden tila | Fintraffic / Digitraffic AFIR (REST, CC BY 4.0) |
-| Pysäköintialueet, -ruudut ja tiet latauspaikkojen ympärillä | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Latausasemien sijainnit, pysäköintialueet, -ruudut ja tiet latauspaikkojen ympärillä | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -206,7 +206,14 @@ Operaattori kertoo vain latauspisteen tilan, ei auton paikkaa, joten autot sijoi
 latauspaikan ympärille rinnakkain. `build_data.py lataus` laskee jokaiselle latauspaikalle
 valmiiksi pysäköintiruudut (`public/data/lataus.json`):
 
-- Ruudut sijoitetaan ensisijaisesti OpenStreetMapin pysäköintiruutuihin, sitten pysäköintialueille
+- Operaattorin ilmoittama sijainti on joskus kaupan tai osoitteen kohdalla, jopa yli 100 metrin
+  päässä latauspisteistä (esim. K-Market Maarinsolmu 125 m). Siksi latauspaikan sijainniksi
+  otetaan OpenStreetMapiin kartoitettu latausasema, jos se vastaa latauspaikkaa: enintään 300
+  metrin päässä ja kaksi perustetta täsmää (nimi, merkki tai operaattori, latauspisteiden määrä),
+  tai yksi peruste 100 metriin asti. Eri merkin asema hylätään. Vastaava asema löytyy 46
+  latauspaikalle, ja 34 sijaintia siirtyy yli 10 metriä (14 yli 50 metriä). Jos asema on
+  kartoitettu alueena, autot sijoitetaan ensisijaisesti sen sisään.
+- Ruudut sijoitetaan muuten ensisijaisesti OpenStreetMapin pysäköintiruutuihin, sitten pysäköintialueille
   riveihin latauspaikkaa lähimmän reunan viereen (autot 2,7 metrin välein, keula reunaa kohti) ja
   vasta viimeiseksi latauspaikan kohdalle lähimmän tien suuntaisesti.
 - Auto ei saa olla tiellä eikä kevyen liikenteen väylällä: sen etäisyys väylän keskiviivaan on

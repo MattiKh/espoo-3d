@@ -11,9 +11,11 @@ sillat.json, raiteet.json ja lataus.json.
 """
 import collections
 import concurrent.futures as cf
+import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1355,6 +1357,21 @@ ROAD_HALF = {
 }
 PLUGS = {"IEC_62196_T2": "Type 2", "IEC_62196_T2_COMBO": "CCS", "CHADEMO": "CHAdeMO", "DOMESTIC_F": "Schuko",
          "IEC_62196_T1": "Type 1", "IEC_62196_T1_COMBO": "CCS1", "TESLA_S": "Tesla", "TESLA_R": "Tesla", "MCS": "MCS"}
+# Latausmerkit nimen, operaattorin, merkin tai verkon tekstistä (AFIR ja OpenStreetMap kirjoittavat
+# ne eri tavoin). Virta on monen merkin taustajärjestelmä, joten se ei yksin erota merkkejä.
+CHARGE_BRANDS = [
+    ("virta", "virta"), ("k auto", "k"), ("k-lataus", "k"), ("k lataus", "k"), ("kesko", "k"), ("k-market", "k"),
+    ("k-supermarket", "k"), ("k-citymarket", "k"), ("k-rauta", "k"), ("plugit", "plugit"), ("aimo", "aimo"),
+    ("abc", "abc"), ("s-market", "abc"), ("prisma", "abc"), ("alepa", "abc"), ("lidl", "lidl"), ("eparking", "eparking"),
+    ("evenli", "evenli"), ("helen", "helen"), ("tesla", "tesla"), ("st1", "st1"), ("recharge", "recharge"),
+    ("fortum", "recharge"), ("neste", "neste"), ("wattery", "wattery"), ("faast", "faast"), ("porsche", "porsche"),
+    ("ionity", "ionity"), ("allego", "allego"),
+]
+# Nimen sanat, jotka eivät erota latauspaikkoja toisistaan.
+CHARGE_STOP = {"lataus", "latausasema", "latauspiste", "charging", "charge", "station", "espoo", "finland", "oy", "ab", "oyj",
+               "ltd", "the", "market", "supermarket", "citymarket", "kauppakeskus", "pysäköinti", "parkki", "parking",
+               "sähköauto", "auto", "areena"}
+STATION_REACH = 300  # m: OpenStreetMapin latausasema enintään näin kaukana operaattorin sijainnista
 
 
 def local_xy(lon, lat):
@@ -1368,11 +1385,14 @@ def local_lonlat(x, y):
 
 def overpass_post(query, dest, timeout=360):
     """Pitkä Overpass-kysely POST-pyyntönä välimuistiin. Ruuhkaisen palvelimen tilalla
-    kokeillaan seuraavaa."""
+    kokeillaan seuraavaa. Varapalvelinten aineisto voi olla kuukausia vanha (esim. puolet
+    pysäköintiruuduista puuttui), joten yli viikon vanha vastaus kelpaa vain, jos tuoreempaa ei saada."""
     if os.path.exists(dest) and os.path.getsize(dest) > 0:
         return dest
     body = urllib.parse.urlencode({"data": query}).encode()
-    for attempt in range(2):
+    week_ago = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7 * 86400))
+    stale = None
+    for attempt in range(3):
         for url in OVERPASS_MIRRORS:
             try:
                 try:
@@ -1388,14 +1408,26 @@ def overpass_post(query, dest, timeout=360):
                 parsed = json.loads(data)  # ruuhkainen palvelin vastaa HTML-sivulla
                 if "runtime error" in parsed.get("remark", ""):
                     raise RuntimeError(parsed["remark"][:200])
-                with open(dest + ".part", "wb") as fh:
-                    fh.write(data)
-                os.replace(dest + ".part", dest)
-                return dest
+                base = parsed.get("osm3s", {}).get("timestamp_osm_base", "")
+                if base < week_ago:
+                    log(f"  Overpass {url.split('/')[2]}: aineisto {base[:10]}, haetaan tuoreempaa")
+                    if stale is None or base > stale[0]:
+                        stale = (base, data)
+                    continue
+                stale = (base, data)
+                break
             except Exception as e:
                 log(f"  Overpass {url.split('/')[2]}: {str(e)[:120]}")
-        time.sleep(20)
-    raise RuntimeError("Overpass-kysely epäonnistui")
+        else:
+            time.sleep(30)
+            continue
+        break
+    if stale is None:
+        raise RuntimeError("Overpass-kysely epäonnistui")
+    with open(dest + ".part", "wb") as fh:
+        fh.write(stale[1])
+    os.replace(dest + ".part", dest)
+    return dest
 
 
 def join_rings(lines):
@@ -1609,12 +1641,15 @@ def grid_slots(anchor, rings, u, obst, penalty, kind):
     return out
 
 
-def pool_candidates(anchor, env, obst, own=None):
+def pool_candidates(anchor, env, obst, own=None, area=None):
     """Latauspaikan ehdokasruudut paremmuusjärjestyksessä: latauspisteen oma sijainti,
-    OpenStreetMapin pysäköintiruudut, ruudut pysäköintialueilla ja varalla rivit
-    latauspaikan kohdalla lähimmän tien suuntaisesti."""
+    ruudut latausaseman alueella (area, jos asema on kartoitettu alueena), OpenStreetMapin
+    pysäköintiruudut, ruudut pysäköintialueilla ja varalla rivit latauspaikan kohdalla lähimmän
+    tien suuntaisesti."""
     ax, ay = anchor
     cands = [(-100, own, "oma")] if own else []
+    for u in ring_dirs(area[0], anchor) if area else ():
+        cands += grid_slots(anchor, area, u, obst, -40, "asema")
     for cx, cy, hx, hy, charging in env["stalls"]:
         d = math.hypot(cx - ax, cy - ay)
         if d > SLOT_REACH:
@@ -1652,7 +1687,9 @@ def charging_osm(points):
         f'relation(around:{r},{lat:.6f},{lon:.6f})["amenity"="parking"];'
         f'node(around:{r},{lat:.6f},{lon:.6f})["amenity"="parking_entrance"];'
         for lon, lat in sorted(set(points))) + ");out tags geom;"
-    with open(overpass_post(query, os.path.join(CACHE, "lataus_osm.json")), encoding="utf-8") as fh:
+    # Välimuistin nimessä on kyselyn tiiviste, jotta muuttuneet latauspaikat haetaan uudelleen.
+    dest = os.path.join(CACHE, f"lataus_osm_{hashlib.md5(query.encode()).hexdigest()[:10]}.json")
+    with open(overpass_post(query, dest), encoding="utf-8") as fh:
         elements = json.load(fh)["elements"]
     obst = SlotObstacles()
     env = {"roads": [], "parking": [], "stalls": [], "entrances": []}
@@ -1691,6 +1728,83 @@ def charging_osm(points):
     return env, obst
 
 
+def charge_brands(*texts):
+    t = " ".join(x.lower() for x in texts if x)
+    return {b for key, b in CHARGE_BRANDS if key in t}
+
+
+def charge_words(*texts):
+    return {w for x in texts if x for w in re.findall(r"[0-9a-zåäö]+", x.lower()) if len(w) >= 4 and w not in CHARGE_STOP}
+
+
+def charging_stations():
+    """OpenStreetMapin latausasemat Espoon alueelta: sijainti, alue (jos asema on kartoitettu
+    alueena) ja tägit."""
+    lon0, lat0, lon1, lat1 = ESPOO_LONLAT
+    box = f"{lat0},{lon0},{lat1},{lon1}"
+    query = f'[out:json][timeout:180];(node["amenity"="charging_station"]({box});way["amenity"="charging_station"]({box}););out tags geom;'
+    with open(overpass_post(query, os.path.join(CACHE, "latausasemat_osm.json")), encoding="utf-8") as fh:
+        elements = json.load(fh)["elements"]
+    stations = []
+    for el in elements:
+        if el["type"] == "node":
+            stations.append({"lon": el["lon"], "lat": el["lat"], "ring": None, "tags": el.get("tags", {})})
+        elif el.get("geometry"):
+            pts = [(q["lon"], q["lat"]) for q in el["geometry"]]
+            closed = len(pts) >= 4 and pts[0] == pts[-1]
+            body = pts[:-1] if closed else pts
+            stations.append({"lon": sum(q[0] for q in body) / len(body), "lat": sum(q[1] for q in body) / len(body),
+                             "ring": pts if closed else None, "tags": el.get("tags", {})})
+    return stations
+
+
+def match_stations(locs, stations):
+    """Latauspaikkojen vastineet OpenStreetMapin latausasemista. Operaattorin ilmoittama sijainti on
+    joskus kaupan tai osoitteen kohdalla, jopa satojen metrien päässä latauspisteistä (esim.
+    K-Market Maarinsolmu 125 m), kun taas OpenStreetMapissa asema on kartoitettu pisteiden kohdalle.
+
+    Asema vastaa latauspaikkaa, kun se on enintään 300 metrin päässä ja ainakin kaksi seuraavista
+    täsmää: nimi (latauspaikan nimen erottavat sanat), merkki tai operaattori, latauspisteiden
+    määrä. Yksi peruste riittää 100 metriin asti. Virta on monen merkin taustajärjestelmä, joten se
+    on vain puolikas peruste ja yksinään riittää 60 metriin. Eri merkki (esim. St1 ja Lidl) hylkää
+    aseman, ja likimääräiseksi merkittyjä asemia ei käytetä. Kukin asema vastaa vain yhtä
+    latauspaikkaa, ellei nimi täsmää kaikille. Palauttaa {latauspaikan indeksi: (aseman indeksi, etäisyys m)}."""
+    pairs = []
+    for i, f in enumerate(locs):
+        p = f["properties"]
+        name, op = p.get("name") or "", ((p.get("operator") or {}).get("details") or {}).get("name") or ""
+        a_brands, a_words = charge_brands(name, op), charge_words(name or (p.get("address") or {}).get("street"))
+        lx, ly = local_xy(*f["geometry"]["coordinates"][:2])
+        for j, s in enumerate(stations):
+            t = s["tags"]
+            sx, sy = local_xy(s["lon"], s["lat"])
+            d = math.hypot(sx - lx, sy - ly)
+            if d > STATION_REACH or t.get("accuracy") == "approximate":
+                continue
+            own = charge_brands(t.get("name"), t.get("operator"), t.get("brand")) - {"virta"}
+            o_brands = charge_brands(t.get("name"), t.get("operator"), t.get("brand"), t.get("network"))
+            a_own = a_brands - {"virta"}
+            # Eri merkki; Virran kautta ilmoitettu paikka ei ole toisen merkin asema, ellei asema ole Virran verkossa.
+            if own and (not own & a_own if a_own else "virta" in a_brands and "virta" not in o_brands):
+                continue
+            name_hit = bool(a_words) and len(a_words & charge_words(t.get("name"), t.get("addr:street"))) >= 0.75 * len(a_words)
+            brand_hit = bool((a_brands - {"virta"}) & o_brands)
+            virta_hit = "virta" in a_brands & o_brands
+            cap = t.get("capacity", "")
+            cap_hit = cap.isdigit() and abs(int(cap) - len(p["evses"])) <= max(1, 0.3 * len(p["evses"]))
+            strength = name_hit + brand_hit + cap_hit + (0.5 if virta_hit and not brand_hit else 0)
+            limit = STATION_REACH if strength >= 2 else 100 if name_hit or brand_hit else 60 if virta_hit else 0
+            if d <= limit:
+                pairs.append((-strength, d, i, j, name_hit))
+    match, named = {}, {}
+    for _, d, i, j, name_hit in sorted(pairs):
+        if i in match or (j in named and not (named[j] and name_hit)):
+            continue
+        match[i] = (j, d)
+        named[j] = named.get(j, True) and name_hit
+    return match
+
+
 def charging_buildings(obst, points):
     """Rakennusten pohjat latauspaikkojen ympäriltä (samat kuin kartan 3D-rakennukset)."""
     near = set()
@@ -1713,9 +1827,11 @@ def build_charging():
     """Sähköautojen latauspaikat ja pysäköintiruudut latauksessa oleville autoille.
 
     Latauspaikat ja latauspisteet tulevat Fintrafficin AFIR-aineistosta (Digitraffic); selain
-    hakee pisteiden tilan minuutin välein. Jokaiselle latauspaikalle lasketaan rinnakkaiset
-    pysäköintiruudut, jotka eivät ole tiellä eivätkä rakennuksen sisällä: ensisijaisesti
-    OpenStreetMapin pysäköintiruutuihin tai -alueille, muuten latauspaikan kohdalle tien viereen.
+    hakee pisteiden tilan minuutin välein. Latauspaikan sijainniksi otetaan vastaava
+    OpenStreetMapin latausasema, jos sellainen löytyy (match_stations). Jokaiselle latauspaikalle
+    lasketaan rinnakkaiset pysäköintiruudut, jotka eivät ole tiellä eivätkä rakennuksen sisällä:
+    ensisijaisesti latausaseman alueelle, OpenStreetMapin pysäköintiruutuihin tai -alueille,
+    muuten latauspaikan kohdalle tien viereen.
     Pysäköintilaitoksen latauspaikan autot sijoitetaan sisäänkäynnin luo. Latauspisteet, joilla on
     oma, muista erillinen sijainti, saavat ruutunsa sen ympäriltä (pooli). Ruudut jaetaan
     paikkojen kesken vuorotellen, jotta vierekkäisillä paikoilla kummallakin on lähimmät ruutunsa.
@@ -1730,14 +1846,29 @@ def build_charging():
         locs = [f for f in json.load(fh)["features"]
                 if any(point_in_polygon(*f["geometry"]["coordinates"][:2], poly) for poly in region)]
     log(f"  {len(locs)} latauspaikkaa, {sum(len(f['properties']['evses']) for f in locs)} latauspistettä")
+    stations = charging_stations()
+    # Alle 10 metrin ero ei muuta sijoittelua, joten silloin pidetään operaattorin sijainti.
+    match = {i: stations[j] for i, (j, d) in match_stations(locs, stations).items() if d > 10}
+    moved = sorted(math.hypot(*(a - b for a, b in zip(local_xy(s["lon"], s["lat"]), local_xy(*locs[i]["geometry"]["coordinates"][:2]))))
+                   for i, s in match.items())
+    log(f"  OpenStreetMapin latausasemista korjattu {len(moved)} sijaintia (yli 50 m: {sum(d > 50 for d in moved)}, "
+        f"suurin {max(moved, default=0):.0f} m)")
+    # Ympäristö haetaan latauspaikkojen ympäriltä (CHARGE_OSM_REACH). Se kattaa korjatun sijainnin
+    # ruudut, jos siirto on alle 150 m; kauemmas siirtyneen aseman ympäristö haetaan lisäksi.
     points = [tuple(f["geometry"]["coordinates"][:2]) for f in locs]
+    points += [(s["lon"], s["lat"]) for i, s in match.items()
+               if math.hypot(*(a - b for a, b in zip(local_xy(s["lon"], s["lat"]), local_xy(*points[i])))) > CHARGE_OSM_REACH - SLOT_REACH - 10]
     env, obst = charging_osm(points)
     charging_buildings(obst, points)
 
     pools, sites = [], []
-    for f in locs:
+    for i, f in enumerate(locs):
         p = f["properties"]
         lx, ly = local_xy(*f["geometry"]["coordinates"][:2])
+        station, area = match.get(i), None
+        if station:
+            lx, ly = local_xy(station["lon"], station["lat"])
+            area = [[local_xy(*q) for q in station["ring"]]] if station["ring"] else None
         anchor = (lx, ly)
         if obst.in_building(lx, ly) or p.get("parkingType") == "PARKING_GARAGE":
             ent = min(env["entrances"], key=lambda q: math.hypot(q[0] - lx, q[1] - ly), default=None)
@@ -1746,7 +1877,8 @@ def build_charging():
         groups = {}
         for e in sorted(p["evses"], key=lambda e: (e.get("physicalReference") or "", e["id"])):
             g, key = e.get("geometry"), None
-            if isinstance(g, dict) and g.get("coordinates"):
+            # Korjatun latauspaikan pisteiden omat sijainnit ovat yleensä samaa virheellistä paikkaa.
+            if not station and isinstance(g, dict) and g.get("coordinates"):
                 qx, qy = local_xy(*g["coordinates"][:2])
                 if math.hypot(qx - lx, qy - ly) > 3:
                     key = (round(qx * 2) / 2, round(qy * 2) / 2)
@@ -1762,7 +1894,7 @@ def build_charging():
                     hx, hy = stall[2], stall[3]
                 if obst.free((key[0], key[1], hx, hy), cars=False):
                     own = (key[0], key[1], hx, hy)
-            pool["cands"], pool["next"] = pool_candidates(pool["anchor"], env, obst, own), 0
+            pool["cands"], pool["next"] = pool_candidates(pool["anchor"], env, obst, own, area if key is None else None), 0
             site.append(pool)
             pools.append(pool)
         sites.append((f, site))
