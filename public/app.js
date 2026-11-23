@@ -172,7 +172,12 @@ const map = new maplibregl.Map({
   maxPitch: 80,
   hash: true,
   maxBounds: [[23.9, 59.8], [25.4, 60.6]],
-  attributionControl: { compact: true },
+  attributionControl: {
+    compact: true,
+    customAttribution: '<a href="https://www.hsl.fi/avoindata" target="_blank" rel="noopener">HSL</a>, '
+      + '<a href="https://www.digitraffic.fi" target="_blank" rel="noopener">Fintraffic / digitraffic.fi</a> (CC BY 4.0)'
+      + ' · Metroradat © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
+  },
   antialias: true, // 3D-ajoneuvojen reunat
 });
 window.espooMap = map; // selaimen konsolia varten
@@ -186,7 +191,10 @@ map.on("load", () => {
 });
 
 const busy = document.getElementById("busy");
+// Ajoneuvojen vuoksi kartta piirtyy jatkuvasti, eikä idle-tapahtuma tule, joten latauksen
+// päättyminen tarkistetaan tiilistä.
 map.on("dataloading", () => busy.classList.add("on"));
+map.on("data", () => { if (map.areTilesLoaded()) busy.classList.remove("on"); });
 map.on("idle", () => busy.classList.remove("on"));
 
 // ------------------------------------------------------------ paneeli
@@ -336,7 +344,10 @@ async function initTransit() {
   const status = document.getElementById("transit-status");
   try {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
-    transit = await createTransit(map, { boundaryUrl: "data/espoo_raja.geojson", beforeLayer: "kaupunginosat_nimet" });
+    transit = await createTransit(map, {
+      boundaryUrl: "data/espoo_raja.geojson", metroUrl: "data/metro.json",
+      beforeLayer: "kaupunginosat_nimet", undergroundBeforeLayer: "rakennukset",
+    });
     window.espooTransit = transit;
     const counts = {};
     box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("label", { class: "check" },

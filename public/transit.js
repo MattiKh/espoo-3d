@@ -23,9 +23,11 @@ const REGION_MARGIN = 300; // m: ajoneuvot näkyvät vielä näin kaukana Espoon
 const MODEL_MINZOOM = 12.5; // tätä kauempaa ajoneuvot näytetään vain pisteinä
 const MAX_ENLARGE = 2; // mallit näytetään kaukaa suurennettuina, jotta ne erottuvat
 const LIFT = 0.15; // m maanpinnan yläpuolella
-// Länsimetro kulkee tunnelissa noin 15–30 metrin syvyydessä. Näkymässä metro piirretään
-// matalammalle, jottei se lähikuvassa siirry kauas kohdastaan maan päällä.
-const METRO_DEPTH = 12; // m
+// Länsimetron raiteet ovat kallion sisällä noin 10–30 metriä merenpinnan alapuolella. Metro
+// ja tunnelit piirretään yhdelle tasolle maanpinnan muodoista riippumatta.
+const METRO_TUNNEL_Z = -15; // m (N2000)
+const METRO_DELAY = 7000; // metron sijainti päivittyy noin 50 metrin askelin 2,5–3 s välein
+const DOT_MAXZOOM = 14.8; // tätä lähempää ajoneuvot näytetään vain malleina
 const ELEV_SMOOTH_MS = 250; // korkeuden muutosten pehmennys
 
 export const TRANSIT_GROUPS = [
@@ -48,7 +50,7 @@ const KINDS = {
   tram: { group: "ratikat", label: "Raitiovaunu", cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]], gap: 0.5, height: 3.7 },
   train: { group: "junat", label: "Lähijuna", cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]], gap: 0.6, height: 4.4 },
   metro: {
-    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true,
+    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true, delay: METRO_DELAY,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
   },
   intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8, height: 5.0 },
@@ -417,7 +419,7 @@ class Clock {
     const a = this.n < 100 ? 1 / ++this.n : 0.002;
     this.offset += a * (Date.now() - t - this.offset);
   }
-  renderTime(wall) { return wall - this.offset - this.delay; }
+  renderTime(wall, delay = this.delay) { return wall - this.offset - delay; }
 }
 
 const hfpClock = new Clock(HFP_DELAY);
@@ -431,6 +433,7 @@ function newVehicle(id, kind, clock) {
     id, kind, clock, num: ++vehicleSeq, samples: [], trail: [], x: null, y: null,
     dir: null, guessed: true, seedAt: null, info: {}, lastRx: Date.now(), outAt: null,
     elev: null, elevShown: null, elevAt: 0, screen: null, drawnAt: 0, cell: null,
+    delay: KINDS[kind].delay ?? clock.delay, track: -1, headElev: null, headElevAt: 0, dot: null,
   };
 }
 
@@ -440,6 +443,9 @@ function addSample(v, s, inside) {
   if (last) {
     if (s.t <= last.t) return; // kaksoiskappale tai myöhässä saapunut viesti
     const d = Math.hypot(s.x - last.x, s.y - last.y);
+    // Liikkuva ajoneuvo samassa paikassa: sijainti ei ole päivittynyt (metro toistaa edellistä
+    // sijaintia, kunnes juna on edennyt seuraavaan kohtaan), joten viesti ohitetaan.
+    if (d < 0.5 && s.spd > 1) return;
     if (d > 500 && s.t - last.t < 20000) S.length = 0; // sijainti hyppäsi: aloitetaan alusta
     else if (d < 2.5 && s.spd < 0.8) { s.x = last.x; s.y = last.y; } // paikallaan: GPS-kohina pois
   }
@@ -540,16 +546,69 @@ function walkTrail(v, ds, scale, out) {
 }
 
 function advance(v, wall, k) {
-  const tr = v.clock.renderTime(wall);
+  const tr = v.clock.renderTime(wall, v.delay);
   if (v.outAt != null && tr >= v.outAt) { removeVehicle(v); return; } // ajoi Espoon ulkopuolelle
   if (!v.samples.length) return;
-  const [tx, ty] = targetAt(v.samples, tr);
+  let [tx, ty] = targetAt(v.samples, tr);
+  if (v.kind === "metro") [tx, ty] = onTrack(v, tx, ty);
   if (v.x == null || Math.hypot(tx - v.x, ty - v.y) > 150) {
     v.x = tx; v.y = ty; v.trail = [];
   } else {
     v.x += (tx - v.x) * k; v.y += (ty - v.y) * k;
+    if (v.kind === "metro") [v.x, v.y] = onTrack(v, v.x, v.y);
   }
   updateTrail(v);
+}
+
+// ------------------------------------------------------------ metroradat
+
+// Länsimetron raiteet (OpenStreetMap). Metrojunat pidetään raiteella, ja tunnelit piirretään
+// maan alle läpikuultavina.
+const TRACK_CELL = 100; // m
+const TRACK_REACH = 40; // m: tätä kauempana raiteesta olevaa sijaintia ei siirretä
+const trackKey = (cx, cy) => (cx + 10000) * 20000 + (cy + 10000);
+let trackGrid = null;
+let trackLines = [];
+
+async function loadMetroTracks(url) {
+  const data = await fetch(url).then((r) => r.json());
+  trackLines = data.raiteet.map((line) => {
+    const pts = [];
+    for (let i = 0; i < line.length; i += 2) pts.push(toLocal(line[i], line[i + 1]));
+    return pts;
+  });
+  const grid = new Map();
+  trackLines.forEach((pts, id) => {
+    for (let i = 1; i < pts.length; i++) {
+      const [ax, ay] = pts[i - 1], [bx, by] = pts[i];
+      for (let cx = Math.floor((Math.min(ax, bx) - TRACK_REACH) / TRACK_CELL); cx <= Math.floor((Math.max(ax, bx) + TRACK_REACH) / TRACK_CELL); cx++) {
+        for (let cy = Math.floor((Math.min(ay, by) - TRACK_REACH) / TRACK_CELL); cy <= Math.floor((Math.max(ay, by) + TRACK_REACH) / TRACK_CELL); cy++) {
+          const key = trackKey(cx, cy);
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key).push([ax, ay, bx, by, id]);
+        }
+      }
+    }
+  });
+  trackGrid = grid;
+}
+
+// Lähin raiteen piste. Junan edellistä raidetta suositaan, jottei se hypi rinnakkaisten
+// tunneleiden välillä.
+function onTrack(v, x, y) {
+  const segs = trackGrid?.get(trackKey(Math.floor(x / TRACK_CELL), Math.floor(y / TRACK_CELL)));
+  if (!segs) return [x, y];
+  let best = null, bestScore = TRACK_REACH;
+  for (const [ax, ay, bx, by, id] of segs) {
+    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+    const t = len2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) : 0;
+    const px = ax + t * dx, py = ay + t * dy;
+    const score = Math.hypot(px - x, py - y) + (id === v.track ? 0 : 6);
+    if (score < bestScore) { bestScore = score; best = [px, py, id]; }
+  }
+  if (!best) return [x, y];
+  v.track = best[2];
+  return [best[0], best[1]];
 }
 
 // ------------------------------------------------------------ syötteet
@@ -569,7 +628,9 @@ function onHfp(topic, payload) {
   if (!vp || vp.lat == null || vp.long == null || vp.seq > 1) return;
   const t = Date.parse(vp.tst);
   if (!t) return;
-  hfpClock.seen(t);
+  // Metron (kulunvalvonnasta saatu sijainti) toistoviestien aikaleima on katkaistu sekunteihin,
+  // joten kelloero arvioidaan GPS-sijainneista.
+  if (vp.loc === "GPS") hfpClock.seen(t);
   const [x, y] = toLocal(vp.long, vp.lat);
   const inside = inRegion(x, y);
   const id = `hsl/${p[7]}/${p[8]}`;
@@ -715,7 +776,10 @@ function removeVehicle(v) {
 
 // ------------------------------------------------------------ piirto
 
+// Maan alla kulkeva metro ja tunnelit ovat omassa näkymässään, joka piirretään ennen rakennuksia:
+// ne näkyvät maaston läpi, mutta rakennukset peittävät ne.
 const scene = new THREE.Scene();
+const undergroundScene = new THREE.Scene();
 const camera = new THREE.Camera();
 const meshes = {};
 const matT = new THREE.Matrix4(), matS = new THREE.Matrix4();
@@ -724,21 +788,105 @@ let renderer = null;
 {
   const solid = new THREE.MeshLambertMaterial({ vertexColors: true });
   // Metro kulkee Espoossa koko matkan tunnelissa. Se piirretään maan alle läpikuultavana ja
-  // maaston läpi näkyvänä (syvyystestiä ei tehdä).
-  const tunnel = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, depthTest: false });
+  // maaston läpi näkyvänä (syvyystestiä ei tehdä), tunnelin sisään.
+  const underground = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false });
   for (const [key, [build, cap]] of Object.entries(MODELS)) {
-    const mesh = new THREE.InstancedMesh(build(), key.startsWith("metro") ? tunnel : solid, cap);
+    const metro = key.startsWith("metro");
+    const mesh = new THREE.InstancedMesh(build(), metro ? underground : solid, cap);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
     mesh.count = 0;
+    if (metro) mesh.renderOrder = 2; // tunnelin jälkeen
     meshes[key] = mesh;
-    scene.add(mesh);
+    (metro ? undergroundScene : scene).add(mesh);
   }
-  scene.add(new THREE.AmbientLight(0xffffff, 1.6));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.8);
-  sun.position.set(-0.5, -0.8, 1.6);
-  scene.add(sun);
+  for (const sc of [scene, undergroundScene]) {
+    sc.add(new THREE.AmbientLight(0xffffff, 1.6));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+    sun.position.set(-0.5, -0.8, 1.6);
+    sc.add(sun);
+  }
 }
+
+// Metrotunnelit: raiteita seuraavat putket maan alla. Kärkipisteet ovat Web Mercator -yksiköitä
+// suhteessa paikallisen koordinaatiston origoon, joten kartan siirtyessä riittää muuttaa
+// kappaleen siirtoa ja mittakaavaa.
+const TUNNEL_WIDTH = 6, TUNNEL_HEIGHT = 6.5; // m
+let tunnelMesh = null;
+
+function buildTunnels() {
+  const s = new Shape(), rock = col("#7d8fa1"), hw = TUNNEL_WIDTH / 2;
+  for (const pts of trackLines) {
+    for (let i = 1; i < pts.length; i++) {
+      const [ax, ay] = pts[i - 1], [bx, by] = pts[i], len = Math.hypot(bx - ax, by - ay);
+      if (len < 0.5) continue;
+      const nx = (-(by - ay) / len) * hw, ny = ((bx - ax) / len) * hw;
+      const ring = (z) => [[ax - nx, ay - ny, z], [ax + nx, ay + ny, z], [bx + nx, by + ny, z], [bx - nx, by - ny, z]];
+      s.hexa([...ring(-0.8), ...ring(TUNNEL_HEIGHT - 0.8)], rock);
+    }
+  }
+  const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT), n = s.pos.length / 3;
+  const pos = new Float32Array(n * 3), colors = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const lon = lonOf(s.pos[3 * i]), lat = latOf(s.pos[3 * i + 1]);
+    pos[3 * i] = mercX(lon) - ox;
+    pos[3 * i + 1] = mercY(lat) - oy;
+    pos[3 * i + 2] = s.pos[3 * i + 2] / (EARTH_CIRC * Math.cos(lat * D2R));
+    // Valaistus väreihin: katto vaaleampi kuin seinät.
+    const shade = 0.55 + 0.45 * Math.max(0, s.nor[3 * i + 2]) + 0.15 * Math.abs(s.nor[3 * i]);
+    for (let c = 0; c < 3; c++) colors[3 * i + c] = s.col[3 * i + c] * shade;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  tunnelMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+    // Molemmat puolet: putken takaseinäkin näkyy, ja Mercator-muunnoksen peilaus ei piilota pintoja.
+    vertexColors: true, transparent: true, opacity: 0.3, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  tunnelMesh.matrixAutoUpdate = false;
+  tunnelMesh.frustumCulled = false;
+  tunnelMesh.renderOrder = 1;
+  undergroundScene.add(tunnelMesh);
+}
+
+// Yleiskuvan pisteet: ympyrä, jolla on valkoinen reuna. Piirretään joka ruudussa ajoneuvon
+// tasoitetusta sijainnista, joten pisteetkin liikkuvat pehmeästi.
+const DOT_CAP = 3000;
+const dotPos = new Float32Array(DOT_CAP * 3), dotCol = new Float32Array(DOT_CAP * 3);
+const dotColors = Object.fromEntries(Object.entries(COLORS).map(([k, hex]) => [k, col(hex)]));
+const dots = (() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(dotPos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute("color", new THREE.BufferAttribute(dotCol, 3).setUsage(THREE.DynamicDrawUsage));
+  const m = new THREE.ShaderMaterial({
+    uniforms: { uRadius: { value: 5 }, uStroke: { value: 1.2 }, uOpacity: { value: 1 }, uPixelRatio: { value: 1 } },
+    vertexShader: `
+      uniform float uRadius, uStroke, uPixelRatio;
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = 2.0 * (uRadius + uStroke + 1.0) * uPixelRatio;
+      }`,
+    fragmentShader: `
+      uniform float uRadius, uStroke, uOpacity;
+      varying vec3 vColor;
+      void main() {
+        float r = length(gl_PointCoord * 2.0 - 1.0) * (uRadius + uStroke + 1.0);
+        float outer = 1.0 - smoothstep(uRadius + uStroke - 0.5, uRadius + uStroke + 0.5, r);
+        if (outer <= 0.0) discard;
+        float fill = 1.0 - smoothstep(uRadius - 0.5, uRadius + 0.5, r);
+        gl_FragColor = vec4(mix(vec3(1.0), vColor, fill), outer * uOpacity);
+        #include <colorspace_fragment>
+      }`,
+    vertexColors: true, transparent: true, depthTest: false, depthWrite: false,
+  });
+  const points = new THREE.Points(g, m);
+  points.frustumCulled = false;
+  points.renderOrder = 3;
+  scene.add(points);
+  return points;
+})();
 
 function putInstance(mesh, wx, wy, wz, yaw, pitch, k) {
   const i = mesh.count;
@@ -754,6 +902,7 @@ function putInstance(mesh, wx, wy, wz, yaw, pitch, k) {
 
 let lastTick = performance.now();
 let lastRender = 0;
+let repaintTimer = null;
 let lastDt = 16;
 
 function tick() {
@@ -762,7 +911,12 @@ function tick() {
   lastDt = dt;
   const k = 1 - Math.exp(-dt / SMOOTH_MS), wall = Date.now();
   for (const v of vehicles.values()) advance(v, wall, k);
-  if (selected?.x != null) popup.setLngLat([lonOf(selected.x), latOf(selected.y)]);
+  if (selected?.x != null) {
+    // Maan alla kulkevan metron kohdalla ikkuna osoittaa maanpinnan kohtaan, jonka läpi juna näkyy.
+    const scr = KINDS[selected.kind].underground && selected.drawnAt > now - 500 ? selected.screen : null;
+    const n = scr ? scr.length / 2 : 0;
+    popup.setLngLat(n ? mapRef.unproject([scr[2 * (n >> 1)], scr[2 * (n >> 1) + 1]]) : [lonOf(selected.x), latOf(selected.y)]);
+  }
 }
 
 const pts = new Float64Array(64);
@@ -840,28 +994,76 @@ function draw(gl, matrix) {
   for (const mesh of Object.values(meshes)) mesh.count = 0;
   const zoom = map.getZoom();
   frameNo++;
+  const c = map.getCenter(), cmx = mercX(c.lng), cmy = mercY(c.lat);
+  const sc = 1 / (EARTH_CIRC * Math.cos(c.lat * D2R)), cosC = Math.cos(c.lat * D2R);
+  // Maailmankoordinaatit: metrejä kartan keskipisteestä (x itään, y pohjoiseen, z ylös).
+  camera.projectionMatrix.fromArray(matrix)
+    .multiply(matT.makeTranslation(cmx, cmy, 0))
+    .multiply(matS.makeScale(sc, -sc, sc));
+  camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+  const centerElev = map.transform.elevation ?? 0;
+  const exag = map.getTerrain()?.exaggeration ?? 1;
+  const tunnelZ = METRO_TUNNEL_Z * exag - centerElev; // metron raiteiden taso näkymässä
+  const b = map.getBounds(), [vx0, vy0] = toLocal(b.getWest(), b.getSouth()), [vx1, vy1] = toLocal(b.getEast(), b.getNorth());
+  const e = camera.projectionMatrix.elements, W = map.transform.width, H = map.transform.height;
+  const now = performance.now();
+  const inView = (v, margin) => v.x > vx0 - margin && v.x < vx1 + margin && v.y > vy0 - margin && v.y < vy1 + margin;
+
+  if (tunnelMesh) {
+    tunnelMesh.visible = groupOn.metro;
+    const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT);
+    tunnelMesh.matrix.set(
+      1 / sc, 0, 0, (ox - cmx) / sc,
+      0, -1 / sc, 0, -(oy - cmy) / sc,
+      0, 0, 1 / sc, tunnelZ,
+      0, 0, 0, 1);
+    tunnelMesh.matrixWorldNeedsUpdate = true;
+  }
+
+  // Pisteet kaukaa katsottaessa; ne häivytetään, kun mallit tulevat näkyviin.
+  let nDots = 0;
+  if (zoom < DOT_MAXZOOM) {
+    for (const v of vehicles.values()) {
+      if (v.x == null || !groupOn[KINDS[v.kind].group] || !inView(v, 100) || nDots >= DOT_CAP) continue;
+      const lon = lonOf(v.x), lat = latOf(v.y), k = cosC / Math.cos(lat * D2R);
+      let z;
+      if (KINDS[v.kind].underground) z = tunnelZ;
+      else {
+        if (v.headElev == null || now - v.headElevAt > 500) {
+          v.headElev = (map.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
+          v.headElevAt = now + Math.random() * 100;
+        }
+        z = (v.headElev - centerElev) * k;
+      }
+      const wx = (mercX(lon) - cmx) / sc, wy = -(mercY(lat) - cmy) / sc;
+      dotPos[3 * nDots] = wx; dotPos[3 * nDots + 1] = wy; dotPos[3 * nDots + 2] = z;
+      const colr = dotColors[v.kind];
+      dotCol[3 * nDots] = colr.r; dotCol[3 * nDots + 1] = colr.g; dotCol[3 * nDots + 2] = colr.b;
+      v.dot = toScreen(e, wx, wy, z, W, H);
+      v.dotAt = now;
+      nDots++;
+    }
+    const u = dots.material.uniforms;
+    u.uRadius.value = Math.min(5.5, Math.max(2.5, 2.5 + ((zoom - 9) / 5) * 3));
+    u.uOpacity.value = Math.min(1, Math.max(0, (DOT_MAXZOOM - zoom) / 1));
+    u.uPixelRatio.value = gl.drawingBufferWidth / W;
+  }
+  dots.geometry.setDrawRange(0, nDots);
+  dots.geometry.attributes.position.needsUpdate = true;
+  dots.geometry.attributes.color.needsUpdate = true;
+
   if (zoom >= MODEL_MINZOOM) {
-    const c = map.getCenter(), cmx = mercX(c.lng), cmy = mercY(c.lat);
-    const sc = 1 / (EARTH_CIRC * Math.cos(c.lat * D2R)), cosC = Math.cos(c.lat * D2R);
-    // Maailmankoordinaatit: metrejä kartan keskipisteestä (x itään, y pohjoiseen, z ylös).
-    camera.projectionMatrix.fromArray(matrix)
-      .multiply(matT.makeTranslation(cmx, cmy, 0))
-      .multiply(matS.makeScale(sc, -sc, sc));
-    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-    const centerElev = map.transform.elevation ?? 0;
-    const exag = map.getTerrain()?.exaggeration ?? 1;
     const scale = Math.min(MAX_ENLARGE, Math.max(1, 2 ** ((15 - zoom) * 0.6)));
-    const b = map.getBounds(), [vx0, vy0] = toLocal(b.getWest(), b.getSouth()), [vx1, vy1] = toLocal(b.getEast(), b.getNorth());
-    const e = camera.projectionMatrix.elements, W = map.transform.width, H = map.transform.height;
     const ke = 1 - Math.exp(-lastDt / ELEV_SMOOTH_MS);
-    const now = performance.now();
     for (const v of vehicles.values()) {
       const kind = KINDS[v.kind];
-      if (v.x == null || !groupOn[kind.group]) continue;
-      if (v.x < vx0 - 400 || v.x > vx1 + 400 || v.y < vy0 - 400 || v.y > vy1 + 400) continue;
+      if (v.x == null || !groupOn[kind.group] || !inView(v, 400)) continue;
       const n = kind.cars.length;
       walkTrail(v, kind.ds, scale, pts);
-      if (!v.elev || v.elev.length !== 2 * n || now - v.elevAt > 300) {
+      if (kind.underground) {
+        // Tunnelissa raiteet ovat yhdellä tasolla maanpinnan muodoista riippumatta.
+        v.elev = v.elevShown = new Float64Array(2 * n).fill(tunnelZ + centerElev);
+      } else if (!v.elev || v.elev.length !== 2 * n || now - v.elevAt > 300) {
         // Korkeus haetaan harvemmin kuin piirretään ja tallennetaan absoluuttisena.
         const prev = v.elev?.length === 2 * n ? v.elev : null;
         v.elev = new Float64Array(2 * n);
@@ -874,7 +1076,7 @@ function draw(gl, matrix) {
         const d = v.elev[j] - v.elevShown[j];
         v.elevShown[j] = Math.abs(d) > 40 ? v.elev[j] : v.elevShown[j] + d * ke;
       }
-      const base = kind.underground ? -METRO_DEPTH : LIFT;
+      const base = kind.underground ? 0 : LIFT;
       v.screen ??= [];
       v.screen.length = 0;
       for (let i = 0; i < n; i++) {
@@ -900,26 +1102,15 @@ function draw(gl, matrix) {
   labelLayer.hidden = zoom < MODEL_MINZOOM;
   hideStaleLabels();
   for (const mesh of Object.values(meshes)) mesh.instanceMatrix.needsUpdate = true;
+}
+
+function renderScene(gl, sc) {
   renderer.resetState();
   renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-  renderer.render(scene, camera);
+  renderer.render(sc, camera);
 }
 
 // ------------------------------------------------------------ yleiskuva, valinta ja tilastot
-
-const OVERVIEW = "joukkoliikenne-pisteet";
-
-function updateOverview() {
-  const features = [];
-  for (const v of vehicles.values()) {
-    if (v.x == null || !groupOn[KINDS[v.kind].group]) continue;
-    features.push({
-      type: "Feature", id: v.num, geometry: { type: "Point", coordinates: [lonOf(v.x), latOf(v.y)] },
-      properties: { laji: v.kind, linja: v.info.line ?? "" },
-    });
-  }
-  mapRef.getSource(OVERVIEW)?.setData({ type: "FeatureCollection", features });
-}
 
 const popup = new maplibregl.Popup({ maxWidth: "300px", closeButton: true, offset: 12 });
 let selected = null;
@@ -951,7 +1142,7 @@ function popupContent(v) {
     node("div", { class: "kind" }, kind.label),
     node("h3", {}, [i.line, i.headsign].filter(Boolean).join(" → ")),
     node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))),
-    v.kind === "metro" ? node("p", { class: "more" }, "Metro kulkee Espoossa tunnelissa, ja se näytetään maan alla.") : null);
+    v.kind === "metro" ? node("p", { class: "more" }, "Metro kulkee Espoossa kallion sisällä tunnelissa.") : null);
 }
 
 // Lähikuvassa verrataan piirrettyjen vaunujen näyttösijainteihin (myös maan alla kulkeva metro
@@ -961,7 +1152,7 @@ function pick(point) {
   let best = null, bestD = 22 * 22;
   for (const v of vehicles.values()) {
     if (v.x == null || !groupOn[KINDS[v.kind].group]) continue;
-    let probes = v.drawnAt > recent && v.screen?.length ? v.screen : null;
+    let probes = v.drawnAt > recent && v.screen?.length ? v.screen : v.dotAt > recent ? v.dot : null;
     if (!probes) {
       const p = map.project([lonOf(v.x), latOf(v.y)]);
       probes = [p.x, p.y];
@@ -986,52 +1177,48 @@ function stats() {
 
 // ------------------------------------------------------------ julkinen rajapinta
 
-export async function createTransit(map, { boundaryUrl, beforeLayer }) {
+export async function createTransit(map, { boundaryUrl, metroUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
   await loadRegion(boundaryUrl);
+  // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
+  loadMetroTracks(metroUrl).then(buildTunnels).catch((err) => console.warn("Metroratoja ei saatu ladattua", err));
   labelLayer = document.createElement("div");
   labelLayer.className = "vehicle-labels";
   map.getContainer().append(labelLayer);
 
+  const onAdd = (m, gl) => {
+    renderer ??= new THREE.WebGLRenderer({ canvas: m.getCanvas(), context: gl, antialias: true });
+    renderer.autoClear = false;
+  };
+  // Maan alla oleva taso piirretään ruudussa ensin, joten ajoneuvojen sijainnit lasketaan siinä.
   map.addLayer({
-    id: "joukkoliikenne", type: "custom", renderingMode: "3d",
-    onAdd(m, gl) {
-      renderer = new THREE.WebGLRenderer({ canvas: m.getCanvas(), context: gl, antialias: true });
-      renderer.autoClear = false;
-    },
+    id: "joukkoliikenne-maan-alla", type: "custom", renderingMode: "3d", onAdd,
     render(gl, matrix) {
       lastRender = performance.now();
       tick();
       draw(gl, matrix);
-      // Ajoneuvot liikkuvat koko ajan, joten lähikuvassa kartta piirretään jatkuvasti.
-      if (map.getZoom() >= MODEL_MINZOOM && Object.values(groupOn).some(Boolean)) map.triggerRepaint();
+      renderScene(gl, undergroundScene);
+    },
+  }, undergroundBeforeLayer);
+  map.addLayer({
+    id: "joukkoliikenne", type: "custom", renderingMode: "3d", onAdd,
+    render(gl) {
+      renderScene(gl, scene);
+      // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti. Kaukaa katsottaessa
+      // liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
+      if (!Object.values(groupOn).some(Boolean)) return;
+      if (map.getZoom() >= 11) map.triggerRepaint();
+      else repaintTimer ??= setTimeout(() => { repaintTimer = null; map.triggerRepaint(); }, 50);
     },
   }, beforeLayer);
-
-  const fade = ["interpolate", ["linear"], ["zoom"], 13.8, 1, 14.8, 0];
-  map.addSource(OVERVIEW, {
-    type: "geojson", data: { type: "FeatureCollection", features: [] },
-    attribution: '<a href="https://www.hsl.fi/avoindata" target="_blank" rel="noopener">HSL</a>, <a href="https://www.digitraffic.fi" target="_blank" rel="noopener">Fintraffic / digitraffic.fi</a> (CC BY 4.0)',
-  });
-  map.addLayer({
-    // Ei maxzoomia: lähde pysyy käytössä, joten HSL:n ja Digitrafficin maininta näkyy aina.
-    id: OVERVIEW, type: "circle", source: OVERVIEW,
-    paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.5, 14, 5.5],
-      "circle-color": ["match", ["get", "laji"], ...Object.entries(COLORS).flat(), "#555"],
-      "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.2,
-      "circle-opacity": fade, "circle-stroke-opacity": fade,
-    },
-  });
 
   map.on("moveend", syncCells);
   document.addEventListener("visibilitychange", onVisibility);
 
-  // Kaukaa katsottaessa kartta ei piirry jatkuvasti, joten ajoneuvoja siirretään ajastimella.
+  // Varmistus: jos piirtosilmukka on pysähtynyt (esim. kaikki ryhmät olivat pois), käynnistetään se.
   setInterval(() => {
-    if (performance.now() - lastRender > 400) tick();
-    if (map.getZoom() < 15) updateOverview();
-  }, 500);
+    if (performance.now() - lastRender > 1000 && Object.values(groupOn).some(Boolean)) map.triggerRepaint();
+  }, 1000);
 
   const listeners = [];
   setInterval(() => {
@@ -1047,12 +1234,11 @@ export async function createTransit(map, { boundaryUrl, beforeLayer }) {
   syncConnections();
 
   return {
-    vehicles, // selaimen konsolia varten
+    vehicles, scene, // selaimen konsolia varten
     setGroup(id, on) {
       groupOn[id] = on;
       if (selected && !groupOn[KINDS[selected.kind].group]) popup.remove();
       syncConnections();
-      updateOverview();
       map.triggerRepaint();
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },

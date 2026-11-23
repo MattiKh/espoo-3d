@@ -7,7 +7,7 @@ Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
 public/data/ vain tiedostot manifest.json, kaupunginosat_nimet.geojson,
-espoo_raja.geojson ja sillat.json.
+espoo_raja.geojson, sillat.json ja metro.json.
 """
 import collections
 import concurrent.futures as cf
@@ -31,6 +31,7 @@ TILES = os.path.join(ROOT, "public", "tiles")
 ESPOO_WFS = "https://kartat.espoo.fi/teklaogcweb/wfs.ashx"
 HSY_WFS = "https://kartta.hsy.fi/geoserver/wfs"
 STATFI_WFS = "https://geo.stat.fi/geoserver/tilastointialueet/wfs"
+OVERPASS = "https://overpass-api.de/api/interpreter"
 UA = "espoo3d-data-builder/1.0 (paikallinen avoimen datan katselin)"
 
 # Espoon alue (lon/lat), hieman WMS-palvelun ilmoittamaa laajuutta väljempänä.
@@ -95,6 +96,11 @@ def http_get(url, params, dest, timeout=300, retries=3):
             return dest
         except Exception as e:  # verkko- tai palvelinvirhe: yritä uudelleen
             log(f"  virhe ({attempt + 1}/{retries}): {e}")
+            if "SSL" in str(e) and shutil.which("curl"):
+                # macOS:n järjestelmä-Pythonin TLS ei kelpaa kaikille palvelimille; curl kelpaa.
+                subprocess.run(["curl", "-sf", "-A", UA, "-o", dest + ".part", full], check=True, timeout=timeout)
+                os.replace(dest + ".part", dest)
+                return dest
             time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"Lataus epäonnistui: {full}")
 
@@ -754,6 +760,28 @@ def read_positions_3d(el):
     return out
 
 
+def build_metro():
+    """Länsimetron raiteet (OpenStreetMap). Selain pitää metrojunat raiteilla ja piirtää
+    tunnelit maan alle. Mukana vain pääraiteet (ei vaihde-, varikko- eikä pistoraiteita)
+    Espoon puolelta ja vähän rajan yli."""
+    log("metro (OpenStreetMap, railway=subway)")
+    query = '[out:json][timeout:90];way["railway"="subway"](60.10,24.55,60.20,24.92);out geom tags;'
+    raw = http_get(OVERPASS, {"data": query}, os.path.join(CACHE, "metro_osm.json"))
+    with open(raw, encoding="utf-8") as fh:
+        ways = json.load(fh)["elements"]
+    raiteet = []
+    for w in ways:
+        if "service" in w.get("tags", {}):
+            continue
+        pts = [(round(p["lon"], 6), round(p["lat"], 6)) for p in w["geometry"] if p["lon"] < 24.87]
+        if len(pts) >= 2:
+            raiteet.append([v for p in pts for v in p])
+    path = os.path.join(PUBLIC_DATA, "metro.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "© OpenStreetMap-tekijät (ODbL)", "raiteet": raiteet}, fh, separators=(",", ":"))
+    log(f"  → metro.json: {len(raiteet)} raideosuutta, {os.path.getsize(path) / 1e3:.0f} kt")
+
+
 def espoo_polygons():
     """Espoon kaupunginosat polygonilistana (rajaukseen); tyhjä, jos aineistoa ei vielä ole."""
     path = os.path.join(OUT, "kaupunginosat.geojson")
@@ -902,6 +930,8 @@ def main():
         build_boundary()
     if want("sillat"):
         build_bridges()
+    if want("metro"):
+        build_metro()
     if want("rakennukset"):
         build_buildings()
     if want("tiilet"):

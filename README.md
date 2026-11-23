@@ -22,7 +22,8 @@ python3 scripts/build_data.py
 
 Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
-(`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json`. Tiilitykseen tarvitaan
+(`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json` ja
+metroradat tiedostoon `public/data/metro.json`. Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
@@ -57,6 +58,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
+| Länsimetron raiteet | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -87,8 +89,16 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   kellojen ero arvioidaan hitaasti kaikista viesteistä, jottei arvion muutos nytkäytä ajoneuvoja.
 - Vaunut seuraavat keulan kulkemaa reittiä, joten nivelraitiovaunut ja junat kaartavat.
 - HSL:n lähijunat tulevat HFP-syötteestä, joten Digitrafficista otetaan vain kauko- ja tavarajunat.
-- Metro kulkee Espoossa tunnelissa, joten se piirretään läpikuultavana maan alle (12 metriä
-  pinnan alapuolelle) ja maaston läpi näkyvänä.
+- Metro kulkee Espoossa tunnelissa. Junat pidetään OpenStreetMapin raiteilla ja piirretään
+  läpikuultavina tunneliputkien sisään yhdelle tasolle (−15 m N2000) maanpinnan muodoista
+  riippumatta. Metro ja tunnelit piirretään ennen rakennuksia ilman syvyystestiä, joten ne
+  näkyvät maaston läpi, mutta rakennukset peittävät ne.
+- Metron sijainti tulee kulunvalvonnasta, ja se päivittyy noin 50 metrin askelin 2,5–3 sekunnin
+  välein; välissä syöte toistaa edellistä sijaintia. Toistot ohitetaan (liikkuva juna samassa
+  paikassa), ja metro näytetään seitsemän sekuntia jäljessä, jotta liike voidaan laskea askelten
+  väliltä tasaiseksi.
+- Kaukaa katsottaessa ajoneuvot ovat pisteitä, jotka piirretään joka ruudussa samasta tasoitetusta
+  sijainnista kuin mallit, joten nekin liikkuvat pehmeästi.
 - Linjanumerot ovat karttakuvan päällä olevia läpikuultavia elementtejä, joita siirretään joka
   ruudussa ajoneuvon mukana.
 - Lähikuvassa tilataan vain näkymän ympäristön HFP-ruudut. Taustalle jääneen välilehden
