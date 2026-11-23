@@ -23,7 +23,7 @@ python3 scripts/build_data.py
 Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
 (`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json` ja
-metroradat tiedostoon `public/data/metro.json`. Tiilitykseen tarvitaan
+raiteet tiedostoon `public/data/raiteet.json`. Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
@@ -58,7 +58,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
-| Länsimetron raiteet | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -88,10 +88,19 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   kuutiollisella interpoloinnilla, ja lopuksi se vielä pehmennetään. Ajoneuvojen ja selaimen
   kellojen ero arvioidaan hitaasti kaikista viesteistä, jottei arvion muutos nytkäytä ajoneuvoja.
 - Vaunut seuraavat keulan kulkemaa reittiä, joten nivelraitiovaunut ja junat kaartavat.
+- Junat, metrot ja raitiovaunut pidetään raiteilla (`public/rails.js`). Sijainti siirretään
+  lähimmälle samanlajiselle raiteelle, ja edellisellä raiteella pysymistä suositaan, jottei juna
+  hypi rinnakkaisten raiteiden välillä. Uuden junan vaunut asetetaan heti raidetta pitkin.
+- Jos raiteilla kulkevan sijainti katkeaa, liikettä jatketaan raidetta pitkin viimeisellä
+  nopeudella enintään 90 sekuntia. Lähijunat, metrot ja raitiovaunut jarruttavat seuraavalle
+  asemalle tai pysäkille ja jäävät sinne odottamaan; kaukojunat eivät pysähdy jokaisella asemalla,
+  joten niitä vain jatketaan. Juna ei myöskään peruuta, jos myöhässä tullut sijainti on hieman
+  jäljessä.
+- Kahden tai kolmen yksikön lähijunassa jokainen yksikkö lähettää oman sijaintinsa samalla
+  vuorolla. Ne näytetään yhtenä pitkänä junana, jonka keula on edimmäisen yksikön kohdalla.
 - HSL:n lähijunat tulevat HFP-syötteestä, joten Digitrafficista otetaan vain kauko- ja tavarajunat.
-- Metro kulkee Espoossa tunnelissa. Junat pidetään OpenStreetMapin raiteilla ja piirretään
-  läpikuultavina tunneliputkien sisään yhdelle tasolle (−15 m N2000) maanpinnan muodoista
-  riippumatta. Metro ja tunnelit piirretään ennen rakennuksia ilman syvyystestiä, joten ne
+- Metro kulkee Espoossa tunnelissa. Junat piirretään läpikuultavina tunneliputkien sisään
+  yhdelle tasolle (−15 m N2000) maanpinnan muodoista riippumatta. Metro ja tunnelit piirretään ennen rakennuksia ilman syvyystestiä, joten ne
   näkyvät maaston läpi, mutta rakennukset peittävät ne.
 - Metron sijainti tulee kulunvalvonnasta, ja se päivittyy noin 50 metrin askelin 2,5–3 sekunnin
   välein; välissä syöte toistaa edellistä sijaintia. Toistot ohitetaan (liikkuva juna samassa
@@ -125,3 +134,4 @@ Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
+- `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat

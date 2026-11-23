@@ -5,6 +5,7 @@
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, rawElevationAt } from "./bridges.js";
+import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
 const RAIL_MQTT_URL = "wss://rata.digitraffic.fi:443/mqtt";
@@ -18,7 +19,10 @@ const RAIL_DELAY = 9000;
 const MAX_EXTRAPOLATE = 2500; // ms: jos seuraava sijainti viipyy, jatketaan entiseen suuntaan
 const SMOOTH_MS = 160; // viimeisen pehmennyksen aikavakio
 const HFP_TIMEOUT = 30000;
-const RAIL_TIMEOUT = 120000;
+const RAIL_TIMEOUT = 120000; // raiteilla kulkevia jatketaan katkoksen yli, joten ne pidetään pidempään
+const DEADRECKON_MAX = 90000; // ms: näin kauan raiteilla kulkevaa jatketaan ilman uutta sijaintia
+const BRAKE = 0.8; // m/s²: jarrutus asemalle
+const UNIT_STALE = 15000; // ms: kytketyn yksikön sijainti vanhenee
 const REGION_MARGIN = 300; // m: ajoneuvot näkyvät vielä näin kaukana Espoon rajan takana
 const MODEL_MINZOOM = 12.5; // tätä kauempaa ajoneuvot näytetään vain pisteinä
 const MAX_ENLARGE = 2; // mallit näytetään kaukaa suurennettuina, jotta ne erottuvat
@@ -38,28 +42,37 @@ export const TRANSIT_GROUPS = [
 ];
 
 const COLORS = {
-  bus: "#007ac9", tram: "#00985f", train: "#8c4799", metro: "#ff6319",
+  bus: "#007ac9", tram: "#00985f", train: "#8c4799", train2: "#8c4799", train3: "#8c4799", metro: "#ff6319",
   intercity: "#3e9b3a", freight: "#b5462e", locomotive: "#b5462e",
 };
 
 // Vaunut keulasta taaksepäin: [malli, pituus (m), käännetty]. Takimmainen ohjaamovaunu on
 // sama malli käännettynä, joten molemmissa päissä on keula. height on katon korkeus (m),
-// jonka yläpuolelle linjanumero sijoitetaan.
+// jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), ja stops,
+// pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä.
 const KINDS = {
   bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3 },
-  tram: { group: "ratikat", label: "Raitiovaunu", cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]], gap: 0.5, height: 3.7 },
-  train: { group: "junat", label: "Lähijuna", cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]], gap: 0.6, height: 4.4 },
+  tram: {
+    group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, rail: TRAM, stops: true,
+    cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]],
+  },
+  train: {
+    group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, rail: RAIL, stops: true,
+    cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]],
+  },
   metro: {
-    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true, delay: METRO_DELAY,
+    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
   },
-  intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8, height: 5.0 },
+  intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8, height: 5.0, rail: RAIL },
   freight: {
-    group: "junat", label: "Tavarajuna", gap: 0.9, height: 4.3,
+    group: "junat", label: "Tavarajuna", gap: 0.9, height: 4.3, rail: RAIL,
     cars: [["cargoLoco", 19.6], ...Array.from({ length: 12 }, (_, i) => (i % 3 === 1 ? ["tankWagon", 14] : ["boxWagon", 15.5]))],
   },
-  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0, height: 4.3 },
+  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0, height: 4.3, rail: RAIL },
 };
+// Lähijunassa voi olla kaksi tai kolme yksikköä kytkettynä toisiinsa (ohjaamot vastakkain).
+for (const n of [2, 3]) KINDS[`train${n}`] = { ...KINDS.train, cars: Array.from({ length: n }, () => KINDS.train.cars).flat() };
 for (const k of Object.values(KINDS)) {
   // Kunkin vaunun keulan ja perän etäisyys ajoneuvon keulasta.
   k.ds = [];
@@ -433,13 +446,19 @@ function newVehicle(id, kind, clock) {
     id, kind, clock, num: ++vehicleSeq, samples: [], trail: [], x: null, y: null,
     dir: null, guessed: true, seedAt: null, info: {}, lastRx: Date.now(), outAt: null,
     elev: null, elevShown: null, elevAt: 0, screen: null, drawnAt: 0, cell: null,
-    delay: KINDS[kind].delay ?? clock.delay, track: -1, headElev: null, headElevAt: 0, dot: null,
+    delay: KINDS[kind].delay ?? clock.delay, headElev: null, headElevAt: 0, dot: null,
+    way: -1, pos: null, heading: null, units: null, lead: null, headShift: 0,
   };
 }
 
 function addSample(v, s, inside) {
-  const S = v.samples, last = S[S.length - 1];
+  const S = v.samples, last = S[S.length - 1], rail = KINDS[v.kind].rail;
   v.lastRx = Date.now();
+  if (rail != null) {
+    // Sijainti raiteelle; raidekohta tarvitaan, jos liikettä pitää jatkaa ilman uutta sijaintia.
+    const p = snap(s.x, s.y, rail, v.way);
+    if (p) { s.x = p.x; s.y = p.y; s.pos = p; v.way = p.way; }
+  }
   if (last) {
     if (s.t <= last.t) return; // kaksoiskappale tai myöhässä saapunut viesti
     const d = Math.hypot(s.x - last.x, s.y - last.y);
@@ -491,7 +510,9 @@ function targetAt(S, tr) {
 // kaartavat kuten oikeat.
 function seedTrail(v, [ux, uy]) {
   const back = KINDS[v.kind].length * MAX_ENLARGE + 30;
-  v.trail = [[v.x - ux * back, v.y - uy * back], [v.x, v.y]];
+  // Raiteella reitti aloitetaan raidetta pitkin, joten vaunut ovat heti raiteilla myös kaarteissa.
+  v.trail = v.pos ? pathBehind(v.pos.e, v.pos.u, signFor(v.pos.e, ux, uy), back)
+    : [[v.x - ux * back, v.y - uy * back], [v.x, v.y]];
   v.seedAt = [v.x, v.y];
 }
 
@@ -549,66 +570,100 @@ function advance(v, wall, k) {
   const tr = v.clock.renderTime(wall, v.delay);
   if (v.outAt != null && tr >= v.outAt) { removeVehicle(v); return; } // ajoi Espoon ulkopuolelle
   if (!v.samples.length) return;
-  let [tx, ty] = targetAt(v.samples, tr);
-  if (v.kind === "metro") [tx, ty] = onTrack(v, tx, ty);
+  const rail = KINDS[v.kind].rail;
+  let [tx, ty] = rail != null ? railTarget(v, tr) : targetAt(v.samples, tr);
   if (v.x == null || Math.hypot(tx - v.x, ty - v.y) > 150) {
     v.x = tx; v.y = ty; v.trail = [];
   } else {
+    if (rail != null && !mayMove(v, tx, ty)) { tx = v.x; ty = v.y; }
     v.x += (tx - v.x) * k; v.y += (ty - v.y) * k;
-    if (v.kind === "metro") [v.x, v.y] = onTrack(v, v.x, v.y);
+  }
+  if (rail != null) {
+    const p = snap(v.x, v.y, rail, v.way);
+    if (p) { v.x = p.x; v.y = p.y; v.pos = p; v.way = p.way; }
   }
   updateTrail(v);
+  const T = v.trail, a = T[T.length - 2], b = T[T.length - 1];
+  const d = a && Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (d > 0.1) v.heading = [(b[0] - a[0]) / d, (b[1] - a[1]) / d];
 }
 
-// ------------------------------------------------------------ metroradat
+// ------------------------------------------------------------ raiteilla kulkevat
 
-// Länsimetron raiteet (OpenStreetMap). Metrojunat pidetään raiteella, ja tunnelit piirretään
-// maan alle läpikuultavina.
-const TRACK_CELL = 100; // m
-const TRACK_REACH = 40; // m: tätä kauempana raiteesta olevaa sijaintia ei siirretä
-const trackKey = (cx, cy) => (cx + 10000) * 20000 + (cy + 10000);
-let trackGrid = null;
-let trackLines = [];
-
-async function loadMetroTracks(url) {
-  const data = await fetch(url).then((r) => r.json());
-  trackLines = data.raiteet.map((line) => {
-    const pts = [];
-    for (let i = 0; i < line.length; i += 2) pts.push(toLocal(line[i], line[i + 1]));
-    return pts;
-  });
-  const grid = new Map();
-  trackLines.forEach((pts, id) => {
-    for (let i = 1; i < pts.length; i++) {
-      const [ax, ay] = pts[i - 1], [bx, by] = pts[i];
-      for (let cx = Math.floor((Math.min(ax, bx) - TRACK_REACH) / TRACK_CELL); cx <= Math.floor((Math.max(ax, bx) + TRACK_REACH) / TRACK_CELL); cx++) {
-        for (let cy = Math.floor((Math.min(ay, by) - TRACK_REACH) / TRACK_CELL); cy <= Math.floor((Math.max(ay, by) + TRACK_REACH) / TRACK_CELL); cy++) {
-          const key = trackKey(cx, cy);
-          if (!grid.has(key)) grid.set(key, []);
-          grid.get(key).push([ax, ay, bx, by, id]);
-        }
-      }
-    }
-  });
-  trackGrid = grid;
-}
-
-// Lähin raiteen piste. Junan edellistä raidetta suositaan, jottei se hypi rinnakkaisten
-// tunneleiden välillä.
-function onTrack(v, x, y) {
-  const segs = trackGrid?.get(trackKey(Math.floor(x / TRACK_CELL), Math.floor(y / TRACK_CELL)));
-  if (!segs) return [x, y];
-  let best = null, bestScore = TRACK_REACH;
-  for (const [ax, ay, bx, by, id] of segs) {
-    const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-    const t = len2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / len2)) : 0;
-    const px = ax + t * dx, py = ay + t * dy;
-    const score = Math.hypot(px - x, py - y) + (id === v.track ? 0 : 6);
-    if (score < bestScore) { bestScore = score; best = [px, py, id]; }
+// Raiteilla kulkevan ajoneuvon tavoitesijainti. Jos uutta sijaintia ei ole tullut, liikettä
+// jatketaan raidetta pitkin viimeisellä nopeudella: junat ja metrot eivät pysähdy asemien
+// välillä, mutta pysähtyvät yleensä jokaiselle asemalle, joten seuraavalle asemalle jarrutetaan.
+// Kytketyn junan keula on johtavan yksikön edellä headShift metriä.
+function railTarget(v, tr) {
+  const S = v.samples, last = S[S.length - 1], kind = KINDS[v.kind], h = v.heading ?? v.dir;
+  let [tx, ty] = targetAt(S, tr);
+  if (tr > last.t && last.pos && h) {
+    const sign = signFor(last.pos.e, h[0], h[1]);
+    const p = walk(last.pos.e, last.pos.u, sign, travelled(kind, last, sign, Math.min(tr - last.t, DEADRECKON_MAX) / 1000));
+    tx = p.x; ty = p.y;
   }
-  if (!best) return [x, y];
-  v.track = best[2];
-  return [best[0], best[1]];
+  if (v.headShift > 1 && h) {
+    const p = snap(tx, ty, kind.rail, v.way);
+    if (p) {
+      const q = walk(p.e, p.u, signFor(p.e, h[0], h[1]), v.headShift);
+      tx = q.x; ty = q.y;
+    }
+  }
+  return [tx, ty];
+}
+
+// Matka (m), jonka ajoneuvo kulkee t sekunnissa viimeisestä sijainnista, kun se jarruttaa
+// seuraavalle asemalle (jos se pysähtyy kaikilla asemilla).
+function travelled(kind, last, sign, t) {
+  const v0 = last.spd ?? 0;
+  if (v0 < 1) return 0;
+  if (!kind.stops) return v0 * t;
+  const ds = nextStop(last.pos.e, last.pos.u, sign, v0 * t + (v0 * v0) / (2 * BRAKE) + 10);
+  if (ds == null) return v0 * t;
+  const a = Math.max(BRAKE, (v0 * v0) / (2 * Math.max(ds, 1)));
+  const brakeDist = (v0 * v0) / (2 * a), t1 = (ds - brakeDist) / v0;
+  if (t <= t1) return v0 * t;
+  const tau = Math.min(t - t1, v0 / a);
+  return ds - brakeDist + v0 * tau - (a * tau * tau) / 2;
+}
+
+// Juna ei peruuta myöhässä saapuneen sijainnin takia, vaan odottaa, kunnes tavoite on taas edellä.
+// Taaksepäin liikutaan vain, jos sijainnit todella kulkevat taaksepäin (pääteasemalla).
+function mayMove(v, tx, ty) {
+  const h = v.heading;
+  if (!h) return true;
+  const along = (tx - v.x) * h[0] + (ty - v.y) * h[1];
+  if (along >= 0 || along < -80) return true;
+  const S = v.samples, n = S.length;
+  if (n < 2) return false;
+  const mx = S[n - 1].x - S[n - 2].x, my = S[n - 1].y - S[n - 2].y;
+  return Math.hypot(mx, my) > 3 && mx * h[0] + my * h[1] < 0;
+}
+
+// Kytketyt lähijunan yksiköt ilmoittavat kukin oman sijaintinsa samalla vuorolla. Ne näytetään
+// yhtenä junana, jonka sijainnit tulevat yhdeltä (johtavalta) yksiköltä; muiden yksiköiden
+// sijainneista päätellään yksiköiden määrä ja se, kuinka paljon keula on johtavan edellä.
+function updateUnits(v, unit, x, y, hdg) {
+  const now = Date.now();
+  v.units.set(unit, { x, y, at: now });
+  for (const [u, r] of v.units) if (now - r.at > 4 * UNIT_STALE) v.units.delete(u);
+  const lead = v.units.get(v.lead);
+  if (unit !== v.lead) {
+    if (lead && now - lead.at < UNIT_STALE) return false;
+    v.lead = unit; // johtava yksikkö on vaiennut: vaihdetaan
+    v.samples.length = 0;
+    v.headShift = 0;
+  }
+  const fresh = [...v.units.entries()].filter(([, r]) => now - r.at < UNIT_STALE);
+  const kind = fresh.length >= 3 ? "train3" : fresh.length === 2 ? "train2" : "train";
+  if (kind !== v.kind) { v.kind = kind; v.trail = []; v.elev = null; }
+  const h = v.heading ?? (hdg != null ? [Math.sin(hdg * D2R), Math.cos(hdg * D2R)] : null);
+  if (h) {
+    const ahead = Math.max(0, ...fresh.map(([, r]) => (r.x - x) * h[0] + (r.y - y) * h[1]));
+    v.headShift += (ahead - v.headShift) * 0.3;
+  }
+  v.unitList = fresh.map(([u]) => u);
+  return true;
 }
 
 // ------------------------------------------------------------ syötteet
@@ -633,16 +688,20 @@ function onHfp(topic, payload) {
   if (vp.loc === "GPS") hfpClock.seen(t);
   const [x, y] = toLocal(vp.long, vp.lat);
   const inside = inRegion(x, y);
-  const id = `hsl/${p[7]}/${p[8]}`;
+  const unit = `${+p[7]}/${+p[8]}`;
+  // Lähijunan kytketyt yksiköt ovat samaa vuoroa (linja, suunta, lähtöaika, päivä): yksi juna.
+  const id = kind === "train" ? `hsl/juna/${p[9]}/${p[10]}/${p[12]}/${vp.oday}` : `hsl/${p[7]}/${p[8]}`;
   let v = vehicles.get(id);
   if (!v) {
     if (!inside) return;
     v = newVehicle(id, kind, hfpClock);
     if (vp.hdg != null) { v.dir = [Math.sin(vp.hdg * D2R), Math.cos(vp.hdg * D2R)]; v.guessed = false; }
+    if (kind === "train") { v.units = new Map(); v.lead = unit; }
     vehicles.set(id, v);
   }
+  if (v.units && !updateUnits(v, unit, x, y, vp.hdg)) return;
   v.cell = p[16];
-  v.info = { line: vp.desi, headsign: p[11], dl: vp.dl, spd: vp.spd, veh: `${+p[7]}/${+p[8]}` };
+  v.info = { line: vp.desi, headsign: p[11], dl: vp.dl, spd: vp.spd, veh: v.unitList?.join(" + ") ?? unit };
   addSample(v, { t, x, y, spd: vp.spd ?? 0 }, inside);
 }
 
@@ -789,7 +848,7 @@ let renderer = null;
   const solid = new THREE.MeshLambertMaterial({ vertexColors: true });
   // Metro kulkee Espoossa koko matkan tunnelissa. Se piirretään maan alle läpikuultavana ja
   // maaston läpi näkyvänä (syvyystestiä ei tehdä), tunnelin sisään.
-  const underground = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false, depthTest: false });
+  const underground = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.35, depthWrite: false, depthTest: false });
   for (const [key, [build, cap]] of Object.entries(MODELS)) {
     const metro = key.startsWith("metro");
     const mesh = new THREE.InstancedMesh(build(), metro ? underground : solid, cap);
@@ -816,7 +875,7 @@ let tunnelMesh = null;
 
 function buildTunnels() {
   const s = new Shape(), rock = col("#7d8fa1"), hw = TUNNEL_WIDTH / 2;
-  for (const pts of trackLines) {
+  for (const pts of metroLines()) {
     for (let i = 1; i < pts.length; i++) {
       const [ax, ay] = pts[i - 1], [bx, by] = pts[i], len = Math.hypot(bx - ax, by - ay);
       if (len < 0.5) continue;
@@ -841,7 +900,7 @@ function buildTunnels() {
   g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   tunnelMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
     // Molemmat puolet: putken takaseinäkin näkyy, ja Mercator-muunnoksen peilaus ei piilota pintoja.
-    vertexColors: true, transparent: true, opacity: 0.3, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    vertexColors: true, transparent: true, opacity: 0.18, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
   }));
   tunnelMesh.matrixAutoUpdate = false;
   tunnelMesh.frustumCulled = false;
@@ -969,7 +1028,7 @@ function placeLabel(v, sx, sy) {
   let el = labels.get(v.id);
   if (!el) {
     el = document.createElement("div");
-    el.className = "vlabel";
+    el.className = KINDS[v.kind].underground ? "vlabel underground" : "vlabel";
     el.style.background = COLORS[v.kind];
     labelLayer.append(el);
     labels.set(v.id, el);
@@ -1177,11 +1236,12 @@ function stats() {
 
 // ------------------------------------------------------------ julkinen rajapinta
 
-export async function createTransit(map, { boundaryUrl, metroUrl, beforeLayer, undergroundBeforeLayer }) {
+export async function createTransit(map, { boundaryUrl, railsUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
   await loadRegion(boundaryUrl);
   // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
-  loadMetroTracks(metroUrl).then(buildTunnels).catch((err) => console.warn("Metroratoja ei saatu ladattua", err));
+  // Ilman raiteita junat kulkevat ilmoitetuissa sijainneissa, eikä metrotunneleita piirretä.
+  loadRails(railsUrl).then(buildTunnels).catch((err) => console.warn("Raiteita ei saatu ladattua", err));
   labelLayer = document.createElement("div");
   labelLayer.className = "vehicle-labels";
   map.getContainer().append(labelLayer);
@@ -1224,7 +1284,7 @@ export async function createTransit(map, { boundaryUrl, metroUrl, beforeLayer, u
   setInterval(() => {
     const wall = Date.now();
     for (const v of vehicles.values()) {
-      if (wall - v.lastRx > (v.clock === railClock ? RAIL_TIMEOUT : HFP_TIMEOUT)) removeVehicle(v);
+      if (wall - v.lastRx > (KINDS[v.kind].rail != null ? RAIL_TIMEOUT : HFP_TIMEOUT)) removeVehicle(v);
     }
     if (selected) popup.setDOMContent(popupContent(selected));
     const s = stats();

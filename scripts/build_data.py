@@ -7,7 +7,7 @@ Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
 public/data/ vain tiedostot manifest.json, kaupunginosat_nimet.geojson,
-espoo_raja.geojson, sillat.json ja metro.json.
+espoo_raja.geojson, sillat.json ja raiteet.json.
 """
 import collections
 import concurrent.futures as cf
@@ -760,26 +760,40 @@ def read_positions_3d(el):
     return out
 
 
-def build_metro():
-    """Länsimetron raiteet (OpenStreetMap). Selain pitää metrojunat raiteilla ja piirtää
-    tunnelit maan alle. Mukana vain pääraiteet (ei vaihde-, varikko- eikä pistoraiteita)
-    Espoon puolelta ja vähän rajan yli."""
-    log("metro (OpenStreetMap, railway=subway)")
-    query = '[out:json][timeout:90];way["railway"="subway"](60.10,24.55,60.20,24.92);out geom tags;'
-    raw = http_get(OVERPASS, {"data": query}, os.path.join(CACHE, "metro_osm.json"))
+def build_rails():
+    """Junien, metron ja raitiovaunujen raiteet sekä pysähtymispaikat (OpenStreetMap).
+    Selain pitää junat ja vaunut raiteilla, jatkaa niiden liikettä raidetta pitkin, jos
+    sijainti katkeaa, ja pysäyttää ne asemille. Varikko- ja ratapiharaiteet jätetään pois.
+
+    Tiedosto: solmut [lon, lat, ...], raiteet [[laji, solmuindeksi, ...], ...] (laji 0 =
+    rautatie, 1 = metro, 2 = raitiotie), pysakit [solmuindeksi, ...]."""
+    log("raiteet (OpenStreetMap)")
+    bbox = "60.04,24.45,60.41,24.90"
+    query = (f'[out:json][timeout:180];way["railway"~"^(rail|subway|tram|light_rail)$"]({bbox})->.t;'
+             '.t out body geom;(node(w.t)["public_transport"="stop_position"];'
+             'node(w.t)["railway"~"^(stop|tram_stop|halt)$"];);out body;')
+    raw = http_get(OVERPASS, {"data": query}, os.path.join(CACHE, "raiteet_osm.json"))
     with open(raw, encoding="utf-8") as fh:
-        ways = json.load(fh)["elements"]
-    raiteet = []
-    for w in ways:
-        if "service" in w.get("tags", {}):
+        elements = json.load(fh)["elements"]
+    kinds = {"rail": 0, "subway": 1, "tram": 2, "light_rail": 2}
+    index, solmut, raiteet = {}, [], []
+    for w in (e for e in elements if e["type"] == "way"):
+        if w["tags"].get("service") in ("yard", "spur"):
             continue
-        pts = [(round(p["lon"], 6), round(p["lat"], 6)) for p in w["geometry"] if p["lon"] < 24.87]
-        if len(pts) >= 2:
-            raiteet.append([v for p in pts for v in p])
-    path = os.path.join(PUBLIC_DATA, "metro.json")
+        refs = []
+        for node_id, pt in zip(w["nodes"], w["geometry"]):
+            if node_id not in index:
+                index[node_id] = len(solmut) // 2
+                solmut += [round(pt["lon"], 6), round(pt["lat"], 6)]
+            refs.append(index[node_id])
+        raiteet.append([kinds[w["tags"]["railway"]], *refs])
+    pysakit = sorted({index[e["id"]] for e in elements if e["type"] == "node" and e["id"] in index})
+    path = os.path.join(PUBLIC_DATA, "raiteet.json")
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"lahde": "© OpenStreetMap-tekijät (ODbL)", "raiteet": raiteet}, fh, separators=(",", ":"))
-    log(f"  → metro.json: {len(raiteet)} raideosuutta, {os.path.getsize(path) / 1e3:.0f} kt")
+        json.dump({"lahde": "© OpenStreetMap-tekijät (ODbL)", "solmut": solmut, "raiteet": raiteet, "pysakit": pysakit},
+                  fh, separators=(",", ":"))
+    log(f"  → raiteet.json: {len(raiteet)} raidetta, {len(solmut) // 2} solmua, {len(pysakit)} pysähtymispaikkaa, "
+        f"{os.path.getsize(path) / 1e3:.0f} kt")
 
 
 def espoo_polygons():
@@ -930,8 +944,8 @@ def main():
         build_boundary()
     if want("sillat"):
         build_bridges()
-    if want("metro"):
-        build_metro()
+    if want("raiteet"):
+        build_rails()
     if want("rakennukset"):
         build_buildings()
     if want("tiilet"):

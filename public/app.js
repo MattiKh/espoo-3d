@@ -176,7 +176,7 @@ const map = new maplibregl.Map({
     compact: true,
     customAttribution: '<a href="https://www.hsl.fi/avoindata" target="_blank" rel="noopener">HSL</a>, '
       + '<a href="https://www.digitraffic.fi" target="_blank" rel="noopener">Fintraffic / digitraffic.fi</a> (CC BY 4.0)'
-      + ' · Metroradat © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
+      + ' · Raiteet © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
   },
   antialias: true, // 3D-ajoneuvojen reunat
 });
@@ -345,7 +345,7 @@ async function initTransit() {
   try {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
     transit = await createTransit(map, {
-      boundaryUrl: "data/espoo_raja.geojson", metroUrl: "data/metro.json",
+      boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json",
       beforeLayer: "kaupunginosat_nimet", undergroundBeforeLayer: "rakennukset",
     });
     window.espooTransit = transit;
