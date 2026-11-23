@@ -3,7 +3,8 @@
 Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
 kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteistä.
 Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset sekä Espoon
-yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina.
+yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina, ja latauksessa olevat
+sähköautot näkyvät latauspaikoillaan.
 
 ## Paneeli
 
@@ -43,7 +44,8 @@ python3 scripts/build_data.py
 Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
 (`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json` ja
-raiteet tiedostoon `public/data/raiteet.json`. Tiilitykseen tarvitaan
+raiteet tiedostoon `public/data/raiteet.json` ja sähköautojen latauspaikat pysäköintiruutuineen
+tiedostoon `public/data/lataus.json`. Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
@@ -89,6 +91,8 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Haukilahden vesitornin muoto | Wikipedia (Haukilahti water tower), Docomomo Suomi |
 | Otaniemen vesitornin muoto | Otaniemen vesitornin rakennushistoriaselvitys (ark-byroo 2017), Espoon LOD2-malli |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Sähköautojen latauspaikat ja latauspisteiden tila | Fintraffic / Digitraffic AFIR (REST, CC BY 4.0) |
+| Pysäköintialueet, -ruudut ja tiet latauspaikkojen ympärillä | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -188,6 +192,33 @@ kerran alusta kohden. AIS kertoo GPS-antennin etäisyyden keulaan, perään ja k
 joten malli skaalataan aluksen todelliseen pituuteen ja leveyteen ja sijoitetaan oikein antennin
 suhteen.
 
+## Sähköautot latauksessa
+
+Latauspisteiden tila tulee Fintrafficin AFIR-rajapinnasta (Digitraffic), joka kokoaa
+latausoperaattorien tiedot ja päivittää koosteen minuutin välein. Selain hakee koosteen minuutin
+välein, ja jokainen latauksessa (CHARGING) oleva latauspiste näytetään henkilöautona latauspaikan
+vieressä. Lähikuvassa auton yllä välkkyy salama, ja kaukaa autot näkyvät keltaisina pisteinä.
+Klikkaamalla näkee latauspaikan, operaattorin, liittimen ja tehon, latauksen alkamisajan sekä
+paikan muiden pisteiden tilanteen. Espoossa ja Kauniaisissa on 139 latauspaikkaa ja noin 1 200
+latauspistettä.
+
+Operaattori kertoo vain latauspisteen tilan, ei auton paikkaa, joten autot sijoitetaan
+latauspaikan ympärille rinnakkain. `build_data.py lataus` laskee jokaiselle latauspaikalle
+valmiiksi pysäköintiruudut (`public/data/lataus.json`):
+
+- Ruudut sijoitetaan ensisijaisesti OpenStreetMapin pysäköintiruutuihin, sitten pysäköintialueille
+  riveihin latauspaikkaa lähimmän reunan viereen (autot 2,7 metrin välein, keula reunaa kohti) ja
+  vasta viimeiseksi latauspaikan kohdalle lähimmän tien suuntaisesti.
+- Auto ei saa olla tiellä eikä kevyen liikenteen väylällä: sen etäisyys väylän keskiviivaan on
+  vähintään puolet väylän leveydestä (tyypin, kaistamäärän tai leveystiedon mukaan) ja marginaali.
+  Se ei myöskään saa olla rakennuksen sisällä (kartan 3D-rakennukset) eikä toisen auton päällä.
+- Pysäköintitalon latauspaikan autot sijoitetaan talon sisäänkäynnin luo.
+- Ruudut jaetaan vierekkäisten latauspaikkojen kesken vuorotellen, joten kumpikin saa lähimmät
+  ruutunsa.
+
+Selaimessa uusi lataus saa latauspaikan ensimmäisen vapaan ruudun, joten autot ovat rinnakkain
+latauspaikan vieressä, ja auto pysyy ruudussaan koko latauksen ajan.
+
 ## Maamerkit
 
 Kaksi vesitornia piirretään omina malleinaan (`public/landmarks.js`), ja niiden rakennukset
@@ -247,7 +278,7 @@ alkuperäisellä maanpinnalla, eikä rummuissa näytetä viivoja.
 - `scripts/build_data.py`: aineistojen lataus ja muunnos
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
-- `public/transit.js`: reaaliaikaiset ajoneuvot ja lentokoneet, liikkeen tasoitus ja 3D-mallit (three.js)
+- `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat

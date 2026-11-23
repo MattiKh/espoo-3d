@@ -290,7 +290,7 @@ const map = new maplibregl.Map({
     compact: true,
     customAttribution: '<a href="https://www.hsl.fi/avoindata" target="_blank" rel="noopener">HSL</a>, '
       + '<a href="https://www.digitraffic.fi" target="_blank" rel="noopener">Fintraffic / digitraffic.fi</a> (CC BY 4.0)'
-      + ' · Raiteet © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
+      + ' · Raiteet ja pysäköintialueet © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
   },
   antialias: true, // 3D-ajoneuvojen reunat
 });
@@ -464,6 +464,7 @@ async function initTransit() {
       beforeLayer: "kaupunginosat_nimet", // ajoneuvot nimien alle
       // adsb.fi ei salli selaimen suoria hakuja, joten haku kulkee välityspalvelimen kautta (server.py, netlify.toml).
       planesUrl: new URL("proxy/adsb/lat/60.21/lon/24.66/dist/25", BASE).href,
+      chargingUrl: "data/lataus.json",
     });
     window.espooTransit = transit;
     // Liikenne näkyy aina; paneelissa vain ajoneuvojen määrät.

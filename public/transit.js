@@ -44,6 +44,7 @@ export const TRANSIT_GROUPS = [
   ["metro", "Metro", "#ff6319"],
   ["laivat", "Laivat ja veneet", "#1d6fa5"],
   ["lentokoneet", "Lentokoneet", "#e63946"],
+  ["lataus", "Sähköautot latauksessa", "#f5b700"],
 ];
 
 const COLORS = {
@@ -958,7 +959,7 @@ function buildTunnels() {
 // tasoitetusta sijainnista, joten pisteetkin liikkuvat pehmeästi.
 const DOT_CAP = 3000;
 const dotPos = new Float32Array(DOT_CAP * 3), dotCol = new Float32Array(DOT_CAP * 3);
-const dotColors = Object.fromEntries(Object.entries({ ...COLORS, ship: "#1d6fa5" }).map(([k, hex]) => [k, col(hex)]));
+const dotColors = Object.fromEntries(Object.entries({ ...COLORS, ship: "#1d6fa5", lataus: "#f5b700" }).map(([k, hex]) => [k, col(hex)]));
 const dots = (() => {
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(dotPos, 3).setUsage(THREE.DynamicDrawUsage));
@@ -1569,6 +1570,172 @@ function shipContent(sh) {
     node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
 }
 
+// ------------------------------------------------------------ sähköautot latauksessa
+
+// Latauspisteiden tila tulee Fintrafficin AFIR-rajapinnasta (Digitraffic), joka kokoaa
+// latausoperaattorien tiedot ja päivittää koosteen minuutin välein. Jokainen latauksessa oleva
+// piste näytetään autona latauspaikan pysäköintiruudussa (ruudut: scripts/build_data.py, lataus.json).
+// Ruudut täytetään järjestyksessä, joten autot ovat rinnakkain latauspaikan vieressä, ja auto pysyy
+// samassa ruudussa koko latauksen ajan. Auton yllä välkkyy salama.
+const CHARGE_API = "https://afir.digitraffic.fi/api/charging-network/v1/locations/statuses/all";
+const CHARGE_POLL = 60000; // ms
+const CHARGE_COLOR = "#f5b700";
+const CHARGE_LABEL_MINZOOM = 14; // salama näkyy tätä lähempää
+const CHARGE_CAP = 600;
+const CAR_COLORS = ["#f2f3f1", "#1f2326", "#b9bec3", "#6e757b", "#2f5d8a", "#a8302c", "#1f3550", "#4d6b57", "#d9d4c7"].map(col);
+const chargePoints = new Map(); // latauspisteen tunnus → { site, ref, kw, plug, pool, status, since }
+const chargeCars = new Map(); // "charge/tunnus" → latauksessa oleva auto
+const chargeState = { ok: true };
+
+// Henkilöauto: x poikittain, y pituussuunnassa (keula +y), z ylöspäin, origo pohjan keskellä.
+// Kori on valkoinen, ja sen väri tulee instanssin väristä; lasit, renkaat ja valot ovat omassa
+// mallissaan, jotta niiden väri pysyy.
+function carBodyModel() {
+  const s = new Shape(), body = col("#ffffff"), hl = 2.3, hw = 0.92;
+  s.box(-hw, hw, -hl, hl, 0.22, 0.78, body);
+  s.hexa([[-hw, 1.0, 0.78], [hw, 1.0, 0.78], [hw, hl, 0.78], [-hw, hl, 0.78], // konepelti
+    [-hw, 1.0, 0.98], [hw, 1.0, 0.98], [hw, hl - 0.05, 0.86], [-hw, hl - 0.05, 0.86]], body);
+  s.hexa([[-hw, -hl, 0.78], [hw, -hl, 0.78], [hw, -1.4, 0.78], [-hw, -1.4, 0.78], // takaluukun alaosa
+    [-hw, -hl + 0.05, 0.95], [hw, -hl + 0.05, 0.95], [hw, -1.4, 0.98], [-hw, -1.4, 0.98]], body);
+  s.box(-0.7, 0.7, -1.15, 0.3, 1.47, 1.53, body); // katto
+  return s.geometry();
+}
+
+function carTrimModel() {
+  const s = new Shape(), hl = 2.3, hw = 0.92;
+  s.hexa([[-hw + 0.06, -1.45, 0.98], [hw - 0.06, -1.45, 0.98], [hw - 0.06, 1.0, 0.98], [-hw + 0.06, 1.0, 0.98], // ikkunat
+    [-0.72, -1.2, 1.48], [0.72, -1.2, 1.48], [0.72, 0.35, 1.48], [-0.72, 0.35, 1.48]], P.glass);
+  for (const sx of [-1, 1]) {
+    for (const y of [-1.45, 1.45]) s.cyl("x", sx * (hw - 0.1), y, 0.33, 0.33, 0.24, P.tire);
+    s.box(sx * 0.42, sx * 0.8, hl - 0.02, hl + 0.03, 0.56, 0.7, P.light);
+    s.box(sx * 0.45, sx * 0.86, -hl - 0.03, -hl + 0.02, 0.62, 0.74, P.red);
+  }
+  return s.geometry();
+}
+
+const carBody = new THREE.InstancedMesh(carBodyModel(), new THREE.MeshLambertMaterial({ vertexColors: true }), CHARGE_CAP);
+const carTrim = new THREE.InstancedMesh(carTrimModel(), new THREE.MeshLambertMaterial({ vertexColors: true }), CHARGE_CAP);
+for (const mesh of [carBody, carTrim]) {
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  mesh.count = 0;
+  scene.add(mesh);
+}
+carBody.setColorAt(0, CAR_COLORS[0]); // luo instanssien värit
+
+const hashOf = (s) => [...s].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) | 0, 7) >>> 0;
+
+async function loadCharging(url) {
+  const data = await fetch(url).then((r) => r.json());
+  for (const p of data.paikat) {
+    const site = { name: p.nimi, address: p.osoite, operator: p.operaattori, points: [],
+      pools: p.ruudut.map((slots) => ({ slots, used: new Array(slots.length).fill(null) })) };
+    for (const [id, kw, plug, ref, pool] of p.pisteet) {
+      const pt = { id, site, kw, plug, ref, pool, status: null, since: null };
+      site.points.push(pt);
+      chargePoints.set(id, pt);
+    }
+  }
+}
+
+async function pollCharging() {
+  if (document.hidden || !groupOn.lataus || !chargePoints.size) return;
+  try {
+    // Kooste päivittyy minuutin välein; välimuistissa oleva tarkistetaan palvelimelta.
+    const r = await fetch(CHARGE_API, { cache: "no-cache" });
+    if (!r.ok) throw new Error(`AFIR ${r.status}`);
+    for (const st of (await r.json()).statuses ?? []) {
+      const pt = chargePoints.get(st.evseId);
+      if (!pt) continue;
+      pt.status = st.status;
+      pt.since = st.modifiedAt ? Date.parse(st.modifiedAt) : null;
+    }
+    chargeState.ok = true;
+    syncChargeCars();
+  } catch {
+    chargeState.ok = false;
+  }
+}
+
+function syncChargeCars() {
+  for (const car of chargeCars.values()) {
+    if (car.point.status === "CHARGING") continue;
+    car.pool.used[car.slot] = null;
+    chargeCars.delete(car.id);
+    if (selected === car) { selected = null; popup.remove(); }
+  }
+  // Uudet lataukset alkamisjärjestyksessä: pisimpään ladanneet ovat lähimmissä ruuduissa.
+  const fresh = [...chargePoints.values()]
+    .filter((pt) => pt.status === "CHARGING" && !chargeCars.has(`charge/${pt.id}`))
+    .sort((a, b) => (a.since ?? 0) - (b.since ?? 0));
+  for (const pt of fresh) {
+    const pool = pt.site.pools[pt.pool], slot = pool ? pool.used.indexOf(null) : -1;
+    if (slot < 0) continue; // ruudut täynnä
+    const id = `charge/${pt.id}`, [lon, lat, bearing] = pool.slots[slot], [x, y] = toLocal(lon, lat);
+    pool.used[slot] = id;
+    chargeCars.set(id, {
+      isCharge: true, id, point: pt, pool, slot, lon, lat, x, y, yaw: -bearing * D2R,
+      color: CAR_COLORS[hashOf(pt.id) % CAR_COLORS.length], elev: null, elevAt: 0, screen: null, screenAt: 0, dot: null, dotAt: 0,
+    });
+  }
+}
+
+function drawCharging(map, ctx) {
+  const { zoom, cmx, cmy, sc, cosC, centerElev, e, W, H, now } = ctx;
+  carBody.count = carTrim.count = 0;
+  if (groupOn.lataus && zoom >= MODEL_MINZOOM) {
+    for (const car of chargeCars.values()) {
+      if (carBody.count >= CHARGE_CAP) break;
+      if (car.elev == null || now - car.elevAt > 1000) {
+        car.elev = (map.queryTerrainElevation([car.lon, car.lat]) ?? 0) + centerElev;
+        car.elevAt = now + Math.random() * 200;
+      }
+      const k = cosC / Math.cos(car.lat * D2R);
+      const wx = (mercX(car.lon) - cmx) / sc, wy = -(mercY(car.lat) - cmy) / sc, wz = (car.elev - centerElev + LIFT) * k;
+      putInstance(carBody, wx, wy, wz, car.yaw, 0, k);
+      carBody.setColorAt(carBody.count - 1, car.color);
+      putInstance(carTrim, wx, wy, wz, car.yaw, 0, k);
+      car.screen = toScreen(e, wx, wy, wz + 0.8 * k, W, H);
+      car.screenAt = now;
+      if (zoom < CHARGE_LABEL_MINZOOM) continue;
+      const top = toScreen(e, wx, wy, wz + 2.6 * k, W, H);
+      if (top && top[0] > -30 && top[0] < W + 30 && top[1] > -30 && top[1] < H + 40) {
+        placeLabel(car.id, "", "transparent", "vlabel charge", top[0], top[1]);
+      }
+    }
+  }
+  carBody.instanceMatrix.needsUpdate = carTrim.instanceMatrix.needsUpdate = true;
+  carBody.instanceColor.needsUpdate = true;
+}
+
+const timeText = (t) => new Date(t).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
+
+function durationText(ms) {
+  const min = Math.max(0, Math.round(ms / 60000)), h = Math.floor(min / 60);
+  if (h >= 48) return `${Math.floor(h / 24)} vrk`;
+  return h ? `${h} h ${min % 60} min` : `${min} min`;
+}
+
+function chargeContent(car) {
+  const pt = car.point, site = pt.site, count = (...st) => site.points.filter((p) => st.includes(p.status)).length;
+  const busy = count("CHARGING", "BLOCKED", "RESERVED"), free = count("AVAILABLE"), down = count("OUTOFORDER", "INOPERATIVE");
+  const since = pt.since == null ? null
+    : `${new Date(pt.since).toDateString() === new Date().toDateString() ? "" : new Date(pt.since).toLocaleDateString("fi-FI", { day: "numeric", month: "numeric" }) + " "}`
+      + `klo ${timeText(pt.since)} alkaen (${durationText(Date.now() - pt.since)})`;
+  const rows = [
+    ["Operaattori", site.operator],
+    ["Osoite", site.address],
+    ["Latauspiste", [pt.plug, pt.kw ? `${pt.kw} kW` : null].filter(Boolean).join(", ") || null],
+    ["Latauksessa", since],
+    ["Latauspaikalla", `${site.points.length} pistettä: ${busy} käytössä, ${free} vapaana${down ? `, ${down} pois käytöstä` : ""}`],
+  ].filter(([, val]) => val);
+  return node("div", { class: "pop" },
+    node("div", { class: "kind" }, "Sähköauto latauksessa"),
+    node("h3", {}, site.name),
+    node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))),
+    node("p", { class: "more" }, "Latausoperaattori kertoo vain latauspisteen tilan, joten auton paikka ja ulkonäkö ovat havainnollisia."));
+}
+
 // ------------------------------------------------------------ maamerkit
 
 const landmarks = LANDMARKS.map((l) => {
@@ -1636,7 +1803,7 @@ function anchorOf(sel, now) {
   let scr = null;
   if (sel.isLandmark) scr = sel.screen;
   else if (sel.isPlane) scr = sel.screenAt > now - 500 ? sel.screen : null;
-  else if (!sel.isShip && KINDS[sel.kind].underground && sel.drawnAt > now - 500 && sel.screen?.length) {
+  else if (KINDS[sel.kind]?.underground && sel.drawnAt > now - 500 && sel.screen?.length) {
     const n = sel.screen.length / 2;
     scr = [sel.screen[2 * (n >> 1)], sel.screen[2 * (n >> 1) + 1]];
   }
@@ -1711,7 +1878,7 @@ function placeLabel(id, text, color, className, sx, sy) {
 function hideStaleLabels() {
   for (const [id, el] of labels) {
     if (el.frame === frameNo) continue;
-    if (vehicles.has(id) || planes.has(id) || ships.has(id)) el.hidden = true;
+    if (vehicles.has(id) || planes.has(id) || ships.has(id) || chargeCars.has(id)) el.hidden = true;
     else { el.remove(); labels.delete(id); }
   }
 }
@@ -1784,6 +1951,21 @@ function draw(gl, matrix) {
       sh.dotAt = now;
       nDots++;
     }
+    const chargeDot = dotColors.lataus;
+    for (const car of groupOn.lataus ? chargeCars.values() : []) {
+      if (nDots >= DOT_CAP || !inView(car, 100)) continue;
+      if (car.elev == null || now - car.elevAt > 1000) {
+        car.elev = (map.queryTerrainElevation([car.lon, car.lat]) ?? 0) + centerElev;
+        car.elevAt = now + Math.random() * 200;
+      }
+      const wx = (mercX(car.lon) - cmx) / sc, wy = -(mercY(car.lat) - cmy) / sc;
+      const z = (car.elev - centerElev) * (cosC / Math.cos(car.lat * D2R));
+      dotPos[3 * nDots] = wx; dotPos[3 * nDots + 1] = wy; dotPos[3 * nDots + 2] = z;
+      dotCol[3 * nDots] = chargeDot.r; dotCol[3 * nDots + 1] = chargeDot.g; dotCol[3 * nDots + 2] = chargeDot.b;
+      car.dot = toScreen(e, wx, wy, z, W, H);
+      car.dotAt = now;
+      nDots++;
+    }
     const u = dots.material.uniforms;
     u.uRadius.value = Math.min(5.5, Math.max(2.5, 2.5 + ((zoom - 9) / 5) * 3));
     u.uOpacity.value = Math.min(1, Math.max(0, (DOT_MAXZOOM - zoom) / 1));
@@ -1849,6 +2031,7 @@ function draw(gl, matrix) {
   const ctx = { zoom, cmx, cmy, sc, cosC, centerElev, exag, e, W, H, now };
   drawPlanes(map, ctx);
   drawShips(map, ctx);
+  drawCharging(map, ctx);
   drawLandmarks(map, ctx);
   for (const x of extras) x.draw(map, ctx);
   hideStaleLabels();
@@ -1885,6 +2068,7 @@ function popupContent(v) {
   if (v.isPlane) return planeContent(v);
   if (v.isShip) return shipContent(v);
   if (v.isLandmark) return landmarkContent(v);
+  if (v.isCharge) return chargeContent(v);
   const kind = KINDS[v.kind], i = v.info;
   const rows = [
     ["Nopeus", `${Math.round((i.spd ?? 0) * 3.6)} km/h`],
@@ -1928,6 +2112,12 @@ function pick(point) {
     const d = (probe[0] - point.x) ** 2 + (probe[1] - point.y) ** 2;
     if (d < bestD) { bestD = d; best = sh; }
   }
+  for (const car of groupOn.lataus ? chargeCars.values() : []) {
+    const probe = car.screenAt > recent ? car.screen : car.dotAt > recent ? car.dot : null;
+    if (!probe) continue;
+    const d = (probe[0] - point.x) ** 2 + (probe[1] - point.y) ** 2;
+    if (d < bestD) { bestD = d; best = car; }
+  }
   for (const l of landmarks) {
     if (!l.screen) continue;
     const d = ((l.screen[0] - point.x) ** 2 + (l.screen[1] - point.y) ** 2) / 4; // iso kohde: väljempi osuma
@@ -1941,18 +2131,20 @@ function stats() {
   for (const v of vehicles.values()) if (v.x != null) counts[KINDS[v.kind].group]++;
   counts.lentokoneet = planes.size;
   counts.laivat = [...ships.values()].filter((sh) => sh.x != null && !sh.land).length;
+  counts.lataus = chargeCars.size;
   let message = "Sijainnit päivittyvät sekunnin välein. Lähennä karttaa, niin näet ajoneuvot 3D-malleina.";
   if (document.hidden) message = "";
   else if (hfp.client && !hfp.ok) message = "Yhdistetään HSL:n reaaliaikapalveluun…";
   else if (rail.client && !rail.ok) message = "Kaukojunien sijainnit (Digitraffic) eivät juuri nyt päivity.";
   else if (!planeState.ok) message = "Lentokoneiden sijainnit (adsb.fi) eivät juuri nyt päivity.";
   else if (!shipState.ok) message = "Alusten sijainnit (Digitraffic) eivät juuri nyt päivity.";
+  else if (!chargeState.ok) message = "Latauspisteiden tilat (Fintraffic) eivät juuri nyt päivity.";
   return { counts, message };
 }
 
 // ------------------------------------------------------------ julkinen rajapinta
 
-export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, beforeLayer, undergroundBeforeLayer }) {
+export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, chargingUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
   await loadRegion(boundaryUrl);
   // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
@@ -2016,12 +2208,15 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, bef
   setInterval(pollPlanes, PLANE_POLL);
   pollShips();
   setInterval(pollShips, SHIP_POLL);
+  loadCharging(chargingUrl).then(pollCharging).catch((err) => { chargeState.ok = false; console.warn("Latauspaikkoja ei saatu ladattua", err); });
+  setInterval(pollCharging, CHARGE_POLL);
 
   return {
-    vehicles, planes, ships, scene, // selaimen konsolia varten
+    vehicles, planes, ships, chargeCars, scene, // selaimen konsolia varten
     setGroup(id, on) {
       groupOn[id] = on;
       if (selected?.kind && !groupOn[KINDS[selected.kind].group]) popup.remove();
+      if (id === "lataus") { if (!on && selected?.isCharge) popup.remove(); else if (on) pollCharging(); }
       syncConnections();
       map.triggerRepaint();
     },

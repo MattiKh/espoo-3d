@@ -7,7 +7,7 @@ Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
 public/data/ vain tiedostot manifest.json, espoo_raja.geojson, kaupunginosat_nimet.geojson,
-sillat.json ja raiteet.json.
+sillat.json, raiteet.json ja lataus.json.
 """
 import collections
 import concurrent.futures as cf
@@ -1330,6 +1330,484 @@ def stream_station_stats(station_id):
     return {"kuukaudet": months, "jakso": f"{rows[0]['Aika'][:4]}–{rows[-1]['Aika'][:4]}"}
 
 
+# ---------------------------------------------------------------- sähköautojen lataus
+
+AFIR_API = "https://afir.digitraffic.fi/api/charging-network/v1"
+OVERPASS_MIRRORS = [OVERPASS, "https://overpass.kumi.systems/api/interpreter",
+                    "https://maps.mail.ru/osm/tools/overpass/api/interpreter"]
+# Latauksessa olevat autot sijoitetaan latauspaikan ympärille rinnakkain. Teiden ja rakennusten
+# suhteen henkilöauto (4,6 × 1,9 m) on kapseli: keskiakselin puolipituus ja säde. Autojen
+# keskinäinen väli tarkistetaan suorakulmioina (puolikkaat mitat, pieni väli mukana).
+CAR_AXIS, CAR_R, CAR_HALF = 1.35, 0.95, (2.4, 1.05)
+SLOT_PITCH = 2.7  # m: rinnakkain pysäköityjen autojen väli
+ROW_PITCH = 6.0  # m: rivien väli
+SLOT_REACH = 90  # m: ruudut enintään näin kaukana latauspaikasta
+SLOT_MAX = 40  # ruutuja enintään yhdelle latauspaikalle
+SLOT_CELL = 8.0  # m: esteiden hakuruudukko
+CHARGE_OSM_REACH = 250  # m: OpenStreetMap-kohteet näin kaukaa latauspaikoista
+# Tien puolileveys (m) tyypin mukaan. Kevyen liikenteen väylätkin pidetään vapaina.
+ROAD_HALF = {
+    "motorway": 7.5, "trunk": 7.0, "primary": 5.5, "secondary": 5.0, "tertiary": 4.5,
+    "motorway_link": 4.5, "trunk_link": 4.5, "primary_link": 4.0, "secondary_link": 4.0, "tertiary_link": 3.5,
+    "unclassified": 3.5, "residential": 3.5, "living_street": 3.0, "busway": 3.5, "road": 3.5,
+    "service": 2.8, "pedestrian": 2.5, "track": 1.8, "cycleway": 1.5, "footway": 1.3, "path": 1.2,
+    "steps": 1.2, "bridleway": 1.2, "platform": 1.5,
+}
+PLUGS = {"IEC_62196_T2": "Type 2", "IEC_62196_T2_COMBO": "CCS", "CHADEMO": "CHAdeMO", "DOMESTIC_F": "Schuko",
+         "IEC_62196_T1": "Type 1", "IEC_62196_T1_COMBO": "CCS1", "TESLA_S": "Tesla", "TESLA_R": "Tesla", "MCS": "MCS"}
+
+
+def local_xy(lon, lat):
+    # Paikallinen metrikoordinaatisto kuten selaimessa (transit.js); vääristymä Espoossa alle 1 %.
+    return (lon - 24.7) * 55462.0, (lat - 60.2) * 111415.0
+
+
+def local_lonlat(x, y):
+    return round(24.7 + x / 55462.0, 6), round(60.2 + y / 111415.0, 6)
+
+
+def overpass_post(query, dest, timeout=360):
+    """Pitkä Overpass-kysely POST-pyyntönä välimuistiin. Ruuhkaisen palvelimen tilalla
+    kokeillaan seuraavaa."""
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        return dest
+    body = urllib.parse.urlencode({"data": query}).encode()
+    for attempt in range(2):
+        for url in OVERPASS_MIRRORS:
+            try:
+                try:
+                    req = urllib.request.Request(url, data=body, headers={"User-Agent": UA})
+                    with urllib.request.urlopen(req, timeout=timeout) as r:
+                        data = r.read()
+                except Exception as e:
+                    if "SSL" not in str(e) or not shutil.which("curl"):
+                        raise
+                    # macOS:n järjestelmä-Pythonin TLS ei kelpaa kaikille palvelimille; curl kelpaa.
+                    data = subprocess.run(["curl", "-sf", "-A", UA, "--data-binary", "@-", url], input=body,
+                                          capture_output=True, check=True, timeout=timeout).stdout
+                parsed = json.loads(data)  # ruuhkainen palvelin vastaa HTML-sivulla
+                if "runtime error" in parsed.get("remark", ""):
+                    raise RuntimeError(parsed["remark"][:200])
+                with open(dest + ".part", "wb") as fh:
+                    fh.write(data)
+                os.replace(dest + ".part", dest)
+                return dest
+            except Exception as e:
+                log(f"  Overpass {url.split('/')[2]}: {str(e)[:120]}")
+        time.sleep(20)
+    raise RuntimeError("Overpass-kysely epäonnistui")
+
+
+def join_rings(lines):
+    """Relaation ulkoreunat yhtenäisiksi renkaiksi (jäsenet voivat olla paloina)."""
+    rings, rest = [], [list(l) for l in lines if len(l) >= 2]
+    while rest:
+        cur = rest.pop()
+        joined = True
+        while cur[0] != cur[-1] and joined:
+            joined = False
+            for i, l in enumerate(rest):
+                if l[0] == cur[-1]:
+                    cur += l[1:]
+                elif l[-1] == cur[-1]:
+                    cur += l[::-1][1:]
+                elif l[-1] == cur[0]:
+                    cur = l[:-1] + cur
+                elif l[0] == cur[0]:
+                    cur = l[::-1][:-1] + cur
+                else:
+                    continue
+                rest.pop(i)
+                joined = True
+                break
+        if cur[0] == cur[-1] and len(cur) >= 4:
+            rings.append(cur)
+    return rings
+
+
+def seg_seg_dist(ax, ay, bx, by, cx, cy, dx, dy):
+    """Janojen AB ja CD lyhin etäisyys (metreinä)."""
+    def orient(px, py, qx, qy, rx, ry):
+        return (qx - px) * (ry - py) - (qy - py) * (rx - px)
+
+    if orient(ax, ay, bx, by, cx, cy) * orient(ax, ay, bx, by, dx, dy) < 0 \
+            and orient(cx, cy, dx, dy, ax, ay) * orient(cx, cy, dx, dy, bx, by) < 0:
+        return 0.0
+
+    def pt(px, py, qx, qy, rx, ry):
+        vx, vy = rx - qx, ry - qy
+        l2 = vx * vx + vy * vy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - qx) * vx + (py - qy) * vy) / l2))
+        return math.hypot(qx + t * vx - px, qy + t * vy - py)
+
+    return min(pt(ax, ay, cx, cy, dx, dy), pt(bx, by, cx, cy, dx, dy), pt(cx, cy, ax, ay, bx, by), pt(dx, dy, ax, ay, bx, by))
+
+
+def road_half(tags):
+    """Tien puolileveys (m) tai None, jos väylä ei ole maan pinnalla autojen tiellä."""
+    kind = tags.get("highway")
+    if tags.get("area") == "yes" or tags.get("indoor") == "yes" or tags.get("tunnel") in ("yes", "building_passage", "culvert"):
+        return None
+    if tags.get("layer", "0").startswith("-"):
+        return None
+    half = ROAD_HALF.get(kind) or (3.5 if kind and kind.endswith("_link") else None)
+    if half is None:
+        return None
+    if tags.get("service") == "parking_aisle":
+        half = 2.6
+    elif tags.get("service") == "driveway":
+        half = 2.0
+    try:
+        half = max(half, float(tags.get("width", "0").replace(",", ".").split()[0]) / 2)
+    except (ValueError, IndexError):
+        pass
+    if tags.get("lanes", "").isdigit():
+        half = max(half, int(tags["lanes"]) * 1.6)
+    return half
+
+
+def slot_axis(cx, cy, hx, hy):
+    return cx + hx * CAR_AXIS, cy + hy * CAR_AXIS, cx - hx * CAR_AXIS, cy - hy * CAR_AXIS
+
+
+def cars_overlap(a, b):
+    """Menevätkö kaksi autoa (keskipiste ja suuntavektori) päällekkäin (erottava akseli)."""
+    (ax, ay, ahx, ahy), (bx, by, bhx, bhy) = a, b
+    L, W = CAR_HALF
+    for ux, uy in ((ahx, ahy), (-ahy, ahx), (bhx, bhy), (-bhy, bhx)):
+        ra = L * abs(ahx * ux + ahy * uy) + W * abs(ahx * uy - ahy * ux)
+        rb = L * abs(bhx * ux + bhy * uy) + W * abs(bhx * uy - bhy * ux)
+        if abs((bx - ax) * ux + (by - ay) * uy) > ra + rb:
+            return False
+    return True
+
+
+class SlotObstacles:
+    """Tiet, rakennukset ja jo valitut ruudut ruudukossa. Tie ja seinä tallennetaan jokaiseen
+    ruutuun, johon niiden vaatima vapaa tila ulottuu, joten ehdokkaan kohdalla riittää
+    tarkistaa ehdokkaan omat ruudut."""
+
+    def __init__(self):
+        self.segs = collections.defaultdict(list)
+        self.buildings = collections.defaultdict(list)
+        self.rings = []
+        self.cars = collections.defaultdict(list)
+
+    @staticmethod
+    def cells(x0, y0, x1, y1):
+        return [(gx, gy) for gx in range(math.floor(x0 / SLOT_CELL), math.floor(x1 / SLOT_CELL) + 1)
+                for gy in range(math.floor(y0 / SLOT_CELL), math.floor(y1 / SLOT_CELL) + 1)]
+
+    def add_seg(self, ax, ay, bx, by, clear):
+        for c in self.cells(min(ax, bx) - clear, min(ay, by) - clear, max(ax, bx) + clear, max(ay, by) + clear):
+            self.segs[c].append((ax, ay, bx, by, clear))
+
+    def add_building(self, rings):
+        xs, ys = [p[0] for p in rings[0]], [p[1] for p in rings[0]]
+        for c in self.cells(min(xs), min(ys), max(xs), max(ys)):
+            self.buildings[c].append(len(self.rings))
+        self.rings.append(rings)
+        for ring in rings:
+            for (ax, ay), (bx, by) in zip(ring, ring[1:]):
+                self.add_seg(ax, ay, bx, by, CAR_R + 0.25)
+
+    def in_building(self, x, y):
+        return any(point_in_polygon(x, y, self.rings[i])
+                   for i in self.buildings.get((math.floor(x / SLOT_CELL), math.floor(y / SLOT_CELL)), ()))
+
+    def free(self, car, cars=True):
+        """Mahtuuko auto (keskipiste ja suunta) tiestä, rakennuksista ja (cars) muista autoista."""
+        cx, cy, hx, hy = car
+        px, py, qx, qy = slot_axis(cx, cy, hx, hy)
+        for c in self.cells(min(px, qx) - CAR_R, min(py, qy) - CAR_R, max(px, qx) + CAR_R, max(py, qy) + CAR_R):
+            for ax, ay, bx, by, clear in self.segs.get(c, ()):
+                if seg_seg_dist(px, py, qx, qy, ax, ay, bx, by) < clear:
+                    return False
+        if cars and any(cars_overlap(car, other) for c in self.cells(cx - 2.7, cy - 2.7, cx + 2.7, cy + 2.7)
+                        for other in self.cars.get(c, ())):
+            return False
+        return not any(self.in_building(x, y) for x, y in ((px, py), (qx, qy), (cx, cy)))
+
+    def take(self, car):
+        cx, cy = car[0], car[1]
+        for c in self.cells(cx - 2.7, cy - 2.7, cx + 2.7, cy + 2.7):
+            self.cars[c].append(car)
+
+
+def ring_dirs(ring, anchor):
+    """Pysäköintialueen rivisuunnat: reunojen kaksi pääsuuntaa ja latauspaikkaa lähimmän
+    suoran reunan suunta (kaarevalla tai vinolla alueella se on paikallisesti parempi)."""
+    s = c = 0.0
+    near = None
+    for (ax, ay), (bx, by) in zip(ring, ring[1:]):
+        L = math.hypot(bx - ax, by - ay)
+        a = math.atan2(by - ay, bx - ax)
+        s += L * math.sin(4 * a)
+        c += L * math.cos(4 * a)
+        d = seg_seg_dist(anchor[0], anchor[1], anchor[0], anchor[1], ax, ay, bx, by)
+        if L >= 8 and (near is None or d < near[0]):
+            near = (d, (bx - ax) / L, (by - ay) / L)
+    phi = math.atan2(s, c) / 4
+    dirs = [(math.cos(phi), math.sin(phi)), (-math.sin(phi), math.cos(phi))]
+    if near and all(abs(near[1] * ux + near[2] * uy) < 0.985 for ux, uy in dirs):  # yli 10° poikkeama
+        dirs += [(near[1], near[2]), (-near[2], near[1])]
+    return dirs
+
+
+def grid_slots(anchor, rings, u, obst, penalty, kind):
+    """Rinnakkaiset ruudut riveissä suuntaan u. Pysäköintialueella (rings) ensimmäinen rivi on
+    latauspaikkaa lähimmän samansuuntaisen reunan vieressä keula reunaa kohti ja seuraavat
+    sisempänä. Ilman aluetta (rings None) rivit ovat latauspaikan kohdalla molemmin puolin."""
+    ax, ay = anchor
+    ux, uy = u
+    nx, ny = -uy, ux
+    out, edges = [], []
+    if rings is not None:
+        best = None
+        for (px, py), (qx, qy) in zip(rings[0], rings[0][1:]):
+            L = math.hypot(qx - px, qy - py)
+            if L < 3 or abs((qx - px) / L * ux + (qy - py) / L * uy) < 0.94:  # ei samansuuntainen (20°)
+                continue
+            d = seg_seg_dist(ax, ay, ax, ay, px, py, qx, qy)
+            if best is None or d < best[0]:
+                best = (d, px, py, qx, qy)
+        if best is None:
+            return out
+        _, px, py, qx, qy = best
+        if not point_in_polygon((px + qx) / 2 + nx * 0.5, (py + qy) / 2 + ny * 0.5, rings):
+            nx, ny = -nx, -ny  # normaali alueen sisään
+        t = (ax - px) * ux + (ay - py) * uy
+        ox, oy = px + ux * t + nx * 2.45, py + uy * t + ny * 2.45
+        edges = [(e1, e2) for ring in rings for e1, e2 in zip(ring, ring[1:])]
+        rows = range(0, int(SLOT_REACH / ROW_PITCH) + 1)
+    else:
+        ox, oy = ax, ay
+        rows = range(-int(SLOT_REACH / ROW_PITCH), int(SLOT_REACH / ROW_PITCH) + 1)
+    imax = int(SLOT_REACH / SLOT_PITCH)
+    for j in rows:
+        for i in range(-imax, imax + 1):
+            cx, cy = ox + (ux * i * SLOT_PITCH + nx * j * ROW_PITCH), oy + (uy * i * SLOT_PITCH + ny * j * ROW_PITCH)
+            if math.hypot(cx - ax, cy - ay) > SLOT_REACH:
+                continue
+            dv = (cx - ax) * nx + (cy - ay) * ny
+            hx, hy = (-nx, -ny) if rings is not None or dv > 0 else (nx, ny)  # keula reunaa tai latauspaikkaa kohti
+            px, py, qx, qy = slot_axis(cx, cy, hx, hy)
+            if rings is not None:
+                if not all(point_in_polygon(x, y, rings) for x, y in ((cx, cy), (px, py), (qx, qy))):
+                    continue
+                if any(seg_seg_dist(px, py, qx, qy, e1[0], e1[1], e2[0], e2[1]) < CAR_R - 0.4 for e1, e2 in edges):
+                    continue
+            if not obst.free((cx, cy, hx, hy), cars=False):
+                continue
+            # Alueella etäisyys mitataan latauspaikasta reunan viereiseen riviin, jotta lähellä oleva
+            # pysäköintialue voittaa latauspaikan ympäristön; samaa riviä suositaan.
+            if rings is not None:
+                score = math.hypot(ox - ax, oy - ay) + abs(i) * SLOT_PITCH + 2.2 * j * ROW_PITCH
+            else:
+                score = abs((cx - ax) * ux + (cy - ay) * uy) + 2.2 * abs(dv)
+            out.append((score + penalty, (cx, cy, hx, hy), kind))
+    return out
+
+
+def pool_candidates(anchor, env, obst, own=None):
+    """Latauspaikan ehdokasruudut paremmuusjärjestyksessä: latauspisteen oma sijainti,
+    OpenStreetMapin pysäköintiruudut, ruudut pysäköintialueilla ja varalla rivit
+    latauspaikan kohdalla lähimmän tien suuntaisesti."""
+    ax, ay = anchor
+    cands = [(-100, own, "oma")] if own else []
+    for cx, cy, hx, hy, charging in env["stalls"]:
+        d = math.hypot(cx - ax, cy - ay)
+        if d > SLOT_REACH:
+            continue
+        if hx * (ax - cx) + hy * (ay - cy) < 0:  # keula latauspaikan puolelle
+            hx, hy = -hx, -hy
+        if obst.free((cx, cy, hx, hy), cars=False):
+            cands.append((d - 4 - (15 if charging else 0), (cx, cy, hx, hy), "ruutu"))
+    for rings in env["parking"]:
+        xs, ys = [p[0] for p in rings[0]], [p[1] for p in rings[0]]
+        if min(xs) - SLOT_REACH > ax or max(xs) + SLOT_REACH < ax or min(ys) - SLOT_REACH > ay or max(ys) + SLOT_REACH < ay:
+            continue
+        for u in ring_dirs(rings[0], anchor):
+            cands += grid_slots(anchor, rings, u, obst, 0, "alue")
+    road = min(((seg_seg_dist(ax, ay, ax, ay, *r[:4]), r) for r in env["roads"]
+                if abs(r[0] - ax) < 80 and abs(r[1] - ay) < 80 and math.hypot(r[2] - r[0], r[3] - r[1]) > 1),
+               default=None, key=lambda t: t[0])
+    if road and road[0] < 60:
+        x1, y1, x2, y2 = road[1][:4]
+        L = math.hypot(x2 - x1, y2 - y1)
+        u = ((x2 - x1) / L, (y2 - y1) / L)
+    else:
+        u = (1.0, 0.0)
+    cands += grid_slots(anchor, None, u, obst, 35, "vara")
+    cands.sort(key=lambda c: c[0])
+    return cands
+
+
+def charging_osm(points):
+    """Tiet, pysäköintialueet ja -ruudut sekä pysäköintilaitosten sisäänkäynnit latauspaikkojen
+    ympäriltä (OpenStreetMap)."""
+    r = CHARGE_OSM_REACH
+    query = "[out:json][timeout:300];(" + "".join(
+        f'way(around:{r},{lat:.6f},{lon:.6f})[~"^(highway|amenity)$"~"."];'
+        f'relation(around:{r},{lat:.6f},{lon:.6f})["amenity"="parking"];'
+        f'node(around:{r},{lat:.6f},{lon:.6f})["amenity"="parking_entrance"];'
+        for lon, lat in sorted(set(points))) + ");out tags geom;"
+    with open(overpass_post(query, os.path.join(CACHE, "lataus_osm.json")), encoding="utf-8") as fh:
+        elements = json.load(fh)["elements"]
+    obst = SlotObstacles()
+    env = {"roads": [], "parking": [], "stalls": [], "entrances": []}
+    covered = ("underground", "multi-storey", "rooftop")  # pysäköintilaitokset: autot viereen
+    for el in elements:
+        tags = el.get("tags", {})
+        if el["type"] == "node":
+            env["entrances"].append(local_xy(el["lon"], el["lat"]))
+        elif el["type"] == "relation":
+            if tags.get("parking") not in covered:
+                outer = [[(p["lon"], p["lat"]) for p in m["geometry"]] for m in el.get("members", [])
+                         if m["type"] == "way" and m.get("role") == "outer" and m.get("geometry")]
+                env["parking"] += [[[local_xy(*p) for p in ring]] for ring in join_rings(outer)]
+        elif len(el.get("geometry", [])) >= 2:
+            pts = [local_xy(p["lon"], p["lat"]) for p in el["geometry"]]
+            closed = len(pts) >= 4 and pts[0] == pts[-1]
+            if "highway" in tags:
+                half = road_half(tags)
+                if half is None:
+                    continue
+                for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                    env["roads"].append((ax, ay, bx, by, half))
+                    obst.add_seg(ax, ay, bx, by, half + CAR_R + 0.3)
+            elif tags.get("amenity") == "parking" and closed and tags.get("parking") not in covered:
+                env["parking"].append([pts])
+            elif tags.get("amenity") == "parking_space" and closed:
+                # Ruudun pitkä sivu on auton suunta.
+                (x1, y1), (x2, y2) = max(zip(pts, pts[1:]), key=lambda e: math.hypot(e[1][0] - e[0][0], e[1][1] - e[0][1]))
+                L = math.hypot(x2 - x1, y2 - y1)
+                if L >= 3:
+                    charging = tags.get("parking_space") == "charging" or any(k.startswith(("socket", "capacity:charging")) for k in tags)
+                    env["stalls"].append((sum(p[0] for p in pts[:-1]) / (len(pts) - 1), sum(p[1] for p in pts[:-1]) / (len(pts) - 1),
+                                          (x2 - x1) / L, (y2 - y1) / L, charging))
+    log(f"  OSM: {len(env['roads'])} tienpätkää, {len(env['parking'])} pysäköintialuetta, "
+        f"{len(env['stalls'])} pysäköintiruutua, {len(env['entrances'])} sisäänkäyntiä")
+    return env, obst
+
+
+def charging_buildings(obst, points):
+    """Rakennusten pohjat latauspaikkojen ympäriltä (samat kuin kartan 3D-rakennukset)."""
+    near = set()
+    for lon, lat in points:
+        x, y = local_xy(lon, lat)
+        near.update((gx, gy) for gx in range(int((x - 200) // 100), int((x + 200) // 100) + 1)
+                    for gy in range(int((y - 200) // 100), int((y + 200) // 100) + 1))
+    n = 0
+    with open(os.path.join(OUT, "rakennukset.geojson"), encoding="utf-8") as fh:
+        for f in json.load(fh)["features"]:
+            for poly in geom_polygons(f["geometry"]):
+                x, y = local_xy(*poly[0][0])
+                if (int(x // 100), int(y // 100)) in near:
+                    obst.add_building([[local_xy(*p) for p in ring] for ring in poly])
+                    n += 1
+    log(f"  rakennuksia latauspaikkojen ympärillä: {n}")
+
+
+def build_charging():
+    """Sähköautojen latauspaikat ja pysäköintiruudut latauksessa oleville autoille.
+
+    Latauspaikat ja latauspisteet tulevat Fintrafficin AFIR-aineistosta (Digitraffic); selain
+    hakee pisteiden tilan minuutin välein. Jokaiselle latauspaikalle lasketaan rinnakkaiset
+    pysäköintiruudut, jotka eivät ole tiellä eivätkä rakennuksen sisällä: ensisijaisesti
+    OpenStreetMapin pysäköintiruutuihin tai -alueille, muuten latauspaikan kohdalle tien viereen.
+    Pysäköintilaitoksen latauspaikan autot sijoitetaan sisäänkäynnin luo. Latauspisteet, joilla on
+    oma, muista erillinen sijainti, saavat ruutunsa sen ympäriltä (pooli). Ruudut jaetaan
+    paikkojen kesken vuorotellen, jotta vierekkäisillä paikoilla kummallakin on lähimmät ruutunsa.
+
+    Tiedosto: paikat [{nimi, osoite, operaattori, ruudut: [[[lon, lat, suunta°], ...] pooleittain],
+    pisteet: [[tunnus, kW, liitin, numero, pooli], ...]}]."""
+    log("lataus (Fintraffic AFIR, OpenStreetMap)")
+    raw = http_get(f"{AFIR_API}/locations/all", {}, os.path.join(CACHE, "afir_paikat.json"))
+    with open(os.path.join(PUBLIC_DATA, "espoo_raja.geojson"), encoding="utf-8") as fh:
+        region = [p for f in json.load(fh)["features"] for p in geom_polygons(f["geometry"])]
+    with open(raw, encoding="utf-8") as fh:
+        locs = [f for f in json.load(fh)["features"]
+                if any(point_in_polygon(*f["geometry"]["coordinates"][:2], poly) for poly in region)]
+    log(f"  {len(locs)} latauspaikkaa, {sum(len(f['properties']['evses']) for f in locs)} latauspistettä")
+    points = [tuple(f["geometry"]["coordinates"][:2]) for f in locs]
+    env, obst = charging_osm(points)
+    charging_buildings(obst, points)
+
+    pools, sites = [], []
+    for f in locs:
+        p = f["properties"]
+        lx, ly = local_xy(*f["geometry"]["coordinates"][:2])
+        anchor = (lx, ly)
+        if obst.in_building(lx, ly) or p.get("parkingType") == "PARKING_GARAGE":
+            ent = min(env["entrances"], key=lambda q: math.hypot(q[0] - lx, q[1] - ly), default=None)
+            if ent and math.hypot(ent[0] - lx, ent[1] - ly) < 100:
+                anchor = ent
+        groups = {}
+        for e in sorted(p["evses"], key=lambda e: (e.get("physicalReference") or "", e["id"])):
+            g, key = e.get("geometry"), None
+            if isinstance(g, dict) and g.get("coordinates"):
+                qx, qy = local_xy(*g["coordinates"][:2])
+                if math.hypot(qx - lx, qy - ly) > 3:
+                    key = (round(qx * 2) / 2, round(qy * 2) / 2)
+            groups.setdefault(key, []).append(e)
+        site = []
+        for key, evses in groups.items():
+            pool = {"anchor": anchor if key is None else key, "need": min(len(evses), SLOT_MAX), "evses": evses, "slots": []}
+            own = None
+            if key is not None:
+                hx, hy = 0.0, 1.0
+                stall = min(env["stalls"], key=lambda s: math.hypot(s[0] - key[0], s[1] - key[1]), default=None)
+                if stall and math.hypot(stall[0] - key[0], stall[1] - key[1]) < 3:
+                    hx, hy = stall[2], stall[3]
+                if obst.free((key[0], key[1], hx, hy), cars=False):
+                    own = (key[0], key[1], hx, hy)
+            pool["cands"], pool["next"] = pool_candidates(pool["anchor"], env, obst, own), 0
+            site.append(pool)
+            pools.append(pool)
+        sites.append((f, site))
+
+    for _ in range(SLOT_MAX):
+        active = [q for q in sorted(pools, key=lambda q: q["need"]) if len(q["slots"]) < q["need"]]
+        if not active:
+            break
+        for q in active:
+            while q["next"] < len(q["cands"]):
+                _, car, _ = q["cands"][q["next"]]
+                q["next"] += 1
+                if obst.free(car):
+                    obst.take(car)
+                    q["slots"].append(car)
+                    break
+
+    paikat = []
+    for f, site in sites:
+        p = f["properties"]
+        addr = p.get("address") or {}
+        street = ", ".join(s for s in (addr.get("street"), addr.get("city")) if s)
+        pisteet = []
+        for k, pool in enumerate(site):
+            for e in pool["evses"]:
+                kw = max((c.get("maxElectricPower") or 0 for c in e["connectors"]), default=0) / 1000
+                plugs = " / ".join(dict.fromkeys(PLUGS.get(c.get("standard"), c.get("standard") or "?") for c in e["connectors"]))
+                ref = e.get("physicalReference") or e["id"].split("*")[-1]
+                pisteet.append([e["id"], round(kw) if kw else None, plugs, ref, k])
+        paikat.append({
+            "nimi": p.get("name") or addr.get("street") or "Latauspaikka", "osoite": street,
+            "operaattori": ((p.get("operator") or {}).get("details") or {}).get("name"),
+            "ruudut": [[[*local_lonlat(cx, cy), round(math.degrees(math.atan2(hx, hy))) % 360]
+                        for cx, cy, hx, hy in pool["slots"]] for pool in site],
+            "pisteet": pisteet,
+        })
+    short = sum(1 for q in pools if len(q["slots"]) < q["need"])
+    path = os.path.join(PUBLIC_DATA, "lataus.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "Fintraffic / digitraffic.fi (AFIR), pysäköintialueet © OpenStreetMap-tekijät (ODbL)",
+                   "paikat": paikat}, fh, ensure_ascii=False, separators=(",", ":"))
+    log(f"  → lataus.json: {len(paikat)} latauspaikkaa, {sum(len(q['slots']) for q in pools)} ruutua"
+        f"{f', {short} poolista puuttuu ruutuja' if short else ''}, {os.path.getsize(path) / 1e3:.0f} kt")
+
+
 def make_overlay_tiles():
     """Kaikki muut aineistot yhdeksi monitasoiseksi vektoritiilistöksi."""
     exe = shutil.which("tippecanoe")
@@ -1379,6 +1857,8 @@ def main():
         build_buildings()
     if want("kaupunginosat"):
         build_district_labels()  # rakennusten jälkeen: nimi sijoitetaan rakennusten keskelle
+    if want("lataus"):
+        build_charging()  # rakennusten jälkeen: autot eivät saa osua rakennuksiin
     if want("tiilet"):
         make_overlay_tiles()
     for ds_id, type_name, title in ESPOO_DATASETS + [("vaesto", "HSY", "Väestö"), ("rakennukset", BUILDING_TYPE, "Rakennukset")]:
