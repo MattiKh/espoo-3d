@@ -147,14 +147,26 @@ export const LAYERS = [
   { id: "wms_melu_raide", title: "Raideliikenteen melu (Lden)", wms: "Espoo_rautatieliikenne Lden_EU (juna)" },
   { id: "wms_kiinteistot", title: "Kiinteistörajat", wms: "PKSkiinteistokartta" },
   { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot" },
+  // Ilmatieteen laitoksen sadetutka: sateen voimakkuus (mm/h), päivittyy viiden minuutin välein.
+  { id: "sadetutka", title: "Sadetutka", radar: "suomi_rr_eureffin", on: true, legend: "radar" },
+];
+
+// Sadetutkan selite: Ilmatieteen laitoksen värit sateen voimakkuuden (mm/h) mukaan.
+export const RADAR_STOPS = [
+  [0.1, "#7fdcef"], [0.3, "#3fa86a"], [0.9, "#c6dd55"], [2.2, "#f2e33a"],
+  [4, "#f5a623"], [10, "#ef5a28"], [25, "#d0021b"], [50, "#6b0f3c"],
 ];
 
 // Maamerkit, jotka näytetään omana 3D-mallinaan (landmarks.js), koska rakennusaineiston pohja ei
 // kuvaa niiden muotoa. building on korvattavan rakennuksen tunnus, joka piilotetaan 3D-rakennuksista.
 export const LANDMARKS = [
   {
-    id: "haukilahden_vesitorni", name: "Haukilahden vesitorni", lon: 24.764724, lat: 60.161157, building: 1023766320,
+    id: "haukilahden_vesitorni", name: "Haukilahden vesitorni", lon: 24.764875, lat: 60.161524, building: 1023766320,
     rows: [["Valmistunut", "1968"], ["Korkeus", "45,3 m (76,3 m merenpinnasta)"], ["Huipulla", "Ravintola Haikaranpesä"]],
+  },
+  {
+    id: "otaniemen_vesitorni", name: "Otaniemen vesitorni", lon: 24.819906, lat: 60.181197, building: "101572394U",
+    rows: [["Valmistunut", "1972"], ["Arkkitehti", "Alvar Aalto"], ["Korkeus", "52 m"], ["Vesisäiliöt", "6 000 m³"]],
   },
 ];
 
@@ -176,4 +188,4 @@ export const FIELD_LABELS = {
   ika_yli80: "Yli 80-vuotiaat",
 };
 
-export const HIDDEN_FIELDS = new Set(["luokka", "arvio", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);
+export const HIDDEN_FIELDS = new Set(["luokka", "arvio", "osa", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);

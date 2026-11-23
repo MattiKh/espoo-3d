@@ -53,28 +53,32 @@ const COLORS = {
 
 // Vaunut keulasta taaksepäin: [malli, pituus (m), käännetty]. Takimmainen ohjaamovaunu on
 // sama malli käännettynä, joten molemmissa päissä on keula. height on katon korkeus (m),
-// jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), ja stops,
-// pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä.
+// jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), stops,
+// pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä, ja grade radan suurimman
+// kaltevuuden (korkeuden muutos metriä metrillä).
 const KINDS = {
   bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3 },
   tram: {
-    group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, rail: TRAM, stops: true,
+    group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, rail: TRAM, stops: true, grade: 0.07,
     cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]],
   },
   train: {
-    group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, rail: RAIL, stops: true,
+    group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, rail: RAIL, stops: true, grade: 0.025,
     cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]],
   },
   metro: {
     group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
   },
-  intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8, height: 5.0, rail: RAIL },
+  intercity: {
+    group: "junat", label: "Kaukojuna", gap: 0.8, height: 5.0, rail: RAIL, grade: 0.025,
+    cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])],
+  },
   freight: {
-    group: "junat", label: "Tavarajuna", gap: 0.9, height: 4.3, rail: RAIL,
+    group: "junat", label: "Tavarajuna", gap: 0.9, height: 4.3, rail: RAIL, grade: 0.025,
     cars: [["cargoLoco", 19.6], ...Array.from({ length: 12 }, (_, i) => (i % 3 === 1 ? ["tankWagon", 14] : ["boxWagon", 15.5]))],
   },
-  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0, height: 4.3, rail: RAIL },
+  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0, height: 4.3, rail: RAIL, grade: 0.025 },
 };
 // Lähijunassa voi olla kaksi tai kolme yksikköä kytkettynä toisiinsa (ohjaamot vastakkain).
 for (const n of [2, 3]) KINDS[`train${n}`] = { ...KINDS.train, cars: Array.from({ length: n }, () => KINDS.train.cars).flat() };
@@ -526,6 +530,8 @@ function seedTrail(v, [ux, uy]) {
   // Raiteella reitti aloitetaan raidetta pitkin, joten vaunut ovat heti raiteilla myös kaarteissa.
   v.trail = v.pos ? pathBehind(v.pos.e, v.pos.u, signFor(v.pos.e, ux, uy), back)
     : [[v.x - ux * back, v.y - uy * back], [v.x, v.y]];
+  // Raiteilla kulkevan reitin pisteisiin tallennetaan keulan korkeus (ks. updateRailZ).
+  if (v.railZ != null) v.trail = v.trail.map(([x, y]) => [x, y, v.railZ]);
   v.seedAt = [v.x, v.y];
 }
 
@@ -542,7 +548,7 @@ function updateTrail(v) {
     if (sd > 25) { v.guessed = false; seedTrail(v, [sx / sd, sy / sd]); }
     return;
   }
-  T.push([v.x, v.y]);
+  T.push(v.railZ != null ? [v.x, v.y, v.railZ] : [v.x, v.y]);
   if (T.length % 32 === 0) {
     const need = KINDS[v.kind].length * MAX_ENLARGE + 30;
     let acc = 0;
@@ -554,9 +560,10 @@ function updateTrail(v) {
 }
 
 // Pisteet reitiltä annetuilla etäisyyksillä keulasta (etäisyydet kasvavassa järjestyksessä).
-function walkTrail(v, ds, scale, out) {
+// Jos outZ annetaan, siihen tulevat reitille tallennetut korkeudet samoista kohdista.
+function walkTrail(v, ds, scale, out, outZ = null) {
   const T = v.trail;
-  let ax = v.x, ay = v.y, acc = 0, j = T.length - 1, k = 0;
+  let ax = v.x, ay = v.y, az = v.railZ, acc = 0, j = T.length - 1, k = 0;
   let ux = 0, uy = -1;
   if (T.length >= 2) {
     const a = T[T.length - 1], b = T[0], d = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
@@ -565,16 +572,20 @@ function walkTrail(v, ds, scale, out) {
   while (k < ds.length) {
     const want = ds[k] * scale;
     if (j < 0) { // reitti loppui: jatketaan suoraan
-      out[2 * k] = ax + ux * (want - acc); out[2 * k + 1] = ay + uy * (want - acc); k++;
+      out[2 * k] = ax + ux * (want - acc); out[2 * k + 1] = ay + uy * (want - acc);
+      if (outZ) outZ[k] = az;
+      k++;
       continue;
     }
-    const bx = T[j][0], by = T[j][1], seg = Math.hypot(bx - ax, by - ay);
+    const bx = T[j][0], by = T[j][1], bz = T[j][2] ?? az, seg = Math.hypot(bx - ax, by - ay);
     if (acc + seg >= want) {
       const f = seg > 1e-6 ? (want - acc) / seg : 0;
-      out[2 * k] = ax + (bx - ax) * f; out[2 * k + 1] = ay + (by - ay) * f; k++;
+      out[2 * k] = ax + (bx - ax) * f; out[2 * k + 1] = ay + (by - ay) * f;
+      if (outZ) outZ[k] = az + (bz - az) * f;
+      k++;
     } else {
       if (seg > 1e-6) { ux = (bx - ax) / seg; uy = (by - ay) / seg; }
-      acc += seg; ax = bx; ay = by; j--;
+      acc += seg; ax = bx; ay = by; az = bz; j--;
     }
   }
 }
@@ -586,7 +597,7 @@ function advance(v, wall, k) {
   const rail = KINDS[v.kind].rail;
   let [tx, ty] = rail != null ? railTarget(v, tr) : targetAt(v.samples, tr);
   if (v.x == null || Math.hypot(tx - v.x, ty - v.y) > 150) {
-    v.x = tx; v.y = ty; v.trail = [];
+    v.x = tx; v.y = ty; v.trail = []; v.railZ = null;
   } else {
     if (rail != null && !mayMove(v, tx, ty)) { tx = v.x; ty = v.y; }
     v.x += (tx - v.x) * k; v.y += (ty - v.y) * k;
@@ -595,6 +606,7 @@ function advance(v, wall, k) {
     const p = snap(v.x, v.y, rail, v.way);
     if (p) { v.x = p.x; v.y = p.y; v.pos = p; v.way = p.way; }
   }
+  if (KINDS[v.kind].grade) updateRailZ(v);
   updateTrail(v);
   const T = v.trail, a = T[T.length - 2], b = T[T.length - 1];
   const d = a && Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -602,6 +614,22 @@ function advance(v, wall, k) {
 }
 
 // ------------------------------------------------------------ raiteilla kulkevat
+
+// Junan korkeus: radan kaltevuus on rajallinen (rautatiellä enintään noin 2,5 %), joten keulan
+// korkeus saa muuttua kuljettuun matkaan nähden vain sen verran. Korkeusmallin äkkinäiset
+// muutokset (esim. tukimuurit, siltojen reunat, karkea maastotiili) ovat siksi virheitä eivätkä
+// heiluta junaa. Lisäksi sallitaan hidas liukuma, jotta korkeus asettuu kohdalleen, kun
+// tarkempi maastotiili latautuu tai juna seisoo. Vaunut käyttävät reitille tallennettuja
+// keulan korkeuksia, joten koko juna kulkee samaa tasaista profiilia.
+function updateRailZ(v) {
+  const exag = mapRef.getTerrain()?.exaggeration ?? 1, centerElev = mapRef.transform.elevation ?? 0;
+  const ground = groundAt(v, v.x, v.y, v.railZ, centerElev, exag);
+  if (v.railZ == null) { v.railZ = ground; v.railAt = [v.x, v.y]; return; }
+  const moved = Math.hypot(v.x - v.railAt[0], v.y - v.railAt[1]);
+  v.railAt = [v.x, v.y];
+  const allowed = KINDS[v.kind].grade * exag * moved + 0.3 * (lastDt / 1000);
+  v.railZ += Math.max(-allowed, Math.min(allowed, ground - v.railZ));
+}
 
 // Raiteilla kulkevan ajoneuvon tavoitesijainti. Jos uutta sijaintia ei ole tullut, liikettä
 // jatketaan raidetta pitkin viimeisellä nopeudella: junat ja metrot eivät pysähdy asemien
@@ -1607,7 +1635,7 @@ function anchorOf(sel, now) {
   return Math.abs(ll.lng - own[0]) < 0.5 && Math.abs(ll.lat - own[1]) < 0.25 ? ll : own;
 }
 
-const pts = new Float64Array(64);
+const pts = new Float64Array(64), ptsZ = new Float64Array(32);
 
 // Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla
 // korkeusmalli on nostettu kannen tasolle (bridges.js). Ajoneuvo pysyy kannella, jos se tuli
@@ -1760,8 +1788,12 @@ function draw(gl, matrix) {
       const kind = KINDS[v.kind];
       if (v.x == null || !groupOn[kind.group] || !inView(v, 400)) continue;
       const n = kind.cars.length;
-      walkTrail(v, kind.ds, scale, pts);
-      if (kind.underground) {
+      const onRailZ = kind.grade && v.railZ != null;
+      walkTrail(v, kind.ds, scale, pts, onRailZ ? ptsZ : null);
+      if (onRailZ) {
+        // Raiteilla kulkevan korkeus tulee reitiltä (kaltevuus rajattu, ks. updateRailZ).
+        v.elev = v.elevShown = Float64Array.from(ptsZ.subarray(0, 2 * n));
+      } else if (kind.underground) {
         // Tunnelissa raiteet ovat yhdellä tasolla maanpinnan muodoista riippumatta.
         v.elev = v.elevShown = new Float64Array(2 * n).fill(tunnelZ + centerElev);
       } else if (!v.elev || v.elev.length !== 2 * n || now - v.elevAt > 300) {

@@ -15,6 +15,12 @@ yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina.
   `public/layers.js` (`LAYERS`).
 - Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
   (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
+- Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,
+  PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`), ja kartan
+  pysähdyttyä näkymän ympäriltä haetaan valmiiksi naapuriruudut lähimmistä alkaen selaimen
+  välimuistiin, josta ne tulevat karttaa siirrettäessä muutamassa millisekunnissa.
+- Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h). Uusin kuva-aika luetaan
+  kahden minuutin välein, ja aika on tiiliosoitteessa, jottei selain näytä vanhaa kuvaa.
 
 ## Käynnistys
 
@@ -59,10 +65,12 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Aineisto | Lähde |
 |---|---|
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
+| Epäilyttävien korkeuksien korjaus (kattopinnat, LOD2) | Espoo WFS `bldg:building_lod2` |
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
 | Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
 | Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
+| Sadetutka, sateen voimakkuus (mm/h) | Ilmatieteen laitos, avoin WMS (CC BY 4.0) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
@@ -73,6 +81,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
 | Lentojen reitit ja lentoyhtiöt | adsbdb.com (lentotunnuksen mukaan) |
 | Haukilahden vesitornin muoto | Wikipedia (Haukilahti water tower), Docomomo Suomi |
+| Otaniemen vesitornin muoto | Otaniemen vesitornin rakennushistoriaselvitys (ark-byroo 2017), Espoon LOD2-malli |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
@@ -80,6 +89,15 @@ kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennet
 ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
 
 ## Huomioita aineistosta
+
+- Rakennusten 3D-mallissa (LOD0) jokaisella rakennuksella on vain yksi korkeus, korkein
+  mitattu kohta. Kirkon torni, jalustan päällä oleva tornitalo tai mittausvirhe (esim. nosturi)
+  nostaa silloin koko rakennuksen liian korkeaksi; esim. Ahertajantie 4 oli 79 m, vaikka sen
+  korkein kattopinta on noin 20 m. Rakennukset, jotka ovat selvästi kerroslukua korkeampia (tai
+  yli 25 m ilman kerroslukua), jaetaan LOD2-mallin kattopintojen mukaisiin osiin, joilla kullakin
+  on oma korkeutensa (`build_data.py`, `fix_heights`). Vuoden 2026 aineistossa tällaisia oli 208,
+  joista 179 jaettiin osiin ja 22:n korkeus rajattiin kerrosluvun mukaan (LOD2-mallia ei
+  löytynyt).
 
 - Espoon avoimesta vesialueaineistosta (WFS `GIS:Vesialueet`) puuttuu suuri osa
   merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista), ja myös Espoon
@@ -109,6 +127,10 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   kuutiollisella interpoloinnilla, ja lopuksi se vielä pehmennetään. Ajoneuvojen ja selaimen
   kellojen ero arvioidaan hitaasti kaikista viesteistä, jottei arvion muutos nytkäytä ajoneuvoja.
 - Vaunut seuraavat keulan kulkemaa reittiä, joten nivelraitiovaunut ja junat kaartavat.
+- Junien ja raitiovaunujen korkeus saa muuttua kuljettuun matkaan nähden vain radan suurimman
+  kaltevuuden verran (rautatie 2,5 %, raitiotie 7 %). Korkeusmallin äkkinäiset muutokset
+  ovat silloin virheitä eivätkä heiluta junaa, ja vaunut kulkevat keulan reitille tallentuneita
+  korkeuksia pitkin.
 - Junat, metrot ja raitiovaunut pidetään raiteilla (`public/rails.js`). Sijainti siirretään
   lähimmälle samanlajiselle raiteelle, ja edellisellä raiteella pysymistä suositaan, jottei juna
   hypi rinnakkaisten raiteiden välillä. Uuden junan vaunut asetetaan heti raidetta pitkin.
@@ -162,10 +184,17 @@ suhteen.
 
 ## Maamerkit
 
-Rakennusaineistossa Haukilahden vesitorni on pelkkä 45 metrin varsi, koska pohjana on vain varren
-pinta-ala. Torni piilotetaan 3D-rakennuksista ja piirretään omana mallinaan (`public/landmarks.js`):
-keskivarsi ja kuusi pilaria, kalottimainen "lentävä lautanen" (halkaisija 45 m), ravintolakerros
-ja kupoli. Lautasen paksuutta ei ole julkaistu, joten se on arvio.
+Kaksi vesitornia piirretään omina malleinaan (`public/landmarks.js`), ja niiden rakennukset
+piilotetaan 3D-rakennuksista:
+
+- Haukilahden vesitorni: rakennusaineistossa pelkkä 45 metrin varsi, koska pohjana on vain varren
+  pinta-ala. Mallissa keskivarsi ja kuusi pilaria, kalottimainen "lentävä lautanen" (halkaisija
+  45 m), ravintolakerros ja kupoli. Lautasen paksuutta ei ole julkaistu, joten se on arvio.
+- Otaniemen vesitorni (Alvar Aalto, 1970–72): rakennusaineistossa 46 metriä korkea umpinainen
+  12-kulmio. Mallissa vapaamuotoinen alaosa, 12-kulmainen kartiopohjainen säiliö 12 pylvään
+  varassa (halkaisija noin 35 m ja yläreuna 44 m LOD2-mallista), säteittäiset palkit,
+  kierreportaan lieriö, viuhkamainen kattokerros, antennimittaustorni (huippu 52 m) ja piippu.
+  Piipun paikka ja alaosan muoto on arvioitu valokuvista.
 
 ## Sillat
 

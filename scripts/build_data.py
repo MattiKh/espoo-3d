@@ -75,6 +75,11 @@ BUILDING_TILE = 6000
 REGISTER_TYPE = "GIS:Rakennukset"
 # Kantakartan sillat: reunaviivat, joiden jokaisella pisteellä on mitattu korkeus (N2000).
 BRIDGE_TYPE = "kanta:Silta"
+# 3D-malli kattomuotoineen. Raskas, joten sitä haetaan vain rakennuksille, joiden korkeus
+# LOD0-mallissa on epäilyttävä (ks. fix_heights).
+LOD2_TYPE = "bldg:building_lod2"
+BLDG = "{http://www.opengis.net/citygml/building/2.0}"
+GEN = "{http://www.opengis.net/citygml/generics/2.0}"
 
 
 def log(*a):
@@ -482,8 +487,91 @@ def build_buildings():
             seen.add(key)
             register.append(f)
     feats += register_supplement(feats, register)
+    feats = fix_heights(feats)
     path = write_geojson("rakennukset", feats)
     make_building_tiles(path)
+
+
+def suspicious_height(p):
+    """LOD0-mallissa rakennuksella on vain yksi korkeus: korkein mitattu kohta. Kirkon torni,
+    jalustan päällä oleva tornitalo tai mittausvirhe (esim. nosturi) nostaa silloin koko
+    rakennuksen liian korkeaksi. Epäilyttävä on rakennus, joka on selvästi korkeampi kuin
+    kerrosluku antaa olettaa, tai yli 25 m korkea rakennus ilman kerroslukua."""
+    h, floors = p.get("korkeus") or 0, p.get("kerrokset") or 0
+    return (floors >= 1 and h > 4.5 * floors + 8) or (floors < 1 and h > 25)
+
+
+def lod2_roof_parts(f):
+    """Rakennuksen osat LOD2-mallin kattopinnoista: kukin kattopinta nostetaan omaan
+    korkeuteensa maanpinnasta (kattopinnan keskikorkeus). Mukaan otetaan vain kattopinnat,
+    joiden keskipiste on LOD0-pohjan sisällä, koska LOD2-rakennus voi kattaa useamman
+    LOD0-rakennuksen. Palauttaa [(rengas, korkeus), ...] tai None, jos LOD2-mallista ei löydy
+    samaa rakennusta (rakennustunnus)."""
+    tunnus = str(f["properties"].get("tunnus") or "")
+    if not tunnus:
+        return None
+    merc = [lonlat_to_merc(*q) for poly in geom_polygons(f["geometry"]) for q in poly[0]]
+    box = (min(p[0] for p in merc) - 2, min(p[1] for p in merc) - 2, max(p[0] for p in merc) + 2, max(p[1] for p in merc) + 2)
+    raw = http_get(ESPOO_WFS, espoo_params(LOD2_TYPE, bbox_filter(*box)), os.path.join(CACHE, "lod2", tunnus + ".xml"), timeout=300)
+    building = None
+    for _, el in ET.iterparse(raw):
+        if el.tag == BLDG + "Building":
+            attrs = {a.get("name"): a.findtext(GEN + "value") for a in el.iter(GEN + "stringAttribute")}
+            if attrs.get("rakennustunnus") == tunnus:
+                building = el
+                break
+    if building is None:
+        return None
+    walls = [z for w in building.iter(BLDG + "WallSurface") for r in w.iter(GML + "LinearRing") for _, _, z in read_positions_3d(r)]
+    if not walls:
+        return None
+    footprint = geom_polygons(f["geometry"])
+    ground, parts = min(walls), []
+    for roof in building.iter(BLDG + "RoofSurface"):
+        for ring in roof.iter(GML + "LinearRing"):
+            pts = read_positions_3d(ring)
+            if len(pts) < 3:
+                continue
+            lonlat = [merc_to_lonlat(x, y) for x, y, _ in pts]
+            if lonlat[0] != lonlat[-1]:
+                lonlat.append(lonlat[0])
+            x0, y0 = lonlat[0]  # pinta-ala metreinä ensimmäisen pisteen suhteen (tarkkuus)
+            if abs(signed_area([((x - x0) * 55462, (y - y0) * 111415) for x, y in lonlat])) < 0.5:
+                continue  # pystysuora tai olematon pinta
+            cx, cy = sum(x for x, _ in lonlat[:-1]) / (len(lonlat) - 1), sum(y for _, y in lonlat[:-1]) / (len(lonlat) - 1)
+            if not any(point_in_polygon(cx, cy, poly) for poly in footprint):
+                continue
+            parts.append((lonlat, max(1.0, sum(z for _, _, z in pts) / len(pts) - ground)))
+    return parts or None
+
+
+def fix_heights(feats):
+    """Epäilyttävät korkeudet korjataan LOD2-mallista: rakennus jaetaan kattopintojensa
+    mukaisiin osiin, joilla kullakin on oma korkeutensa. Jos LOD2-mallia ei löydy, korkeus
+    rajataan kerrosluvun mukaiseksi."""
+    cands = [i for i, f in enumerate(feats) if not f["properties"].get("arvio") and suspicious_height(f["properties"])]
+    log(f"  korjataan {len(cands)} epäilyttävää korkeutta LOD2-mallin kattopinnoista")
+    os.makedirs(os.path.join(CACHE, "lod2"), exist_ok=True)
+    with cf.ThreadPoolExecutor(max_workers=3) as ex:
+        parts = dict(zip(cands, ex.map(lambda i: lod2_roof_parts(feats[i]), cands)))
+    out, split, capped = [], 0, 0
+    for i, f in enumerate(feats):
+        if i not in parts:
+            out.append(f)
+        elif parts[i]:
+            split += 1
+            for ring, h in parts[i]:
+                props = {**f["properties"], "korkeus": round(h, 1), "osa": 1}
+                out.append({"type": "Feature", "properties": props, "geometry": {"type": "Polygon", "coordinates": [ring]}})
+        else:
+            floors = f["properties"].get("kerrokset") or 0
+            if floors >= 1:
+                f["properties"]["korkeus"] = round(floors * 3.5 + 4, 1)
+                f["properties"]["arvio"] = 1
+                capped += 1
+            out.append(f)
+    log(f"  LOD2-osiin jaettu {split}, kerrosluvun mukaan rajattu {capped}")
+    return out
 
 
 def register_supplement(lod0, register):

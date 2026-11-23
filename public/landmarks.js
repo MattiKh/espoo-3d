@@ -49,6 +49,74 @@ function haukilahdenVesitorni() {
   return group;
 }
 
+// Pystysuora prisma tai lieriö (z-akselin suuntaan) korkeudelta z0 korkeudelle z1.
+function prism(rTop, rBottom, z0, z1, segments, color, { open = false } = {}) {
+  const g = new THREE.CylinderGeometry(rTop, rBottom, z1 - z0, segments, 1, open);
+  g.rotateX(Math.PI / 2);
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  m.position.z = (z0 + z1) / 2;
+  return m;
+}
+
+// Laatikko keskipisteestä (x, y), koko (w × d), korkeudelta z0 korkeudelle z1, kierto z-akselin ympäri.
+function block(x, y, w, d, z0, z1, color, rot = 0) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, d, z1 - z0), new THREE.MeshLambertMaterial({ color }));
+  m.position.set(x, y, (z0 + z1) / 2);
+  m.rotation.z = rot;
+  return m;
+}
+
+// Monikulmion muotoinen kappale (pohja [[x, y], ...]) korkeudelta z0 korkeudelle z1.
+function extruded(points, z0, z1, color, scale = 1) {
+  const shape = new THREE.Shape(points.map(([x, y]) => new THREE.Vector2(x * scale, y * scale)));
+  const g = new THREE.ExtrudeGeometry(shape, { depth: z1 - z0, bevelEnabled: false });
+  const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  m.position.z = z0;
+  return m;
+}
+
+// Otaniemen vesitorni (Alvar Aalto, 1970–72), 52 m korkea. Alhaalla viisikerroksinen,
+// vapaamuotoinen huippulämpökeskus- ja toimistorakennus; sen yläpuolella 12-kulmainen vesisäiliö,
+// jonka pohja on kartio ja jota kantaa 12 suorakaiteen muotoista betonipylvästä (ne jatkuvat
+// säiliön kyljessä pilastereina yläreunaan asti). Säiliön alla säteittäiset palkit ja keskellä
+// kierreportaan ja hissin lieriö. Säiliön päällä matala viuhkamainen toimistokerros ja tumma
+// antennimittaustorni, vieressä suorakaiteen muotoinen betonipiippu. Lähteet: Otaniemen
+// vesitornin rakennushistoriaselvitys (ark-byroo 2017) ja Espoon LOD2-malli (säiliön halkaisija
+// noin 35 m, yläreuna 44 m maasta). Piipun paikka ja alaosan muoto on arvioitu valokuvista.
+function otaniemenVesitorni() {
+  const group = new THREE.Group();
+  const concrete = 0xc9c9c2, lower = 0xa9a8a1, planks = 0xe2e0d8, wood = 0x8c8b84, dark = 0x3a3f44, glass = 0x2b3a46;
+  const R = 17.5, bottom = 24, belly = 30, top = 44; // säiliön ulkokulmien säde ja korkeudet (m)
+  // Alaosa: vapaamuotoinen monikulmio, ikkunanauhat 4. ja 5. kerroksessa.
+  const base = [[-13, -9], [-6, -14], [7, -13], [13, -6], [14, 5], [8, 12], [-5, 13], [-12, 7]];
+  group.add(extruded(base, 0, 19, lower));
+  group.add(extruded(base, 13.2, 14.6, glass, 1.012));
+  group.add(extruded(base, 16.3, 17.7, glass, 1.012));
+  group.add(prism(4.5, 4.5, 0, top, 24, concrete)); // kierreportaan ja hissin lieriö
+  group.add(prism(R, 5, bottom, belly, 12, wood)); // säiliön kartiopohja (harmaa lautaverhous)
+  group.add(prism(R, R, belly, top, 12, planks)); // säiliö
+  for (const z of [33.5, 37, 40.5]) group.add(prism(R + 0.08, R + 0.08, z, z + 0.25, 12, wood, { open: true })); // lankkusaumat
+  // CylinderGeometryn kulmat ovat kulmissa i·30° (0° = etelä); pylväät kulmiin.
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2, x = R * Math.sin(a), y = -R * Math.cos(a);
+    group.add(block(x, y, 1.4, 2.4, 0, top + 1, concrete, a));
+    const r = (4.5 + R) / 2; // säteittäinen palkki säiliön alla
+    group.add(block(r * Math.sin(a), -r * Math.cos(a), 0.8, R - 4.5, bottom - 1.6, bottom, concrete, a));
+  }
+  // Viuhkamainen toimistokerros säiliön päällä (koilliseen) ja antennimittaustorni.
+  const fan = [[-5, -4]];
+  for (let k = 0; k <= 8; k++) {
+    const a = ((15 + (k / 8) * 75) * Math.PI) / 180;
+    fan.push([-5 + 17 * Math.cos(a), -4 + 17 * Math.sin(a)]);
+  }
+  group.add(extruded(fan, top, top + 2.6, concrete));
+  group.add(extruded(fan, top + 0.9, top + 2.0, glass, 1.01));
+  group.add(block(2, 3, 4, 4, top + 2.6, 52, dark));
+  group.add(block(8, 20, 7, 4, 0, 48, concrete)); // huippulämpökeskuksen piippu
+  return group;
+}
+
 export const LANDMARK_MODELS = {
   haukilahden_vesitorni: haukilahdenVesitorni,
+  otaniemen_vesitorni: otaniemenVesitorni,
 };

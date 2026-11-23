@@ -1,6 +1,6 @@
 import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
-  LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
+  LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION, WMS_SERVICES,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
 
@@ -37,6 +37,114 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
   const [z, x, y] = url.match(/(\d+)\/(\d+)\/(\d+)\.webp$/).slice(1).map(Number);
   return { data: await patchDemTile(await res.arrayBuffer(), z, x, y) };
 });
+
+// Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
+// mutta sallii vastausten tallentamisen selaimen välimuistiin. Ruudut haetaan oman protokollan
+// kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa, ja kartan pysähdyttyä näkymän
+// ympäriltä haetaan valmiiksi naapuriruudut. Karttaa siirrettäessä ne tulevat välimuistista heti.
+const ORTHO_PREFETCH_RADIUS = 2; // ruutua keskiruudun ympäriltä samalla tasolla (yksi karkeammalla)
+const orthoInflight = new Map();
+const orthoPrefetched = new Set();
+let orthoQueue = [], orthoActive = 0;
+
+function tileBBox(z, x, y) {
+  const world = 2 * Math.PI * 6378137, size = world / 2 ** z, x0 = -world / 2 + x * size, y1 = world / 2 - y * size;
+  return `${x0},${y1 - size},${x0 + size},${y1}`;
+}
+
+function orthoUrl(layer, z, x, y) {
+  const params = new URLSearchParams({
+    SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layer, STYLES: "", SRS: "EPSG:3857",
+    WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: "TRUE", BBOX: tileBBox(z, x, y),
+  });
+  return `${WMS_SERVICES.espoo}?${params}`;
+}
+
+// Sama ruutu haetaan vain kerran, vaikka ennakkohaku ja kartta pyytäisivät sitä yhtä aikaa.
+function fetchOrtho(url, priority) {
+  let p = orthoInflight.get(url);
+  if (!p) {
+    p = fetch(url, { priority }).then((r) => (r.ok ? r.arrayBuffer() : new ArrayBuffer(0))).finally(() => orthoInflight.delete(url));
+    orthoInflight.set(url, p);
+  }
+  return p;
+}
+
+maplibregl.addProtocol("ortho", async (params) => {
+  const [layer, z, x, y] = params.url.slice("ortho://".length).split("/");
+  return { data: await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high") };
+});
+
+function prefetchOrtho() {
+  orthoQueue = [];
+  if (!state.ortho) return;
+  const layer = ORTHO_YEARS[state.orthoIndex][1], c = map.getCenter(), zoom = Math.round(map.getZoom());
+  const wanted = [];
+  for (const [z, r, w] of [[zoom, ORTHO_PREFETCH_RADIUS, 1], [zoom - 1, 1, 2]]) {
+    const n = 2 ** z, lat = (c.lat * Math.PI) / 180;
+    const cx = Math.floor(((c.lng + 180) / 360) * n), cy = Math.floor(((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n);
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const url = orthoUrl(layer, z, cx + dx, cy + dy);
+        if (!orthoPrefetched.has(url)) wanted.push([Math.hypot(dx, dy) * w, url]);
+      }
+    }
+  }
+  // Lähimmät ruudut ensin; karkeamman tason ruudut kattavat nelinkertaisen alan.
+  orthoQueue = wanted.sort((a, b) => a[0] - b[0]).map(([, url]) => url);
+  pumpOrtho();
+}
+
+// Neljä ennakkohakua kerrallaan matalalla prioriteetilla, jottei näkyvien ruutujen lataus hidastu.
+function pumpOrtho() {
+  while (orthoActive < 4 && orthoQueue.length) {
+    const url = orthoQueue.shift();
+    orthoPrefetched.add(url);
+    orthoActive++;
+    fetchOrtho(url, "low").catch(() => orthoPrefetched.delete(url)).finally(() => { orthoActive--; pumpOrtho(); });
+  }
+}
+
+const orthoTiles = (layer) => [`ortho://${layer}/{z}/{x}/{y}`];
+
+// Sadetutka: Ilmatieteen laitoksen sateen voimakkuus (mm/h). Uusin kuva-aika luetaan tason
+// ominaisuuksista viiden minuutin välein; aika on tiiliosoitteessa, joten selain ei näytä vanhaa kuvaa
+// välimuistista.
+const FMI_WMS = "https://openwms.fmi.fi/geoserver/Radar";
+const ATTR_FMI = 'Sadetutka © <a href="https://www.ilmatieteenlaitos.fi/avoin-data" target="_blank" rel="noopener">Ilmatieteen laitos</a> (CC BY 4.0)';
+let radarTime = null;
+
+function radarTiles(layer, time) {
+  const params = new URLSearchParams({
+    SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layer, STYLES: "", SRS: "EPSG:3857",
+    WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: "TRUE", TIME: time,
+  });
+  return [`${FMI_WMS}/wms?${params}&BBOX={bbox-epsg-3857}`];
+}
+
+async function refreshRadar() {
+  const def = LAYERS.find((d) => d.radar);
+  if (!def) return;
+  try {
+    const caps = await fetch(`${FMI_WMS}/${def.radar}/wms?service=WMS&request=GetCapabilities&version=1.3.0`, { cache: "no-store" }).then((r) => r.text());
+    const times = caps.match(/<Dimension name="time"[^>]*>([^<]+)</)?.[1] ?? "";
+    const latest = times.split(",").pop().split("/")[1] ?? times.split(",").pop();
+    if (!latest || latest === radarTime) return;
+    radarTime = latest;
+    if (map.getSource(def.id)) {
+      map.getSource(def.id).setTiles(radarTiles(def.radar, latest));
+    } else {
+      map.addSource(def.id, { type: "raster", tiles: radarTiles(def.radar, latest), tileSize: 512, attribution: ATTR_FMI });
+      map.addLayer({
+        id: def.id, type: "raster", source: def.id, layout: { visibility: def.on ? "visible" : "none" },
+        paint: { "raster-opacity": 0.7, "raster-fade-duration": 0 },
+      }, "rakennukset");
+    }
+    renderLegends();
+  } catch (err) {
+    console.warn("Sadetutkan kuva-aikaa ei saatu", err);
+  }
+}
 
 const state = {
   ortho: true, // ilmakuva on oletuspohja, mutta sen voi ottaa pois
@@ -88,7 +196,7 @@ function buildStyle() {
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
-    ortho: { type: "raster", tiles: wmsTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, attribution: ATTR_ESPOO },
+    ortho: { type: "raster", tiles: orthoTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, attribution: ATTR_ESPOO },
     kohteet: {
       type: "vector", tiles: [`gz://${BASE}tiles/kohteet/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`],
       minzoom: 8, maxzoom: 15, attribution: ATTR_ESPOO + " · " + ATTR_HSY,
@@ -108,6 +216,7 @@ function buildStyle() {
   const order = { raster: 0, fill: 1, line: 2, circle: 3, "fill-extrusion": 4 };
   const overlay = [];
   for (const def of LAYERS) {
+    if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
     if (def.wms) {
       sources[def.id] = {
         type: "raster", tiles: wmsTiles(def.wms, { service: def.service, extra: def.params }), tileSize: 512,
@@ -175,7 +284,13 @@ window.espooMap = map; // selaimen konsolia varten
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
-map.on("load", initTransit);
+map.on("load", () => {
+  initTransit();
+  refreshRadar();
+  setInterval(refreshRadar, 120000);
+  prefetchOrtho();
+});
+map.on("moveend", () => setTimeout(prefetchOrtho, 400));
 
 const busy = document.getElementById("busy");
 // Ajoneuvojen vuoksi kartta piirtyy jatkuvasti, eikä idle-tapahtuma tule, joten latauksen
@@ -187,7 +302,9 @@ map.on("idle", () => busy.classList.remove("on"));
 // ------------------------------------------------------------ paneeli
 
 function setVisible(def, on) {
-  if (def.wms) {
+  if (def.radar) {
+    if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
+  } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else {
     for (const l of map.getStyle().layers) {
@@ -201,13 +318,15 @@ function setVisible(def, on) {
 function setOrtho(on) {
   state.ortho = on;
   map.setLayoutProperty("ortho", "visibility", on ? "visible" : "none");
+  prefetchOrtho();
   document.getElementById("ortho-options").hidden = !on;
   applyTimeFilter();
 }
 
 function setOrthoYear(index) {
   state.orthoIndex = index;
-  map.getSource("ortho").setTiles(wmsTiles(ORTHO_YEARS[index][1]));
+  map.getSource("ortho").setTiles(orthoTiles(ORTHO_YEARS[index][1]));
+  prefetchOrtho();
   applyTimeFilter();
 }
 
@@ -270,6 +389,11 @@ function renderLegends() {
     if (def.legend === "landuse") slot.append(legendRows(LANDUSE_CLASSES));
     if (def.legend === "population") slot.append(gradientLegend([[0, "#ffffcc"], [200, "#a1dab4"], [600, "#41b6c4"], [1200, "#2c7fb8"], [2500, "#253494"]], (v) => v));
     if (def.legend === "traffic") slot.append(gradientLegend([[0, "#ffd166"], [10000, "#f77f00"], [30000, "#d62828"], [70000, "#6a040f"]], (v) => (v / 1000) + "k"));
+    if (def.legend === "radar") {
+      slot.append(gradientLegend(RADAR_STOPS.filter((_, i) => i % 2 === 0 || i === RADAR_STOPS.length - 1), (v) => String(v).replace(".", ",")));
+      const t = radarTime ? new Date(radarTime).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" }) : "…";
+      slot.append(el("p", { class: "hint" }, `Sateen voimakkuus (mm/h), tutkakuva klo ${t}. Ilmatieteen laitos.`));
+    }
   }
 }
 
@@ -379,7 +503,8 @@ map.on("click", (e) => {
     .filter(([k, v]) => !HIDDEN_FIELDS.has(k) && v !== "" && v !== null && !(k.startsWith("Liikennemäärä") && v === 0))
     .map(([k, v]) => {
       // Rakennusrekisteristä täydennettyjen rakennusten korkeus on arvioitu kerrosluvusta.
-      const label = k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
+      const label = k === "korkeus" && p.osa ? "Korkeus (m, rakennuksen osa)"
+        : k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
       return el("tr", {}, el("th", {}, label), el("td", {}, formatValue(k, v)));
     });
   const title = POPUP_TITLES[key]?.(p) ?? p.Nimi ?? p.nimi ?? p.NIMI ?? layerTitle(key);
