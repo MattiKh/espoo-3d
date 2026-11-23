@@ -218,6 +218,7 @@ function buildStyle() {
   for (const def of LAYERS) {
     if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
     if (def.labels) continue; // nimet lisätään kaiken päälle (alla)
+    if (def.streams) continue; // lisätään, kun uomat on ladattu (initStreams)
     if (def.wms) {
       sources[def.id] = {
         type: "raster", tiles: wmsTiles(def.wms, { service: def.service, extra: def.params }), tileSize: 512,
@@ -299,6 +300,7 @@ map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
 map.on("load", () => {
   initTransit();
+  initStreams();
   refreshRadar();
   setInterval(refreshRadar, 120000);
   prefetchOrtho();
@@ -315,7 +317,9 @@ map.on("idle", () => busy.classList.remove("on"));
 // ------------------------------------------------------------ paneeli
 
 function setVisible(def, on) {
-  if (def.radar || def.labels) {
+  if (def.streams) {
+    streams?.setVisible(on);
+  } else if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
@@ -407,6 +411,7 @@ function renderLegends() {
       const t = radarTime ? new Date(radarTime).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" }) : "…";
       slot.append(el("p", { class: "hint" }, `Sateen voimakkuus (mm/h), tutkakuva klo ${t}. Ilmatieteen laitos.`));
     }
+    if (def.legend === "streams") slot.append(el("p", { class: "hint" }, streams?.legendText() ?? "Ladataan uomia…"));
   }
 }
 
@@ -477,6 +482,32 @@ async function initTransit() {
   }
 }
 
+// ------------------------------------------------------------ purot ja joet
+
+let streams = null;
+
+// Uomat ja virtaus (streams.js). Virtaviivat piirretään joukkoliikenteen 3D-tasolla (transit.js).
+async function initStreams() {
+  const def = LAYERS.find((d) => d.streams);
+  if (!def) return;
+  try {
+    const [{ createStreams }, { addExtra }] = await Promise.all([import("./streams.js"), import("./transit.js")]);
+    streams = await createStreams(map, { url: "data/purot.json", visible: def.on, beforeLayer: "rakennukset" });
+    addExtra(streams.drawable);
+    streams.onUpdate(renderLegends);
+    renderLegends();
+  } catch (err) {
+    console.warn("Puroja ei saatu ladattua", err);
+  }
+}
+
+// Ohut uomaviiva osuu helpommin, kun klikkauksen ympäriltä haetaan muutaman pikselin alue.
+function pickStream(point) {
+  if (!streams || !map.getLayer("purot") || map.getLayoutProperty("purot", "visibility") === "none") return null;
+  const r = 6, [f] = map.queryRenderedFeatures([[point.x - r, point.y - r], [point.x + r, point.y + r]], { layers: ["purot"] });
+  return f ? streams.popupContent(f.properties) : null;
+}
+
 // ------------------------------------------------------------ ponnahdusikkuna
 
 const popup = new maplibregl.Popup({ maxWidth: "340px", closeButton: true });
@@ -506,10 +537,13 @@ map.on("click", (e) => {
     .filter((l) => (l.id === "rakennukset" || l.id.includes("__")) && map.getLayoutProperty(l.id, "visibility") !== "none")
     .map((l) => l.id);
   const feats = map.queryRenderedFeatures(e.point, { layers: queryable });
-  if (!feats.length) { popup.remove(); return; }
   // Rakennus tai pistemäinen kohde ennen sen alla olevia alueita.
   const rank = { "fill-extrusion": 0, circle: 1, line: 2, fill: 3 };
   feats.sort((a, b) => rank[a.layer.type] - rank[b.layer.type]);
+  // Uoma ennen alueita (esim. asemakaavan käyttötarkoitus).
+  const stream = !feats.length || feats[0].layer.type === "fill" ? pickStream(e.point) : null;
+  if (stream) { popup.setLngLat(e.lngLat).setDOMContent(stream).addTo(map); return; }
+  if (!feats.length) { popup.remove(); return; }
   const f = feats[0];
   const key = layerKey(f.layer.id);
   const p = f.properties;

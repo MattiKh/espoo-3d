@@ -1596,6 +1596,18 @@ function drawLandmarks(map, ctx) {
   }
 }
 
+// Muiden moduulien 3D-kohteet samalle tasolle (esim. purojen virtaus, streams.js):
+// { object, draw(map, ctx), animating() }. object lisätään näkymään, draw kutsutaan joka ruudussa,
+// ja kartta piirretään jatkuvasti, kun animating() on tosi.
+const extras = [];
+const extrasAnimating = () => extras.some((x) => x.animating());
+
+export function addExtra(extra) {
+  extras.push(extra);
+  scene.add(extra.object);
+  mapRef?.triggerRepaint();
+}
+
 function landmarkContent(l) {
   return node("div", { class: "pop" },
     node("div", { class: "kind" }, "Maamerkki"),
@@ -1838,6 +1850,7 @@ function draw(gl, matrix) {
   drawPlanes(map, ctx);
   drawShips(map, ctx);
   drawLandmarks(map, ctx);
+  for (const x of extras) x.draw(map, ctx);
   hideStaleLabels();
   for (const mesh of Object.values(meshes)) mesh.instanceMatrix.needsUpdate = true;
 }
@@ -1970,7 +1983,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, bef
       renderScene(gl, overlayScene, flatCamera);
       // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti. Kaukaa katsottaessa
       // liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
-      if (!Object.values(groupOn).some(Boolean)) return;
+      if (!Object.values(groupOn).some(Boolean) && !extrasAnimating()) return;
       if (map.getZoom() >= 11) map.triggerRepaint();
       else repaintTimer ??= setTimeout(() => { repaintTimer = null; map.triggerRepaint(); }, 50);
     },
@@ -1981,7 +1994,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, bef
 
   // Varmistus: jos piirtosilmukka on pysähtynyt (esim. kaikki ryhmät olivat pois), käynnistetään se.
   setInterval(() => {
-    if (performance.now() - lastRender > 1000 && Object.values(groupOn).some(Boolean)) map.triggerRepaint();
+    if (performance.now() - lastRender > 1000 && (Object.values(groupOn).some(Boolean) || extrasAnimating())) map.triggerRepaint();
   }, 1000);
 
   const listeners = [];

@@ -994,6 +994,342 @@ def point_in_polygon(x, y, poly):
     return inside
 
 
+# ---------------------------------------------------------------- purot ja joet
+
+SYKE_HY_WFS = "https://paikkatiedot.ymparisto.fi/geoserver/inspire_hy/wfs"
+HYDRO_API = "https://rajapinnat.ymparisto.fi/api/Hydrologiarajapinta/1.1/odata"
+# Syken jatkuvasti mittaava virtaama-asema Espoonjoessa. Muiden uomien virtaama arvioidaan sen avulla.
+STREAM_STATION = {"id": 3006, "nimi": "Espoonjoki", "lon": 24.5967, "lat": 60.1856}
+# Uomat ja valuma-alueet haetaan Espoota laajemmalta alueelta (lat, lon, lat, lon), jotta Espoon
+# läpi virtaavien uomien yläjuoksun valuma-ala tulee mukaan.
+STREAM_OSM_BBOX = (60.0, 24.30, 60.50, 25.0)
+STREAM_SYKE_BBOX = (60.0, 24.25, 60.55, 25.1)
+STREAM_MARGIN = 500  # m: näin kaukana Espoon rajan takana olevat uomat ovat mukana
+STREAM_SIMPLIFY = 0.7  # m
+
+
+def stream_xy(lon, lat):
+    """Paikalliset metrit kuten selaimessa (transit.js, bridges.js)."""
+    return (lon - 24.7) * 55462.0, (lat - 60.2) * 111415.0
+
+
+def build_streams():
+    """Purot ja joet virtaussuuntineen ja yläpuolisine valuma-aloineen sekä Espoonjoen
+    virtaaman kuukausitilastot. Selain arvioi muiden uomien virtaaman valuma-alan suhteessa
+    Espoonjoen mittaukseen ja näyttää virtauksen lähikuvassa (streams.js).
+
+    Uomat ovat OpenStreetMapista (waterway=river/stream/canal). Viivat on piirretty
+    virtaussuuntaan (Espoossa Syken uomaverkoston kanssa päällekkäisistä uomista 99,9 %
+    samaan suuntaan), ja rummut on merkitty. Yläpuolinen valuma-ala kertyy alavirtaan Syken
+    valuma-aluejaon pienimmistä alueista: kunkin alueen oma pinta-ala jaetaan sen sisällä
+    kulkeville uomille pituuksien suhteessa. Järvien kohdalla OSM:n uomat katkeavat, joten
+    alueiden purkupisteissä kertymä nostetaan vähintään Syken laskemaan yläpuoliseen valuma-alaan.
+
+    Tiedosto: asema {id, nimi, lon, lat, ala, kuukaudet [[mediaani, p10, p90] × 12], jakso},
+    uomat [{p: [lon, lat, ...] alavirtaan, o: [[alkupiste, valuma-ala km², rumpu, nimi], ...]}],
+    jossa o:n rivi kuvaa ketjun osuutta pisteestä alkupiste seuraavan osuuden alkuun."""
+    log("purot (OpenStreetMap, Syke)")
+    s, w, n, e = STREAM_OSM_BBOX
+    query = f'[out:json][timeout:240];way["waterway"~"^(river|stream|canal)$"]({s},{w},{n},{e});out body geom;'
+    raw = http_get(OVERPASS, {"data": query}, os.path.join(CACHE, "purot_osm.json"))
+    with open(raw, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if "error" in data.get("remark", ""):  # Overpass voi keskeyttää haun ja palauttaa vain osan
+        os.remove(raw)
+        raise RuntimeError(f"Overpass: {data['remark']}")
+    pieces = stream_pieces([el for el in data["elements"] if el["type"] == "way"])
+
+    def syke(type_name, name):
+        s, w, n, e = STREAM_SYKE_BBOX
+        params = {"service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeNames": "inspire_hy:" + type_name,
+                  "outputFormat": "application/json", "srsName": "EPSG:4326",
+                  "bbox": f"{s},{w},{n},{e},urn:ogc:def:crs:EPSG::4326"}  # WFS 2.0: leveysaste ensin
+        with open(http_get(SYKE_HY_WFS, params, os.path.join(CACHE, name)), encoding="utf-8") as fh:
+            return json.load(fh)["features"]
+
+    areas = syke("HY.ValumaAluejakoTaso5", "valuma_taso5.json")
+    outlets = syke("HY.ValumaAluejakoPurkupisteet", "valuma_purkupisteet.json")
+    stream_local_areas(pieces, areas)
+    acc = stream_accumulate(pieces, {})
+    for _ in range(3):  # yhtymäkohtien parit tarkentuvat, kun yläjuoksun kertymät tarkentuvat
+        acc = stream_accumulate(pieces, stream_outlet_anchors(pieces, areas, outlets, acc))
+
+    keep = stream_region_filter(pieces)
+    uomat = []
+    for chain in stream_chains(pieces, acc, keep):
+        verts, osat = [], []
+        for i in chain:
+            p = pieces[i]
+            ll = [p["ll"][k] for k in simplify_indices(p["xy"], STREAM_SIMPLIFY)]
+            start = max(len(verts) - 1, 0)  # osuus alkaa edellisen osuuden loppupisteestä
+            verts += ll if not verts else ll[1:]
+            osat.append([start, round(acc[i], 3), int(p["culvert"]), p["name"]])
+        uomat.append({"p": [round(v, 6) for q in verts for v in q], "o": osat})
+
+    station = dict(STREAM_STATION)
+    sx, sy = stream_xy(station["lon"], station["lat"])
+    near = [i for i in range(len(pieces)) if keep[i] and point_line_distance(sx, sy, pieces[i]["xy"]) < 150]
+    station["ala"] = round(max(acc[i] for i in near), 2)
+    station.update(stream_station_stats(station["id"]))
+    path = os.path.join(PUBLIC_DATA, "purot.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "Uomat © OpenStreetMap-tekijät (ODbL), valuma-alueet ja virtaama © Syke (CC BY 4.0)",
+                   "asema": station, "uomat": uomat}, fh, ensure_ascii=False, separators=(",", ":"))
+    kept = [p for p, k in zip(pieces, keep) if k]
+    log(f"  → purot.json: {len(uomat)} ketjua, {len(kept)} osuutta, {sum(p['len'] for p in kept) / 1000:.0f} km "
+        f"(rumpuja {sum(p['len'] for p in kept if p['culvert']) / 1000:.0f} km), Espoonjoen valuma-ala asemalla "
+        f"{station['ala']} km², {os.path.getsize(path) / 1e3:.0f} kt")
+
+
+def stream_pieces(ways):
+    """OSM:n uomaviivat osuuksiksi risteyskohdista: alku- ja loppusolmu, pisteet, nimi ja rumpu."""
+    use = collections.Counter(nd for w in ways for nd in w["nodes"])
+    pieces = []
+    for w in ways:
+        t, nodes, geom = w["tags"], w["nodes"], w["geometry"]
+        name = t.get("name") or t.get("name:fi") or t.get("name:sv") or ""
+        culvert = t.get("tunnel") in ("culvert", "yes", "flooded", "pipe") or t.get("culvert") == "yes"
+        start = 0
+        for i in range(1, len(nodes)):
+            if i == len(nodes) - 1 or use[nodes[i]] > 1:
+                ll = [(geom[k]["lon"], geom[k]["lat"]) for k in range(start, i + 1)]
+                xy = [stream_xy(*q) for q in ll]
+                length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(xy, xy[1:]))
+                pieces.append({"a": nodes[start], "b": nodes[i], "ll": ll, "xy": xy, "len": length,
+                               "name": name, "culvert": culvert, "river": t["waterway"] == "river"})
+                start = i
+    return pieces
+
+
+def stream_main_branches(pieces):
+    """Haarautumissa (esim. myllykanava tai sivu-uoma, joka on piirretty joesta poispäin) vesi jatkaa
+    päähaaraan: sama nimi kuin tulevalla uomalla, joki ennen puroa, avouoma ennen rumpua, pisin."""
+    outs, names = collections.defaultdict(list), collections.defaultdict(set)
+    for i, p in enumerate(pieces):
+        outs[p["a"]].append(i)
+        if p["name"]:
+            names[p["b"]].add(p["name"])
+    rank = lambda node: lambda i: (pieces[i]["name"] in names[node], pieces[i]["river"], not pieces[i]["culvert"], pieces[i]["len"])
+    return {node: max(idx, key=rank(node)) for node, idx in outs.items() if len(idx) > 1}
+
+
+def stream_local_areas(pieces, areas):
+    """Valuma-alueen oma pinta-ala (km²) jaetaan alueella kulkeville uomille pituuksien suhteessa.
+    Osuus kuuluu alueeseen, jolla sen keskimmäinen piste on."""
+    cells, polys = collections.defaultdict(list), []
+    for f in areas:
+        g = f["geometry"]
+        for poly in ([g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]):
+            rings = [[stream_xy(x, y) for x, y, *_ in ring] for ring in poly]
+            xs, ys = [x for x, _ in rings[0]], [y for _, y in rings[0]]
+            for cx in range(int(min(xs) // 2000), int(max(xs) // 2000) + 1):
+                for cy in range(int(min(ys) // 2000), int(max(ys) // 2000) + 1):
+                    cells[(cx, cy)].append(len(polys))
+            polys.append((rings, f["properties"]))
+    members = collections.defaultdict(list)
+    for i, p in enumerate(pieces):
+        p["local"] = 0.0
+        mx, my = p["xy"][len(p["xy"]) // 2]
+        for k in cells.get((int(mx // 2000), int(my // 2000)), []):
+            if point_in_polygon(mx, my, polys[k][0]):
+                members[polys[k][1]["objectid"]].append((i, polys[k][1]))
+                break
+    for group in members.values():
+        total = sum(pieces[i]["len"] for i, _ in group)
+        area = (group[0][1]["osavalu_pa_ha"] or 0) / 100
+        for i, _ in group:
+            pieces[i]["local"] = area * (pieces[i]["len"] / total if total else 1 / len(group))
+
+
+def stream_accumulate(pieces, anchors):
+    """Yläpuolinen valuma-ala osuuden alapäässä (km²): yläpuolisten osuuksien kertymä ja osuuden oma
+    osa. anchors[i] = (ala, tarkka): tarkka ala korvaa yläpuolisten kertymän, muuten se on alaraja.
+    Haarautumassa kertymä jatkuu vain päähaaraan. Silmukat (esim. virheellisesti piirretyt uomat)
+    puretaan käsittelemällä jokin niiden osuuksista ensin."""
+    outs, ins = collections.defaultdict(list), collections.defaultdict(list)
+    for i, p in enumerate(pieces):
+        outs[p["a"]].append(i)
+        ins[p["b"]].append(i)
+    main = stream_main_branches(pieces)
+    indeg = [len(ins[p["a"]]) for p in pieces]
+    queue = collections.deque(i for i, d in enumerate(indeg) if d == 0)
+    acc = [None] * len(pieces)
+    pending = 0
+    while True:
+        while queue:
+            i = queue.popleft()
+            if acc[i] is not None:
+                continue
+            p = pieces[i]
+            inflow = sum(acc[j] for j in ins[p["a"]] if acc[j] is not None) if main.get(p["a"], i) == i else 0.0
+            area, exact = anchors.get(i, (0, False))
+            acc[i] = area + p["local"] if exact else max(inflow + p["local"], area)
+            for k in outs[p["b"]]:
+                indeg[k] -= 1
+                if indeg[k] == 0:
+                    queue.append(k)
+        while pending < len(pieces) and acc[pending] is not None:
+            pending += 1
+        if pending == len(pieces):
+            return acc
+        queue.append(pending)
+
+
+def stream_outlet_anchors(pieces, areas, outlets, acc):
+    """Valuma-alueiden purkupisteet uomaosuuksille: purkupisteen yläpuolinen valuma-ala on Syken
+    laskema. Purkupiste on alueen alapäässä, joten sen kohdalle päättyvä tai sen ohi kulkeva osuus
+    saa alueen yläpuolisen valuma-alan alarajaksi. Samassa pisteessä olevat purkupisteet ovat
+    yhtymäkohtaan laskevia uomia: suurin valuma-ala annetaan osuudelle, jonka kertymä on suurin,
+    ja pisteestä alavirtaan lähtevän pääuoman ala on tarkalleen niiden summa. Yksittäiselle
+    purkupisteelle valitaan lähellä (40 m) olevista osuuksista se, jonka kertymä on lähimpänä
+    Syken arvoa."""
+    upstream = {f["properties"]["taso5_id"]: f["properties"]["ylavalu_pa_km2"] for f in areas}
+    grid = collections.defaultdict(set)
+    for i, p in enumerate(pieces):
+        for x, y in p["xy"]:
+            grid[(int(x // 50), int(y // 50))].add(i)
+    groups = collections.defaultdict(list)
+    for o in outlets:
+        area = upstream.get(o["properties"]["taso5_id"])
+        g = o["geometry"]
+        if area:
+            x, y = stream_xy(*(g["coordinates"][0] if g["type"] == "MultiPoint" else g["coordinates"])[:2])
+            groups[(round(x), round(y))].append(area)
+    main = stream_main_branches(pieces)
+    anchors = {}
+
+    def raise_to(i, area):
+        if not anchors.get(i, (0, False))[1]:
+            anchors[i] = (max(anchors.get(i, (0, False))[0], area), False)
+
+    for (x, y), group in groups.items():
+        cands = {i for cx in range(int(x // 50) - 1, int(x // 50) + 2) for cy in range(int(y // 50) - 1, int(y // 50) + 2)
+                 for i in grid.get((cx, cy), ())}
+        cands = [i for i in cands if point_line_distance(x, y, pieces[i]["xy"]) < 40]
+        near = lambda q: math.hypot(q[0] - x, q[1] - y) < 40
+        leaving = [i for i in cands if near(pieces[i]["xy"][0]) and not near(pieces[i]["xy"][-1])]
+        arriving = [i for i in cands if i not in leaving]
+        if len(group) == 1:
+            pool = arriving or leaving
+            if pool:
+                raise_to(min(pool, key=lambda i: abs(math.log((acc[i] + 0.01) / group[0]))), group[0])
+            continue
+        for area, i in zip(sorted(group, reverse=True), sorted(arriving, key=lambda i: -acc[i])):
+            raise_to(i, area)
+        if leaving:
+            mains = [i for i in leaving if main.get(pieces[i]["a"], i) == i]
+            anchors[max(mains or leaving, key=lambda i: (pieces[i]["river"], pieces[i]["len"]))] = (sum(group), True)
+    return anchors
+
+
+def stream_region_filter(pieces):
+    """Osuudet Espoon (ja Kauniaisten) alueella tai enintään STREAM_MARGIN metrin päässä rajasta."""
+    with open(os.path.join(PUBLIC_DATA, "espoo_raja.geojson"), encoding="utf-8") as fh:
+        polys = [[[stream_xy(x, y) for x, y in ring] for ring in poly]
+                 for f in json.load(fh)["features"] for poly in f["geometry"]["coordinates"]]
+    edges = [(a, b) for poly in polys for ring in poly for a, b in zip(ring, ring[1:])]
+
+    def near(x, y):
+        if any(point_in_polygon(x, y, poly) for poly in polys):
+            return True
+        return any(point_line_distance(x, y, [a, b]) < STREAM_MARGIN for a, b in edges
+                   if min(a[0], b[0]) - STREAM_MARGIN < x < max(a[0], b[0]) + STREAM_MARGIN
+                   and min(a[1], b[1]) - STREAM_MARGIN < y < max(a[1], b[1]) + STREAM_MARGIN)
+
+    return [near(*p["xy"][0]) or near(*p["xy"][-1]) for p in pieces]
+
+
+def stream_chains(pieces, acc, keep):
+    """Osuudet ketjuiksi lähteeltä alavirtaan. Risteyksessä ketju jatkuu suurimmasta yläpuolisesta
+    uomasta; sivu-uoman ketju päättyy risteykseen. Selain kuljettaa virtaviivoja ketjua pitkin."""
+    ins = collections.defaultdict(list)
+    for i, p in enumerate(pieces):
+        if keep[i]:
+            ins[p["b"]].append(i)
+    parent, nxt = {}, {}
+    for i, p in enumerate(pieces):
+        ups = ins.get(p["a"]) if keep[i] else None
+        if ups:
+            parent[i] = max(ups, key=lambda j: acc[j])
+    for i, j in parent.items():
+        if j not in nxt or acc[i] > acc[nxt[j]]:
+            nxt[j] = i
+    used, chains = set(), []
+    # Ensin ketjut lähteiltä ja sivu-uomista, sitten silmukoihin jääneet osuudet.
+    starts = [i for i in range(len(pieces)) if keep[i] and nxt.get(parent.get(i)) != i]
+    for i in starts + [i for i in range(len(pieces)) if keep[i]]:
+        if i in used:
+            continue
+        chain = []
+        while i is not None and i not in used:
+            used.add(i)
+            chain.append(i)
+            i = nxt.get(i)
+        chains.append(chain)
+    return chains
+
+
+def point_line_distance(x, y, pts):
+    best = math.inf
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]) if len(pts) > 1 else [(pts[0], pts[0])]:
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / len2)) if len2 else 0.0
+        best = min(best, math.hypot(ax + t * dx - x, ay + t * dy - y))
+    return best
+
+
+def simplify_indices(pts, tol):
+    """Douglas–Peucker: säilytettävien pisteiden indeksit (päätepisteet aina mukana)."""
+    keep, stack = {0, len(pts) - 1}, [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = pts[i], pts[j]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        best, k = tol, None
+        for m in range(i + 1, j):
+            px, py = pts[m]
+            d = abs((px - ax) * dy - (py - ay) * dx) / length if length else math.hypot(px - ax, py - ay)
+            if d > best:
+                best, k = d, m
+        if k is not None:
+            keep.add(k)
+            stack += [(i, k), (k, j)]
+    return sorted(keep)
+
+
+def stream_station_stats(station_id):
+    """Aseman päivävirtaamien kuukausittainen mediaani sekä 10 % ja 90 % fraktiilit (m³/s).
+    Hydrologiarajapinta palauttaa JSONia vain Accept-otsakkeella, ja sivulla on enintään 500 riviä."""
+    dest = os.path.join(CACHE, f"virtaama_{station_id}.json")
+    if not os.path.exists(dest):
+        rows, skip = [], 0
+        while True:
+            q = urllib.parse.urlencode({"$filter": f"Paikka_Id eq {station_id}", "$orderby": "Aika",
+                                        "$select": "Aika,Arvo", "$top": 500, "$skip": skip})
+            req = urllib.request.Request(f"{HYDRO_API}/Virtaama?{q}", headers={"User-Agent": UA, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                page = json.load(r)["value"]
+            rows += page
+            if len(page) < 500:
+                break
+            skip += 500
+        with open(dest, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh)
+    with open(dest, encoding="utf-8") as fh:
+        rows = [r for r in json.load(fh) if r["Arvo"] is not None]
+    by_month = collections.defaultdict(list)
+    for r in rows:
+        by_month[int(r["Aika"][5:7])].append(float(r["Arvo"]))
+    quantile = lambda v, f: v[min(len(v) - 1, int(f * len(v)))]
+    months = []
+    for m in range(1, 13):
+        v = sorted(by_month[m])
+        months.append([round(quantile(v, f), 3) for f in (0.5, 0.1, 0.9)])
+    return {"kuukaudet": months, "jakso": f"{rows[0]['Aika'][:4]}–{rows[-1]['Aika'][:4]}"}
+
+
 def make_overlay_tiles():
     """Kaikki muut aineistot yhdeksi monitasoiseksi vektoritiilistöksi."""
     exe = shutil.which("tippecanoe")
@@ -1037,6 +1373,8 @@ def main():
         build_bridges()
     if want("raiteet"):
         build_rails()
+    if want("purot"):
+        build_streams()
     if want("rakennukset"):
         build_buildings()
     if want("kaupunginosat"):

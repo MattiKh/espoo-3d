@@ -124,6 +124,9 @@ export const LAYERS = [
     params: { FORMAT_OPTIONS: "antialias:none" },
     paint: { "raster-brightness-min": 0.3, "raster-saturation": -0.15 },
   },
+  // Purot ja joet (streams.js, data/purot.json): uomat maaston pinnalla ja lähikuvassa alavirtaan
+  // liikkuva virtaus. Virtaama mitataan Espoonjoesta; muiden uomien virtaama on arvio.
+  { id: "purot", title: "Purot ja joet", streams: true, on: true, legend: "streams" },
   {
     id: "vaesto", title: "Asukkaat 250 m ruuduissa (3D)", legend: "population",
     vector: [{

@@ -8,10 +8,11 @@ yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina.
 ## Paneeli
 
 - Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
-- Aineistoja on kolmetoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
-  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, asukkaat 250 m ruuduissa
-  (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat, kantakartan maastotiedot
-  sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet, vesialueet ja sadetutka.
+- Aineistoja on neljätoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
+  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, purot ja joet, asukkaat
+  250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat,
+  kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet,
+  vesialueet, purot ja joet sekä sadetutka.
   Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
 - Kaupunginosan nimi on alueen rakennusten keskellä, koska kaupunginosien rajat ulottuvat
   usein merelle (`kaupunginosat_nimet.geojson`, `build_data.py kaupunginosat`).
@@ -73,6 +74,9 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
 | Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
 | Sadetutka, sateen voimakkuus (mm/h) | Ilmatieteen laitos, avoin WMS (CC BY 4.0) |
+| Purot ja joet, virtaussuunnat ja rummut | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Valuma-alueet ja niiden purkupisteet (yläpuolinen valuma-ala) | Syke, valuma-aluejako (INSPIRE WFS, CC BY 4.0) |
+| Espoonjoen virtaama (päiväarvot 1995 alkaen) | Syke, hydrologiarajapinta (CC BY 4.0) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
@@ -210,6 +214,32 @@ ja muistaa alkuperäisen maanpinnan korkeuden.
 Ajoneuvo pysyy kannella, jos se tuli sillalle kannen korkeudelta, esimerkiksi penkereeltä.
 Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 
+## Purot ja joet
+
+Uomat ovat OpenStreetMapista: joet, purot ja kanavat Espoossa ja enintään 500 metrin päässä
+rajasta (585 km, josta rumpuja 28 km). OSM:n viivat on piirretty virtaussuuntaan. Espoossa ne
+kulkevat Syken uomaverkoston kanssa samaan suuntaan 99,9 %:ssa niistä uomista, jotka ovat
+molemmissa. Uomat piirretään maaston pintaan, viivan leveys kasvaa valuma-alan mukaan, ja
+rummussa viiva on haalea. Aineisto on tiedostossa `public/data/purot.json` (`build_data.py purot`).
+
+Kunkin uoman yläpuolinen valuma-ala lasketaan Syken valuma-aluejaon pienimmistä alueista. Alueen
+oma pinta-ala jaetaan sen uomille pituuksien suhteessa, ja se kertyy alavirtaan. Järvien kohdalla
+OSM:n uomat katkeavat, joten alueiden purkupisteissä kertymä korjataan Syken laskemaan
+yläpuoliseen valuma-alaan. Kun uoma haarautuu (esim. myllykanava), vesi jatkaa päähaaraan.
+
+Virtaamaa mitataan Espoossa vain Espoonjoesta. Syken asemalta tulee päiväarvo noin vuorokauden
+viiveellä, ja aseman valuma-ala on 126 km². Selain hakee uusimman arvon tunnin välein Syken
+hydrologiarajapinnasta. Muiden uomien virtaama arvioidaan olettaen, että neliökilometriltä valuu
+yhtä paljon vettä kuin Espoonjoen valuma-alueelta: Q = Q_asema · A / A_asema. Kaupunkipurot
+reagoivat sateeseen nopeammin, joten arvio on suuntaa-antava. Selite vertaa Espoonjoen
+virtaamaa saman kuukauden mediaaniin (päiväarvot vuodesta 1995).
+
+Lähikuvassa (zoom 13,5 tai lähempää) uomissa liikkuu alavirtaan valkoisia virtaviivoja
+(`public/streams.js`, joukkoliikenteen 3D-tasolla). Liike on nopeutettu, ja se on mitoitettu
+näytön pikseleissä: mitä suurempi virtaama, sitä nopeampia, pidempiä ja tiheämpiä viivat ovat.
+Leveissä uomissa viivoja kulkee rinnakkain. Sillan kohdalla viivat kulkevat kannen alta
+alkuperäisellä maanpinnalla, eikä rummuissa näytetä viivoja.
+
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
@@ -219,5 +249,6 @@ Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot ja lentokoneet, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
+- `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
