@@ -250,8 +250,10 @@ Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 Uomat ovat OpenStreetMapista: joet, purot ja kanavat Espoossa ja enintään 500 metrin päässä
 rajasta (585 km, josta rumpuja 28 km). OSM:n viivat on piirretty virtaussuuntaan. Espoossa ne
 kulkevat Syken uomaverkoston kanssa samaan suuntaan 99,9 %:ssa niistä uomista, jotka ovat
-molemmissa. Uomat piirretään maaston pintaan, viivan leveys kasvaa valuma-alan mukaan, ja
-rummussa viiva on haalea. Aineisto on tiedostossa `public/data/purot.json` (`build_data.py purot`).
+molemmissa. Selain tasoittaa uomat Chaikinin kulmanleikkauksella kahdesti, jotta mutkat ovat
+pyöreitä. Yhtymäkohdat ja muut osuuksien rajat pysyvät paikallaan. Uomat piirretään maaston
+pintaan, viivan leveys kasvaa valuma-alan mukaan, ja rummussa viiva on haalea. Aineisto on
+tiedostossa `public/data/purot.json` (`build_data.py purot`).
 
 Kunkin uoman yläpuolinen valuma-ala lasketaan Syken valuma-aluejaon pienimmistä alueista. Alueen
 oma pinta-ala jaetaan sen uomille pituuksien suhteessa, ja se kertyy alavirtaan. Järvien kohdalla
@@ -265,11 +267,14 @@ yhtä paljon vettä kuin Espoonjoen valuma-alueelta: Q = Q_asema · A / A_asema.
 reagoivat sateeseen nopeammin, joten arvio on suuntaa-antava. Selite vertaa Espoonjoen
 virtaamaa saman kuukauden mediaaniin (päiväarvot vuodesta 1995).
 
-Lähikuvassa (zoom 13,5 tai lähempää) uomissa liikkuu alavirtaan valkoisia virtaviivoja
-(`public/streams.js`, joukkoliikenteen 3D-tasolla). Liike on nopeutettu, ja se on mitoitettu
-näytön pikseleissä: mitä suurempi virtaama, sitä nopeampia, pidempiä ja tiheämpiä viivat ovat.
-Leveissä uomissa viivoja kulkee rinnakkain. Sillan kohdalla viivat kulkevat kannen alta
-alkuperäisellä maanpinnalla, eikä rummuissa näytetä viivoja.
+Lähikuvassa (zoom 13,5 tai lähempää) uoman päällä on nauha, jossa alavirtaan kulkee valkoisia
+valopulsseja (`public/streams.js`, joukkoliikenteen 3D-tasolla). Nauha seuraa tasoitettua uomaa,
+joten pulssit kaartuvat mutkissa uoman mukana. Aiemmin suorat virtaviivat oikaisivat mutkat
+sahalaitaisiksi. Nauhan geometria on kiinteä, ja pulssit lasketaan varjostimessa matkasta uomaa
+pitkin ja ajasta. Liike on nopeutettu, ja se on mitoitettu näytön pikseleissä: mitä suurempi
+virtaama, sitä nopeampia ja leveämpiä pulssit ovat. Isossa uomassa pulssin keskikohta kulkee
+reunoja edellä kuten virtaus. Sillan kohdalla nauha kulkee kannen alta alkuperäisellä
+maanpinnalla, eikä rummuissa näytetä pulsseja.
 
 ## Rakenne
 

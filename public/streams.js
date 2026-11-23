@@ -5,21 +5,25 @@
 // (Syken hydrologiarajapinta, päiväarvo). Muiden uomien virtaama arvioidaan olettamalla, että
 // neliökilometriltä valuu yhtä paljon vettä kuin Espoonjoen valuma-alueelta: Q = Q_asema · A / A_asema.
 //
-// Uomat piirretään maaston pintaan MapLibren viivatasona. Lähikuvassa niissä liikkuu alavirtaan
-// virtaviivoja (three.js, transit.js:n 3D-tasolla). Liike on nopeutettu ja mitoitettu näytön
-// pikseleissä: mitä enemmän uomassa virtaa vettä, sitä nopeampia, pidempiä ja tiheämpiä viivat ovat.
+// Uomat tasoitetaan (mutkat pyöreiksi) ja piirretään maaston pintaan MapLibren viivatasona.
+// Lähikuvassa uoman päällä on nauha, jossa alavirtaan kulkee valopulsseja (three.js, transit.js:n
+// 3D-tasolla). Nauha seuraa uomaa, joten pulssit kaartuvat mutkien mukana. Nauhan geometria on
+// kiinteä: pulssit lasketaan varjostimessa matkasta uomaa pitkin ja ajasta. Liike on nopeutettu ja
+// mitoitettu näytön pikseleissä: mitä enemmän uomassa virtaa vettä, sitä nopeampia ja leveämpiä
+// pulssit ovat, ja isossa uomassa pulssin keskikohta kulkee reunoja edellä kuten virtaus.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import { rawElevationAt } from "./bridges.js";
 
 const HYDRO_API = "https://rajapinnat.ymparisto.fi/api/Hydrologiarajapinta/1.1/odata";
 const DISCHARGE_POLL = 3600000; // ms: asemalta tulee päiväarvo, joten tunnin välein riittää
 export const FLOW_MINZOOM = 13.5;
-const FADE_ZOOM = 0.4; // virtaviivat tulevat näkyviin tällä zoomausvälillä
-const STREAK_CAP = 8000;
-const ELEV_BUDGET = 1500; // korkeuskyselyä piirtokertaa kohden
+const FADE_ZOOM = 0.4; // virtaus tulee näkyviin tällä zoomausvälillä
+const SMOOTH_ROUNDS = 2; // Chaikin-tasoitus: OSM:n uomissa pisteet ovat noin 10 metrin välein
+const ELEV_BUDGET = 2500; // korkeuskyselyä piirtokertaa kohden
 const ELEV_MAX_AGE = 3000; // ms: näkyvien pisteiden korkeus haetaan uudelleen, kun korkeusmalli tarkentuu
-// Virtaviivat nostetaan maanpinnasta (px näytöllä), koska uoman pohja on korkeusmallissa usein
-// maastomallin pintaa alempana ja peittäisi ne.
+const UNKNOWN = -1e4; // korkeutta ei vielä tiedetä
+// Nauha nostetaan maanpinnasta (px näytöllä), koska uoman pohja on korkeusmallissa usein
+// maastomallin pintaa alempana ja peittäisi sen.
 const LIFT_PX = 1.5;
 const ATTR = 'Purot © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>, '
   + 'valuma-alueet ja virtaama © <a href="https://www.syke.fi/avoindata" target="_blank" rel="noopener">Syke</a> (CC BY 4.0)';
@@ -30,22 +34,16 @@ const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
 const ORIGIN_LON = 24.7, ORIGIN_LAT = 60.2, M_LON = 55462, M_LAT = 111415; // paikalliset metrit kuten transit.js
 const mercX = (lon) => (lon + 180) / 360;
 const mercY = (lat) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2)) / Math.PI) / 2;
+const ORIGIN_MX = mercX(ORIGIN_LON), ORIGIN_MY = mercY(ORIGIN_LAT);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-// Virtaaman (m³/s) suuruusluokka 0…1: 1 l/s → 0, 10 m³/s → 1. Siitä riippuvat virtaviivojen
-// nopeus (px/s), väli (px), pituus ja leveys (px) sekä rinnakkaisten jonojen määrä.
+// Virtaaman (m³/s) suuruusluokka 0…1: 1 l/s → 0, 10 m³/s → 1. Siitä riippuvat pulssien nopeus
+// (px/s) ja väli (px); nauhan leveys ja kirkkaus lasketaan varjostimessa samasta luvusta.
 const sizeOf = (q) => clamp((Math.log10(Math.max(q, 1e-4)) + 3) / 4, 0, 1);
 const STYLE = {
   speed: (t) => 10 + 34 * t,
-  spacing: (t) => 72 - 36 * t,
-  length: (t) => 11 + 19 * t,
-  width: (t) => 1.6 + 3 * t,
-  lanes: (t) => (t > 0.78 ? 3 : t > 0.55 ? 2 : 1),
-  alpha: (t) => 0.55 + 0.4 * t,
+  spacing: (t) => 80 - 30 * t,
 };
-const MAX_LANES = 3;
-// Uoman leveys (m) virtaamasta (hydraulinen geometria, karkea): rinnakkaiset jonot sen sisälle.
-const channelWidth = (q) => 3.5 * Math.sqrt(q);
 
 const fmtNum = (v, digits) => v.toLocaleString("fi-FI", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 export function formatFlow(q) {
@@ -55,14 +53,42 @@ export function formatFlow(q) {
   return `${fmtNum(Math.max(q * 1000, 0.1), q * 1000 >= 10 ? 0 : 1)} l/s`;
 }
 
+// Chaikinin kulmanleikkaus: kierros korvaa kunkin välipisteen kahdella pisteellä viereisten
+// osien 1/4- ja 3/4-kohdissa, joten mutkat pyöristyvät. Päätepisteet pysyvät paikallaan.
+function chaikin(pts, rounds) {
+  for (let r = 0; r < rounds && pts.length > 2; r++) {
+    const out = [pts[0]];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [ax, ay] = pts[i], [bx, by] = pts[i + 1];
+      if (i > 0) out.push([0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by]);
+      if (i < pts.length - 2) out.push([0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by]);
+    }
+    out.push(pts[pts.length - 1]);
+    pts = out;
+  }
+  return pts;
+}
+
 function prepareChains(data) {
   return data.uomat.map((u) => {
-    const n = u.p.length / 2;
-    const mx = new Float64Array(n), my = new Float64Array(n), lx = new Float32Array(n), ly = new Float32Array(n);
-    const s = new Float64Array(n), pieceOf = new Int32Array(n);
+    // Osuudet tasoitetaan erikseen, jotta niiden rajat (yhtymäkohdat) pysyvät paikallaan.
+    const ll = [], pieces = [];
+    u.o.forEach(([start, area, culvert, name], k) => {
+      const end = k + 1 < u.o.length ? u.o[k + 1][0] : u.p.length / 2 - 1;
+      const raw = [];
+      for (let i = start; i <= end; i++) raw.push([u.p[2 * i], u.p[2 * i + 1]]);
+      const smooth = chaikin(raw, SMOOTH_ROUNDS);
+      pieces.push({ start: Math.max(ll.length - 1, 0), area, culvert: !!culvert, name, q: 0, t: 0 });
+      ll.push(...(ll.length ? smooth.slice(1) : smooth));
+    });
+    const n = ll.length;
+    const lonlat = new Float64Array(2 * n), mx = new Float64Array(n), my = new Float64Array(n);
+    const lx = new Float32Array(n), ly = new Float32Array(n), s = new Float64Array(n), pieceOf = new Int32Array(n);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < n; i++) {
-      const lon = u.p[2 * i], lat = u.p[2 * i + 1];
+      const [lon, lat] = ll[i];
+      lonlat[2 * i] = lon;
+      lonlat[2 * i + 1] = lat;
       mx[i] = mercX(lon);
       my[i] = mercY(lat);
       lx[i] = (lon - ORIGIN_LON) * M_LON;
@@ -71,12 +97,10 @@ function prepareChains(data) {
       minX = Math.min(minX, lx[i]); maxX = Math.max(maxX, lx[i]);
       minY = Math.min(minY, ly[i]); maxY = Math.max(maxY, ly[i]);
     }
-    const pieces = u.o.map(([start, area, culvert, name]) => ({ start, area, culvert: !!culvert, name, q: 0, t: 0 }));
     pieces.forEach((p, k) => pieceOf.fill(k, p.start, k + 1 < pieces.length ? pieces[k + 1].start : n));
     return {
-      lonlat: u.p, mx, my, lx, ly, s, pieceOf, pieces, minX, minY, maxX, maxY,
-      elev: new Float32Array(n).fill(NaN), elevAt: new Float64Array(n), u: new Float64Array(n), du: 1,
-      phase: Math.random(),
+      lonlat, mx, my, lx, ly, s, pieceOf, pieces, minX, minY, maxX, maxY,
+      elev: new Float32Array(n).fill(UNKNOWN), elevAt: new Float64Array(n), v0: 0, phase: Math.random(), tMain: 0,
     };
   });
 }
@@ -99,56 +123,135 @@ function lineFeatures(chains) {
 function lineLayer(visible) {
   const culvert = ["==", ["get", "rumpu"], 1];
   const byW = (a, b) => ["interpolate", ["linear"], ["get", "w"], 0, a, 1, b];
-  // Kaukaa näytetään vain isommat uomat; rummussa kulkeva osuus on haalea.
+  // Kaukaa näytetään vain isommat uomat; rummussa kulkeva osuus on haalea. Lähikuvassa viiva
+  // ohenee, jottei se peitä virtausta.
   const opacity = (big, small) => ["*", ["case", culvert, 0.45, 1], ["case", [">=", ["get", "ala"], 5], big, small]];
   return {
     id: "purot", type: "line", source: "purot", minzoom: 11,
     layout: { "line-cap": "round", "line-join": "round", visibility: visible ? "visible" : "none" },
     paint: {
       "line-color": ["case", culvert, "#8bb8d0", "#3a9ad9"],
-      "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 11, byW(0.4, 1.8), 14, byW(0.8, 4), 17, byW(1.6, 11)],
-      "line-opacity": ["interpolate", ["linear"], ["zoom"], 11, opacity(0.8, 0), 12.5, opacity(0.85, 0.3), 14, opacity(0.85, 0.75)],
+      "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 11, byW(0.4, 1.8), 14, byW(0.8, 3.2), 17, byW(1.2, 6)],
+      "line-opacity": ["interpolate", ["linear"], ["zoom"], 11, opacity(0.8, 0), 12.5, opacity(0.85, 0.3), 14, opacity(0.85, 0.75),
+        16, opacity(0.65, 0.6)],
     },
   };
 }
 
-function streakMesh() {
-  const geometry = new THREE.PlaneGeometry(1, 1); // x pitkin virtaa (kärki +x), y poikittain
-  geometry.setAttribute("aAlpha", new THREE.InstancedBufferAttribute(new Float32Array(STREAK_CAP), 1).setUsage(THREE.DynamicDrawUsage));
+const RIBBON_VERTEX = `
+  attribute vec2 aNormal;
+  attribute vec2 aDuPhase;
+  attribute float aSide, aElev, aU, aT, aInvCos, aHide;
+  uniform vec2 uShift;
+  uniform float uInvSc, uCenterElev, uCosC, uMpp, uLift;
+  varying float vU, vSide, vT, vVis;
+  varying vec2 vDuPhase;
+  void main() {
+    // Leveys pikseleinä: sama näytöllä zoomista riippumatta. Mutkien kohdalla aNormal on pidennetty.
+    float width = 2.0 + 4.5 * aT;
+    vec2 xy = vec2(position.x + uShift.x, -(position.y + uShift.y)) * uInvSc + aNormal * aSide * width * 0.5 * uMpp;
+    bool known = aElev > ${UNKNOWN / 2}.0;
+    float z = ((known ? aElev : uCenterElev) - uCenterElev) * uCosC * aInvCos + uLift;
+    vU = aU;
+    vSide = aSide;
+    vT = aT;
+    vDuPhase = aDuPhase;
+    vVis = known ? 1.0 - aHide : 0.0;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(xy, z, 1.0);
+  }`;
+
+const RIBBON_FRAGMENT = `
+  uniform vec3 uColor;
+  uniform float uTime, uOpacity;
+  varying float vU, vSide, vT, vVis;
+  varying vec2 vDuPhase;
+  void main() {
+    // f = pulssin kärjen ohituksesta kulunut osa pulssien välistä (0 = kärki, häntä ylävirtaan).
+    // Leveässä uomassa reunat jäävät keskeltä jälkeen kuten virtauksessa.
+    float du = vDuPhase.x;
+    float f = fract((uTime + vDuPhase.y * du - vU) / du - abs(vSide) * (0.04 + 0.16 * vT));
+    float pulse = max(pow(max(1.0 - f / 0.5, 0.0), 1.6), clamp((f - 0.93) / 0.07, 0.0, 1.0));
+    float edge = 1.0 - smoothstep(0.45, 1.0, abs(vSide));
+    float a = pulse * edge * vVis * uOpacity * (0.6 + 0.35 * vT);
+    if (a < 0.01) discard;
+    gl_FragColor = vec4(uColor, a);
+    #include <colorspace_fragment>
+  }`;
+
+// Nauha: kaksi kärkeä kutakin uoman pistettä kohden (aSide −1 ja +1), kolmiot pisteparien välissä.
+// Paikat ovat Web Mercator -yksiköitä suhteessa paikallisen koordinaatiston origoon, joten
+// kartan siirtyessä riittää muuttaa varjostimen siirtoa ja mittakaavaa.
+function ribbonMesh(chains) {
+  const N = chains.reduce((sum, ch) => sum + ch.s.length, 0), V = 2 * N;
+  const pos = new Float32Array(3 * V), nor = new Float32Array(2 * V), side = new Float32Array(V);
+  const invCos = new Float32Array(V), hide = new Float32Array(V);
+  const index = new Uint32Array(6 * chains.reduce((sum, ch) => sum + ch.s.length - 1, 0));
+  let v = 0, o = 0;
+  for (const ch of chains) {
+    ch.v0 = v;
+    const n = ch.s.length;
+    for (let i = 0; i < n; i++) {
+      // Normaali molempien viereisten osien suuntien keskiarvona; mutkassa pidennetään (enintään 2×).
+      const seg = (a, b) => {
+        const dx = ch.mx[b] - ch.mx[a], dy = -(ch.my[b] - ch.my[a]), d = Math.hypot(dx, dy) || 1;
+        return [-dy / d, dx / d];
+      };
+      const n1 = seg(Math.max(i - 1, 0), Math.max(i, 1)), n2 = seg(Math.min(i, n - 2), Math.min(i + 1, n - 1));
+      let nx = n1[0] + n2[0], ny = n1[1] + n2[1];
+      const len = Math.hypot(nx, ny);
+      if (len < 1e-6) { [nx, ny] = n1; } else { nx /= len; ny /= len; }
+      const miter = 1 / Math.max(nx * n1[0] + ny * n1[1], 0.5);
+      const culvert = ch.pieces[ch.pieceOf[Math.min(i, n - 2)]].culvert ? 1 : 0;
+      for (let k = 0; k < 2; k++) {
+        const j = 2 * (v + i) + k;
+        pos[3 * j] = ch.mx[i] - ORIGIN_MX;
+        pos[3 * j + 1] = ch.my[i] - ORIGIN_MY;
+        nor[2 * j] = nx * miter;
+        nor[2 * j + 1] = ny * miter;
+        side[j] = k ? 1 : -1;
+        invCos[j] = 1 / Math.cos(ch.lonlat[2 * i + 1] * D2R);
+        hide[j] = culvert;
+      }
+    }
+    for (let i = 0; i < n - 1; i++) {
+      const a = 2 * (v + i);
+      index.set([a, a + 1, a + 2, a + 1, a + 3, a + 2], o);
+      o += 6;
+    }
+    v += n;
+  }
+  const g = new THREE.BufferGeometry();
+  const attr = (array, size, dynamic) => {
+    const at = new THREE.BufferAttribute(array, size);
+    if (dynamic) at.setUsage(THREE.DynamicDrawUsage);
+    return at;
+  };
+  g.setAttribute("position", attr(pos, 3));
+  g.setAttribute("aNormal", attr(nor, 2));
+  g.setAttribute("aSide", attr(side, 1));
+  g.setAttribute("aInvCos", attr(invCos, 1));
+  g.setAttribute("aHide", attr(hide, 1));
+  g.setAttribute("aElev", attr(new Float32Array(V).fill(UNKNOWN), 1, true));
+  g.setAttribute("aU", attr(new Float32Array(V), 1, true));
+  g.setAttribute("aT", attr(new Float32Array(V), 1, true));
+  g.setAttribute("aDuPhase", attr(new Float32Array(2 * V), 2, true));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
   const material = new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: new THREE.Color("#effcff") }, uOpacity: { value: 1 } },
-    vertexShader: `
-      attribute float aAlpha;
-      varying vec2 vUv;
-      varying float vAlpha;
-      void main() {
-        vUv = uv;
-        vAlpha = aAlpha;
-        gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: `
-      uniform vec3 uColor;
-      uniform float uOpacity;
-      varying vec2 vUv;
-      varying float vAlpha;
-      void main() {
-        // Häntä häipyy ylävirtaan, kärki ja reunat pehmenevät.
-        float a = smoothstep(0.0, 0.8, vUv.x) * (1.0 - smoothstep(0.86, 1.0, vUv.x))
-          * (1.0 - smoothstep(0.2, 0.5, abs(vUv.y - 0.5))) * vAlpha * uOpacity;
-        if (a < 0.01) discard;
-        gl_FragColor = vec4(uColor, a);
-        #include <colorspace_fragment>
-      }`,
+    uniforms: {
+      uColor: { value: new THREE.Color("#f2fdff") }, uTime: { value: 0 }, uOpacity: { value: 1 },
+      uShift: { value: new THREE.Vector2() }, uInvSc: { value: 1 }, uCenterElev: { value: 0 }, uCosC: { value: 0.5 },
+      uMpp: { value: 1 }, uLift: { value: 0 },
+    },
+    vertexShader: RIBBON_VERTEX,
+    fragmentShader: RIBBON_FRAGMENT,
     // Molemmat puolet: Mercator-muunnoksen peilaus kääntää kolmioiden kiertosuunnan.
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
     // Uoman pohja on usein maastomallin pintaa alempana; siirretään syvyyttä kameraa kohti.
     polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -8,
   });
-  const mesh = new THREE.InstancedMesh(geometry, material, STREAK_CAP);
-  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const mesh = new THREE.Mesh(g, material);
   mesh.frustumCulled = false;
   mesh.renderOrder = 3;
-  mesh.count = 0;
   return mesh;
 }
 
@@ -158,7 +261,7 @@ function groundAbs(map, lon, lat, centerElev, exag) {
   const raw = rawElevationAt(lon, lat);
   if (raw != null) return raw * exag;
   const q = map.queryTerrainElevation([lon, lat]);
-  return q == null ? NaN : q + centerElev;
+  return q == null ? UNKNOWN : q + centerElev;
 }
 
 export async function createStreams(map, { url, visible = true, beforeLayer }) {
@@ -181,14 +284,18 @@ export async function createStreams(map, { url, visible = true, beforeLayer }) {
     }
   });
 
+  const mesh = ribbonMesh(chains);
+  const geom = mesh.geometry, uniforms = mesh.material.uniforms;
   let reading = null; // { q, date } asemalta
   let flowQ = null, flowVersion = 0;
   const listeners = [];
   const monthMedian = (date) => station.kuukaudet[date.getMonth()][0];
 
+  // Virtaama osuuksille, nauhan leveys (aT) ja pulssien väli ketjulla (aDuPhase).
   function setFlow(q) {
     flowQ = q;
     flowVersion++;
+    const tArr = geom.getAttribute("aT").array, dp = geom.getAttribute("aDuPhase").array;
     for (const ch of chains) {
       let wsum = 0, lsum = 0;
       ch.pieces.forEach((p, k) => {
@@ -200,7 +307,19 @@ export async function createStreams(map, { url, visible = true, beforeLayer }) {
         lsum += len;
       });
       ch.tMain = lsum ? wsum / lsum : 0;
+      const du = STYLE.spacing(ch.tMain) / STYLE.speed(ch.tMain);
+      for (let i = 0; i < ch.s.length; i++) {
+        const t = ch.pieces[ch.pieceOf[i]].t;
+        for (let k = 0; k < 2; k++) {
+          const j = 2 * (ch.v0 + i) + k;
+          tArr[j] = t;
+          dp[2 * j] = du;
+          dp[2 * j + 1] = ch.phase;
+        }
+      }
     }
+    geom.getAttribute("aT").needsUpdate = true;
+    geom.getAttribute("aDuPhase").needsUpdate = true;
     for (const fn of listeners) fn();
   }
 
@@ -221,97 +340,75 @@ export async function createStreams(map, { url, visible = true, beforeLayer }) {
   fetchDischarge();
   setInterval(fetchDischarge, DISCHARGE_POLL);
 
-  const mesh = streakMesh();
-  const alphaAttr = mesh.geometry.getAttribute("aAlpha");
   let shown = visible, timedBand = null, timedFlow = -1;
 
-  // Matka-aika (s) ketjun alusta kuhunkin pisteeseen virtaviivojen nopeudella. Virtaviivat ovat
-  // ketjulla tasavälein matka-ajassa, joten ne kulkevat osuuksien rajojen yli ilman hyppäyksiä.
-  // Nopeus mitoitetaan kokonaislukuzoomin mukaan, jotta viivat eivät liu'u zoomattaessa.
+  // Matka-aika (s) ketjun alusta kuhunkin pisteeseen pulssien nopeudella. Pulssit ovat ketjulla
+  // tasavälein matka-ajassa, joten ne kulkevat osuuksien rajojen yli ilman hyppäyksiä. Nopeus
+  // mitoitetaan kokonaislukuzoomin mukaan, jotta pulssit eivät liu'u zoomattaessa.
   function retime(mpp) {
+    const uArr = geom.getAttribute("aU").array;
     for (const ch of chains) {
-      const n = ch.s.length;
-      for (let i = 1; i < n; i++) {
-        const t = ch.pieces[ch.pieceOf[i - 1]].t;
-        ch.u[i] = ch.u[i - 1] + (ch.s[i] - ch.s[i - 1]) / (STYLE.speed(t) * mpp);
+      let u = 0;
+      for (let i = 0; i < ch.s.length; i++) {
+        if (i) u += (ch.s[i] - ch.s[i - 1]) / (STYLE.speed(ch.pieces[ch.pieceOf[i - 1]].t) * mpp);
+        uArr[2 * (ch.v0 + i)] = uArr[2 * (ch.v0 + i) + 1] = u;
       }
-      ch.du = STYLE.spacing(ch.tMain) / STYLE.speed(ch.tMain);
     }
+    geom.getAttribute("aU").needsUpdate = true;
   }
 
-  function updateElevations(ch, x0, y0, x1, y1, budget, ctx, now) {
-    const { centerElev, exag } = ctx;
-    for (let i = 0; i < ch.s.length && budget > 0; i++) {
-      if (ch.lx[i] < x0 || ch.lx[i] > x1 || ch.ly[i] < y0 || ch.ly[i] > y1) continue;
-      if (!Number.isNaN(ch.elev[i]) && now - ch.elevAt[i] < ELEV_MAX_AGE) continue;
-      ch.elev[i] = groundAbs(map, ch.lonlat[2 * i], ch.lonlat[2 * i + 1], centerElev, exag);
-      ch.elevAt[i] = now + Math.random() * 500;
-      budget--;
+  // Korkeudet haetaan näkyvän alueen pisteille vähitellen ja tallennetaan absoluuttisina.
+  function updateElevations(x0, y0, x1, y1, ctx, now) {
+    const { centerElev, exag } = ctx, attr = geom.getAttribute("aElev"), arr = attr.array;
+    let budget = ELEV_BUDGET, dirty = false;
+    attr.clearUpdateRanges();
+    for (const ch of chains) {
+      if (budget <= 0) break;
+      if (ch.maxX < x0 || ch.minX > x1 || ch.maxY < y0 || ch.minY > y1) continue;
+      let lo = Infinity, hi = -1;
+      for (let i = 0; i < ch.s.length && budget > 0; i++) {
+        if (ch.lx[i] < x0 || ch.lx[i] > x1 || ch.ly[i] < y0 || ch.ly[i] > y1) continue;
+        if (ch.elev[i] !== UNKNOWN && now - ch.elevAt[i] < ELEV_MAX_AGE) continue;
+        const e = groundAbs(map, ch.lonlat[2 * i], ch.lonlat[2 * i + 1], centerElev, exag);
+        ch.elev[i] = e;
+        ch.elevAt[i] = now + Math.random() * 500;
+        arr[2 * (ch.v0 + i)] = arr[2 * (ch.v0 + i) + 1] = e;
+        lo = Math.min(lo, i);
+        hi = i;
+        budget--;
+      }
+      if (hi >= 0) {
+        attr.addUpdateRange(2 * (ch.v0 + lo), 2 * (hi - lo + 1));
+        dirty = true;
+      }
     }
-    return budget;
+    if (dirty) attr.needsUpdate = true;
   }
 
   function draw(map, ctx) {
     const { zoom, cmx, cmy, sc, cosC, centerElev, now } = ctx;
-    mesh.count = 0;
     mesh.visible = shown && flowQ != null && zoom >= FLOW_MINZOOM - FADE_ZOOM;
     if (!mesh.visible) return;
-    mesh.material.uniforms.uOpacity.value = clamp((zoom - (FLOW_MINZOOM - FADE_ZOOM)) / FADE_ZOOM, 0, 1);
     const c = map.getCenter(), cosLat = Math.cos(c.lat * D2R);
-    const mpp = (EARTH_CIRC * cosLat) / (512 * 2 ** zoom); // m/px nyt (koot)
+    const mpp = (EARTH_CIRC * cosLat) / (512 * 2 ** zoom); // m/px nyt (leveys)
     const band = Math.round(zoom);
     if (band !== timedBand || flowVersion !== timedFlow) {
       retime((EARTH_CIRC * cosLat) / (512 * 2 ** band));
       timedBand = band;
       timedFlow = flowVersion;
     }
-    // Viistosti katsottaessa näkymä ulottuu kauas; kaukaiset viivat olisivat alle pikselin kokoisia.
+    // Viistosti katsottaessa näkymä ulottuu kauas; korkeudet haetaan vain lähialueelta.
     const R = 1.6 * Math.max(ctx.W, ctx.H) * mpp;
     const cx = (c.lng - ORIGIN_LON) * M_LON, cy = (c.lat - ORIGIN_LAT) * M_LAT;
-    const x0 = cx - R, x1 = cx + R, y0 = cy - R, y1 = cy + R;
-    const time = now / 1000, a = mesh.instanceMatrix.array, alpha = alphaAttr.array;
-    let budget = ELEV_BUDGET, count = 0;
-    for (const ch of chains) {
-      if (ch.maxX < x0 || ch.minX > x1 || ch.maxY < y0 || ch.minY > y1) continue;
-      budget = updateElevations(ch, x0, y0, x1, y1, budget, ctx, now);
-      const n = ch.s.length, U = ch.u[n - 1], du = ch.du;
-      if (!(U > 0)) continue;
-      for (let lane = 0; lane < MAX_LANES; lane++) {
-        let j = 0;
-        // Jonot vuorottelevat matka-ajassa, jotta rinnakkaiset viivat eivät kulje samassa rivissä.
-        for (let u = (time + (ch.phase + lane / MAX_LANES) * du) % du; u < U && count < STREAK_CAP; u += du) {
-          while (j < n - 2 && ch.u[j + 1] < u) j++;
-          const p = ch.pieces[ch.pieceOf[j]], lanes = STYLE.lanes(p.t);
-          if (p.culvert || lane >= lanes) continue;
-          const f = clamp((u - ch.u[j]) / (ch.u[j + 1] - ch.u[j] || 1), 0, 1);
-          const px = ch.lx[j] + f * (ch.lx[j + 1] - ch.lx[j]), py = ch.ly[j] + f * (ch.ly[j + 1] - ch.ly[j]);
-          if (px < x0 || px > x1 || py < y0 || py > y1) continue;
-          const e0 = ch.elev[j], e1 = ch.elev[j + 1];
-          if (Number.isNaN(e0) || Number.isNaN(e1)) continue;
-          const lat = ch.lonlat[2 * j + 1] + f * (ch.lonlat[2 * j + 3] - ch.lonlat[2 * j + 1]);
-          const k = cosC / Math.cos(lat * D2R);
-          const dx = ch.mx[j + 1] - ch.mx[j], dy = -(ch.my[j + 1] - ch.my[j]), dl = Math.hypot(dx, dy) || 1;
-          const ux = dx / dl, uy = dy / dl;
-          const across = lanes > 1 ? (lane - (lanes - 1) / 2) * Math.min(channelWidth(p.q) / 3, STYLE.width(p.t) * 2 * mpp) : 0;
-          const wx = (ch.mx[j] + f * dx - cmx) / sc - uy * across, wy = (-(ch.my[j] - cmy)) / sc + f * dy / sc + ux * across;
-          const wz = (e0 + f * (e1 - e0) - centerElev + LIFT_PX * mpp) * k;
-          const len = STYLE.length(p.t) * mpp, wid = STYLE.width(p.t) * mpp, o = count * 16;
-          a[o] = ux * len; a[o + 1] = uy * len; a[o + 2] = 0; a[o + 3] = 0;
-          a[o + 4] = -uy * wid; a[o + 5] = ux * wid; a[o + 6] = 0; a[o + 7] = 0;
-          a[o + 8] = 0; a[o + 9] = 0; a[o + 10] = 1; a[o + 11] = 0;
-          a[o + 12] = wx; a[o + 13] = wy; a[o + 14] = wz; a[o + 15] = 1;
-          alpha[count] = STYLE.alpha(p.t);
-          count++;
-        }
-      }
-    }
-    mesh.count = count;
-    mesh.instanceMatrix.clearUpdateRanges();
-    mesh.instanceMatrix.addUpdateRange(0, count * 16);
-    mesh.instanceMatrix.needsUpdate = true;
-    alphaAttr.clearUpdateRanges();
-    alphaAttr.addUpdateRange(0, count);
-    alphaAttr.needsUpdate = true;
+    updateElevations(cx - R, cy - R, cx + R, cy + R, ctx, now);
+    uniforms.uShift.value.set(ORIGIN_MX - cmx, ORIGIN_MY - cmy);
+    uniforms.uInvSc.value = 1 / sc;
+    uniforms.uCenterElev.value = centerElev;
+    uniforms.uCosC.value = cosC;
+    uniforms.uMpp.value = mpp;
+    uniforms.uLift.value = LIFT_PX * mpp;
+    uniforms.uTime.value = now / 1000;
+    uniforms.uOpacity.value = clamp((zoom - (FLOW_MINZOOM - FADE_ZOOM)) / FADE_ZOOM, 0, 1);
   }
 
   function popupContent(props) {
