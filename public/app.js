@@ -1,6 +1,6 @@
 import {
-  BASEMAPS, BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS,
-  GROUPS, HIDDEN_FIELDS, LANDUSE_CLASSES, ORTHO_YEARS, PLACES, POPUP_TITLES, WMS_SERVICES,
+  BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, GROUPS,
+  HIDDEN_FIELDS, LANDUSE_CLASSES, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
 } from "./layers.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
@@ -30,11 +30,9 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
 });
 
 const state = {
-  basemap: "ortho",
-  orthoIndex: ORTHO_YEARS.length - 1,
+  orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
-  timeFilter: false,
 };
 
 // ------------------------------------------------------------ apufunktiot
@@ -79,10 +77,6 @@ function buildStyle() {
       type: "raster-dem", tiles: ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
-    hillshade: {
-      type: "raster-dem", tiles: ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
-      encoding: "terrarium", tileSize: 512, maxzoom: 15,
-    },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
     ortho: { type: "raster", tiles: wmsTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, attribution: ATTR_ESPOO },
     kohteet: {
@@ -94,20 +88,10 @@ function buildStyle() {
     },
     nimet: { type: "geojson", data: "data/kaupunginosat_nimet.geojson" },
   };
-  for (const [id, b] of Object.entries(BASEMAPS)) {
-    if (b.wms) sources["base_" + id] = { type: "raster", tiles: wmsTiles(b.wms, { transparent: false }), tileSize: 512, attribution: ATTR_ESPOO };
-  }
 
   const layers = [
     { id: "tausta", type: "background", paint: { "background-color": "#dfe6e9" } },
     { id: "ortho", type: "raster", source: "ortho", paint: { "raster-fade-duration": 150 } },
-    ...Object.entries(BASEMAPS).filter(([, b]) => b.wms).map(([id]) => ({
-      id: "base_" + id, type: "raster", source: "base_" + id, layout: { visibility: "none" },
-    })),
-    {
-      id: "rinnevarjostus", type: "hillshade", source: "hillshade", layout: { visibility: "none" },
-      paint: { "hillshade-exaggeration": 0.45, "hillshade-shadow-color": "#3d4a55", "hillshade-highlight-color": "#ffffff" },
-    },
   ];
 
   // Ryhmien tasot: ensin kaikki rasterit (alimmaiseksi), sitten alueet, viivat, pisteet ja 3D.
@@ -157,6 +141,7 @@ function buildStyle() {
     glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
     sources,
     layers,
+    terrain: { source: "dem", exaggeration: TERRAIN_EXAGGERATION },
     sky: {
       "sky-color": "#7fb6ea", "horizon-color": "#dcecfa", "fog-color": "#e8f0f7",
       "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.7, "fog-ground-blend": 0.35, "atmosphere-blend": 0.6,
@@ -182,10 +167,7 @@ window.espooMap = map; // selaimen konsolia varten
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
-let terrainOn = true;
-let exaggeration = 1.5;
 map.on("load", () => {
-  map.setTerrain({ source: "dem", exaggeration });
   // Kaupunginosien rajojen näkyvyys seuraa myös nimiä.
   syncLabels();
 });
@@ -214,34 +196,19 @@ function syncLabels() {
   map.setLayoutProperty("kaupunginosat_nimet", "visibility", def.on ? "visible" : "none");
 }
 
-function setBasemap(key) {
-  state.basemap = key;
-  map.setLayoutProperty("ortho", "visibility", key === "ortho" ? "visible" : "none");
-  for (const [id, b] of Object.entries(BASEMAPS)) {
-    if (b.wms) map.setLayoutProperty("base_" + id, "visibility", key === id ? "visible" : "none");
-  }
-  document.getElementById("ortho-year").hidden = key !== "ortho";
-  if (key === "ei") setHillshade(true);
-  applyTimeFilter();
-}
-
 function setOrthoYear(index) {
   state.orthoIndex = index;
-  const [year, layer] = ORTHO_YEARS[index];
-  map.getSource("ortho").setTiles(wmsTiles(layer));
-  document.getElementById("ortho-year-label").textContent = year;
+  map.getSource("ortho").setTiles(wmsTiles(ORTHO_YEARS[index][1]));
   applyTimeFilter();
 }
 
+// Rakennuksista näytetään aina ne, jotka olivat valmiina ilmakuvan vuonna. Uusimmalla
+// vuodella näytetään kaikki; vanhemmilla vuosilla rakennukset, joiden valmistumisvuotta
+// ei tiedetä, jätetään pois.
 function applyTimeFilter() {
   const year = ORTHO_YEARS[state.orthoIndex][0];
-  const on = state.timeFilter && state.basemap === "ortho";
-  map.setFilter("rakennukset", on ? ["all", ["has", "vuosi"], ["<=", ["get", "vuosi"], year]] : null);
-}
-
-function setHillshade(on) {
-  map.setLayoutProperty("rinnevarjostus", "visibility", on ? "visible" : "none");
-  document.getElementById("hillshade").checked = on;
+  const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
+  map.setFilter("rakennukset", year >= latest ? null : ["all", ["has", "vuosi"], ["<=", ["get", "vuosi"], year]]);
 }
 
 function setOverlayOpacity(v) {
@@ -294,32 +261,9 @@ function buildPanel() {
   document.getElementById("places").append(...PLACES.map(([name, place]) =>
     el("button", { type: "button", class: "chip", onclick: () => flyTo(place) }, name)));
 
-  const baseRow = document.getElementById("basemaps");
-  for (const [key, b] of Object.entries(BASEMAPS)) {
-    baseRow.append(el("label", { class: "seg" },
-      el("input", { type: "radio", name: "basemap", value: key, checked: key === state.basemap, onchange: () => setBasemap(key) }),
-      el("span", {}, b.title)));
-  }
-  const slider = document.getElementById("ortho-slider");
-  slider.max = ORTHO_YEARS.length - 1;
-  slider.value = state.orthoIndex;
-  slider.addEventListener("input", () => setOrthoYear(+slider.value));
-  document.getElementById("ortho-year-label").textContent = ORTHO_YEARS[state.orthoIndex][0];
-  document.getElementById("ortho-ticks").append(...[ORTHO_YEARS[0], ORTHO_YEARS[Math.floor(ORTHO_YEARS.length / 2)], ORTHO_YEARS.at(-1)]
-    .map(([y]) => el("span", {}, y)));
-  document.getElementById("time-filter").addEventListener("change", (e) => { state.timeFilter = e.target.checked; applyTimeFilter(); });
-
-  document.getElementById("terrain").addEventListener("change", (e) => {
-    terrainOn = e.target.checked;
-    map.setTerrain(terrainOn ? { source: "dem", exaggeration } : null);
-  });
-  const ex = document.getElementById("exaggeration");
-  ex.addEventListener("input", () => {
-    exaggeration = +ex.value;
-    document.getElementById("exaggeration-label").textContent = exaggeration.toFixed(1) + "×";
-    if (terrainOn) map.setTerrain({ source: "dem", exaggeration });
-  });
-  document.getElementById("hillshade").addEventListener("change", (e) => setHillshade(e.target.checked));
+  document.getElementById("ortho-years").append(...ORTHO_YEARS.map(([year], i) => el("label", { class: "seg" },
+    el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
+    el("span", {}, String(year)))));
 
   document.getElementById("buildings").addEventListener("change", (e) =>
     map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none"));

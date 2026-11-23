@@ -10,20 +10,15 @@ export const WMS_SERVICES = {
 };
 export const ESPOO_WMS = WMS_SERVICES.espoo;
 
+// Pohjakarttana on aina Espoon ilmakuva. Ensimmäinen vuosi on oletus. Espoon WMS:ssä on
+// myös vuodet 1950, 1969, 2001, 2007–2013, 2017–2024 (tasot Ortokartta_VVVV).
 export const ORTHO_YEARS = [
-  [1950, "Ortokartta_1950"], [1969, "Ortokartta_1969"], [1976, "Ortokartta_1976"], [1996, "Ortokartta_1996"],
-  [2001, "Ortokartta_2001"], [2005, "Ortokartta_2005"], [2007, "Ortokartta_2007"], [2009, "Ortokartta_2009"],
-  [2011, "Ortokartta_2011"], [2013, "Ortokartta_2013"], [2015, "Ortokartta_2015"], [2017, "Ortokartta_2017"],
-  [2019, "Ortokartta_2019"], [2021, "Ortokartta_2021"], [2023, "Ortokartta_2023"], [2024, "Ortokartta_2024"],
-  [2026, "Ortokartta"],
+  [2026, "Ortokartta"], [2015, "Ortokartta_2015"], [2005, "Ortokartta_2005"], [1996, "Ortokartta_1996"],
+  [1976, "Ortokartta_1976"],
 ];
 
-export const BASEMAPS = {
-  ortho: { title: "Ilmakuva" },
-  opas: { title: "Opaskartta", wms: "Opaskartta" },
-  harmaa: { title: "Harmaa kartta", wms: "PKS_Opaskartta_harmaa" },
-  ei: { title: "Vain maasto" },
-};
+// Maaston korostus; korkeusmalli on aina käytössä ilman rinnevarjostusta.
+export const TERRAIN_EXAGGERATION = 1.5;
 
 export const PLACES = [
   ["Koko Espoo", null],
