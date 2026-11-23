@@ -162,6 +162,7 @@ const map = new maplibregl.Map({
   hash: true,
   maxBounds: [[23.9, 59.8], [25.4, 60.6]],
   attributionControl: { compact: true },
+  antialias: true, // 3D-ajoneuvojen reunat
 });
 window.espooMap = map; // selaimen konsolia varten
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -170,6 +171,7 @@ map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 map.on("load", () => {
   // Kaupunginosien rajojen näkyvyys seuraa myös nimiä.
   syncLabels();
+  initTransit();
 });
 
 const busy = document.getElementById("busy");
@@ -313,6 +315,34 @@ async function checkHsyProxy() {
   }
 }
 
+// ------------------------------------------------------------ joukkoliikenne
+
+let transit = null;
+
+// Reaaliaikaiset ajoneuvot ladataan vasta kartan jälkeen, jotta kartta ei odota niitä.
+async function initTransit() {
+  const box = document.getElementById("transit-groups");
+  const status = document.getElementById("transit-status");
+  try {
+    const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
+    transit = await createTransit(map, { boundaryUrl: "data/espoo_raja.geojson", beforeLayer: "kaupunginosat_nimet" });
+    window.espooTransit = transit;
+    const counts = {};
+    box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("label", { class: "check" },
+      el("input", { type: "checkbox", checked: true, onchange: (e) => transit.setGroup(id, e.target.checked) }),
+      el("span", { class: "swatch", style: `background:${color}` }),
+      el("span", {}, title),
+      counts[id] = el("span", { class: "count" }, "–"))));
+    transit.onStats((s) => {
+      for (const [id, n] of Object.entries(s.counts)) counts[id].textContent = n.toLocaleString("fi-FI");
+      status.textContent = s.message;
+    });
+  } catch (err) {
+    console.error(err);
+    status.textContent = "Reaaliaikaisia sijainteja ei saatu ladattua.";
+  }
+}
+
 // ------------------------------------------------------------ ponnahdusikkuna
 
 const popup = new maplibregl.Popup({ maxWidth: "340px", closeButton: true });
@@ -337,6 +367,7 @@ function formatValue(k, v) {
 }
 
 map.on("click", (e) => {
+  if (transit?.click(e.point)) { popup.remove(); return; }
   const queryable = map.getStyle().layers
     .filter((l) => (l.id === "rakennukset" || l.id.includes("__")) && map.getLayoutProperty(l.id, "visibility") !== "none")
     .map((l) => l.id);

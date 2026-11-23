@@ -6,7 +6,8 @@ Käyttö:  python3 scripts/build_data.py [aineisto ...]
 Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
-public/data/ vain tiedostot manifest.json ja kaupunginosat_nimet.geojson.
+public/data/ vain tiedostot manifest.json, kaupunginosat_nimet.geojson ja
+espoo_raja.geojson.
 """
 import collections
 import concurrent.futures as cf
@@ -29,6 +30,7 @@ TILES = os.path.join(ROOT, "public", "tiles")
 
 ESPOO_WFS = "https://kartat.espoo.fi/teklaogcweb/wfs.ashx"
 HSY_WFS = "https://kartta.hsy.fi/geoserver/wfs"
+STATFI_WFS = "https://geo.stat.fi/geoserver/tilastointialueet/wfs"
 UA = "espoo3d-data-builder/1.0 (paikallinen avoimen datan katselin)"
 
 # Espoon alue (lon/lat), hieman WMS-palvelun ilmoittamaa laajuutta väljempänä.
@@ -638,6 +640,28 @@ def build_population():
     return write_geojson("vaesto", feats)
 
 
+def build_boundary():
+    """Espoon ja Kauniaisen rajat, joiden avulla kartalle otetaan vain Espoon alueella
+    kulkevat joukkoliikenteen ajoneuvot. Kauniainen on mukana, koska se on Espoon sisällä."""
+    log("raja (Tilastokeskus, kunnat 1:1 000 000)")
+    params = {
+        "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+        "typeName": "tilastointialueet:kunta1000k", "outputFormat": "application/json",
+        "srsName": "EPSG:4326", "CQL_FILTER": "nimi IN ('Espoo','Kauniainen')",
+    }
+    raw = http_get(STATFI_WFS, params, os.path.join(CACHE, "kuntarajat.json"))
+    with open(raw, encoding="utf-8") as fh:
+        data = json.load(fh)
+    feats = []
+    for f in data["features"]:
+        g = f["geometry"]
+        polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+        coords = [[[[round(x, 5), round(y, 5)] for x, y in ring] for ring in poly] for poly in polys]
+        feats.append({"type": "Feature", "properties": {"nimi": f["properties"]["nimi"]},
+                      "geometry": {"type": "MultiPolygon", "coordinates": coords}})
+    write_geojson("espoo_raja", feats, PUBLIC_DATA)
+
+
 def espoo_polygons():
     """Espoon kaupunginosat polygonilistana (rajaukseen); tyhjä, jos aineistoa ei vielä ole."""
     path = os.path.join(OUT, "kaupunginosat.geojson")
@@ -782,6 +806,8 @@ def main():
         build_district_labels()
     if want("vaesto"):
         build_population()
+    if want("raja"):
+        build_boundary()
     if want("rakennukset"):
         build_buildings()
     if want("tiilet"):

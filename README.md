@@ -2,7 +2,8 @@
 
 Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
 kaavoitus, vedet, maaperä, luonto, väestö ja liikenne, ja kaikki tieto tulee
-avoimista lähteistä.
+avoimista lähteistä. Espoon bussit, raitiovaunut, junat ja metro liikkuvat kartalla
+reaaliajassa 3D-malleina.
 
 ## Käynnistys
 
@@ -19,7 +20,7 @@ ilmakuvat, karttakuvat ja korkeusmalli haetaan suoraan lähdepalveluista.
 python3 scripts/build_data.py
 ```
 
-Skripti lataa aineistot Espoon ja HSY:n rajapinnoista kansioon `cache/`,
+Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
 (`public/tiles/`). Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
@@ -52,6 +53,9 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Väestöruudukko 250 m (2025) | HSY WFS |
 | Maanpeite, aurinkosähköpotentiaali, hiilinielut | HSY WMS (palvelimen välityksellä) |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
+| Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
+| Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
+| Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -70,6 +74,22 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
   olevien saman kerrosluvun rakennusten mitattujen korkeuksien mediaania. Kohteen tiedoissa
   näkyy silloin "Korkeus (m, arvio)".
 
+## Joukkoliikenne reaaliajassa
+
+Selain tilaa sijainnit suoraan HSL:n ja Digitrafficin MQTT-palveluista (`public/transit.js`),
+eikä niihin tarvita avainta tai välityspalvelinta. Kartalle otetaan ajoneuvot, jotka ovat
+Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
+
+- Ajoneuvot näytetään noin kaksi sekuntia (Digitrafficin junat yhdeksän sekuntia) todellista
+  sijaintia jäljessä. Näin liike voidaan laskea tunnettujen sijaintien väliltä monotonisella
+  kuutiollisella interpoloinnilla, ja lopuksi se vielä pehmennetään. Ajoneuvojen ja selaimen
+  kellojen ero arvioidaan hitaasti kaikista viesteistä, jottei arvion muutos nytkäytä ajoneuvoja.
+- Vaunut seuraavat keulan kulkemaa reittiä, joten nivelraitiovaunut ja junat kaartavat.
+- HSL:n lähijunat tulevat HFP-syötteestä, joten Digitrafficista otetaan vain kauko- ja tavarajunat.
+- Metro kulkee Espoossa tunnelissa, joten se piirretään läpikuultavana.
+- Lähikuvassa tilataan vain näkymän ympäristön HFP-ruudut. Taustalle jääneen välilehden
+  yhteydet suljetaan 30 sekunnin kuluttua.
+
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää HSY:n WMS-pyynnöt
@@ -77,3 +97,4 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
 - `scripts/build_data.py`: aineistojen lataus ja muunnos
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
+- `public/transit.js`: reaaliaikaiset ajoneuvot, liikkeen tasoitus ja 3D-mallit (three.js)
