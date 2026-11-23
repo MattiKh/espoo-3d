@@ -217,6 +217,7 @@ function buildStyle() {
   const overlay = [];
   for (const def of LAYERS) {
     if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
+    if (def.labels) continue; // nimet lisätään kaiken päälle (alla)
     if (def.wms) {
       sources[def.id] = {
         type: "raster", tiles: wmsTiles(def.wms, { service: def.service, extra: def.params }), tileSize: 512,
@@ -246,6 +247,18 @@ function buildStyle() {
     },
   });
   layers.push(...overlay.filter((l) => order[l.type] === 4));
+  for (const def of LAYERS.filter((d) => d.labels)) {
+    sources[def.id] = { type: "geojson", data: def.labels, attribution: ATTR_ESPOO };
+    layers.push({
+      id: def.id, type: "symbol", source: def.id, minzoom: 10,
+      layout: {
+        "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"],
+        "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 15, 16], "text-letter-spacing": 0.04,
+        "text-max-width": 8, visibility: visibility(def.on),
+      },
+      paint: { "text-color": "#1d2a35", "text-halo-color": "rgba(255,255,255,0.92)", "text-halo-width": 1.6 },
+    });
+  }
 
   return {
     version: 8,
@@ -302,7 +315,7 @@ map.on("idle", () => busy.classList.remove("on"));
 // ------------------------------------------------------------ paneeli
 
 function setVisible(def, on) {
-  if (def.radar) {
+  if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
@@ -443,6 +456,7 @@ async function initTransit() {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
     transit = await createTransit(map, {
       boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json", undergroundBeforeLayer: "rakennukset",
+      beforeLayer: "kaupunginosat_nimet", // ajoneuvot nimien alle
       // adsb.fi ei salli selaimen suoria hakuja, joten haku kulkee välityspalvelimen kautta (server.py, netlify.toml).
       planesUrl: new URL("proxy/adsb/lat/60.21/lon/24.66/dist/25", BASE).href,
     });

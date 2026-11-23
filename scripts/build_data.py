@@ -6,7 +6,8 @@ Käyttö:  python3 scripts/build_data.py [aineisto ...]
 Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
-public/data/ vain tiedostot manifest.json, espoo_raja.geojson, sillat.json ja raiteet.json.
+public/data/ vain tiedostot manifest.json, espoo_raja.geojson, kaupunginosat_nimet.geojson,
+sillat.json ja raiteet.json.
 """
 import collections
 import concurrent.futures as cf
@@ -883,6 +884,93 @@ def build_rails():
         f"{os.path.getsize(path) / 1e3:.0f} kt")
 
 
+def build_district_labels():
+    """Kaupunginosien nimille yksi piste kunkin alueen sisältä. Rajat ulottuvat usein
+    merelle, joten nimi sijoitetaan alueen rakennusten keskelle, kun rakennukset on ladattu."""
+    log("kaupunginosien nimet")
+    path = os.path.join(OUT, "kaupunginosat.geojson")
+    with open(path, encoding="utf-8") as fh:
+        src = json.load(fh)["features"]
+    buildings = building_points()
+    feats = []
+    for f in src:
+        g = f["geometry"]
+        polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+        poly = max(polys, key=lambda p: abs(signed_area(p[0])))
+        point = building_center(polys, buildings) or label_point(poly)
+        feats.append({
+            "type": "Feature",
+            "properties": {"nimi": district_name(f["properties"].get("KAUPUNGINOSANNIMI_FI"))},
+            "geometry": {"type": "Point", "coordinates": point},
+        })
+    write_geojson("kaupunginosat_nimet", feats, PUBLIC_DATA)
+
+
+def district_name(s):
+    # ESPOON KESKUS → Espoon keskus, POHJOIS-TAPIOLA → Pohjois-Tapiola
+    return "-".join(part[:1].upper() + part[1:] for part in str(s or "").lower().split("-"))
+
+
+def building_points():
+    path = os.path.join(OUT, "rakennukset.geojson")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        pts = []
+        for f in json.load(fh)["features"]:
+            g = f["geometry"]
+            ring = (g["coordinates"] if g["type"] == "Polygon" else g["coordinates"][0])[0]
+            pts.append((ring[0][0], ring[0][1]))
+    return pts
+
+
+def building_center(polys, pts):
+    """Alueen sisällä olevista rakennuksista se, joka on lähimpänä niiden keskipistettä."""
+    coarse = [[r[:: max(1, len(r) // 200)] + [r[-1]] for r in poly] for poly in polys]
+    xs = [p[0] for poly in polys for p in poly[0]]
+    ys = [p[1] for poly in polys for p in poly[0]]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    inside = [p for p in pts if minx <= p[0] <= maxx and miny <= p[1] <= maxy
+              and any(point_in_polygon(p[0], p[1], c) for c in coarse)]
+    if len(inside) < 5:
+        return None
+    mx = sum(p[0] for p in inside) / len(inside)
+    my = sum(p[1] for p in inside) / len(inside)
+    best = min(inside, key=lambda p: ((p[0] - mx) * 0.5) ** 2 + (p[1] - my) ** 2)
+    return [round(best[0], 6), round(best[1], 6)]
+
+
+def label_point(poly):
+    """Karkea 'kauimpana reunoista' -piste: ruudukkohaku monikulmion sisältä.
+    Etäisyys lasketaan harvennettuun reunaan, sillä tarkkuudeksi riittää nimen sijoitus."""
+    ring = poly[0]
+    xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+    step = max(1, len(ring) // 150)
+    coarse = [r[::step] + [r[-1]] for r in poly]
+    best, best_d = None, -1.0
+    n = 16
+    for i in range(1, n):
+        for j in range(1, n):
+            x = min(xs) + (max(xs) - min(xs)) * i / n
+            y = min(ys) + (max(ys) - min(ys)) * j / n
+            if not point_in_polygon(x, y, poly):
+                continue
+            d = min(seg_dist(x, y, r[k], r[k + 1]) for r in coarse for k in range(len(r) - 1))
+            if d > best_d:
+                best, best_d = [round(x, 6), round(y, 6)], d
+    return best or ring[0]
+
+
+def seg_dist(x, y, a, b):
+    # Leveyspiirillä 60° pituusaste on noin puolet leveysasteesta, joten x skaalataan.
+    k = 0.5
+    ax, ay, bx, by = a[0] * k, a[1], b[0] * k, b[1]
+    px, py = x * k, y
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
 def espoo_polygons():
     """Espoon kaupunginosat polygonilistana (rajaukseen); tyhjä, jos aineistoa ei vielä ole."""
     path = os.path.join(OUT, "kaupunginosat.geojson")
@@ -951,6 +1039,8 @@ def main():
         build_rails()
     if want("rakennukset"):
         build_buildings()
+    if want("kaupunginosat"):
+        build_district_labels()  # rakennusten jälkeen: nimi sijoitetaan rakennusten keskelle
     if want("tiilet"):
         make_overlay_tiles()
     for ds_id, type_name, title in ESPOO_DATASETS + [("vaesto", "HSY", "Väestö"), ("rakennukset", BUILDING_TYPE, "Rakennukset")]:

@@ -8,11 +8,13 @@ yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina.
 ## Paneeli
 
 - Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
-- Aineistoja on yksitoista: asemakaavan käyttötarkoitukset, vireillä olevat kaavat,
-  ajantasa-asemakaava, maankäyttökartta, vesialueet, asukkaat 250 m ruuduissa (3D),
-  autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat sekä kantakartan
-  maastotiedot. Oletuksena päällä on vesialueet. Määrittelyt ovat tiedostossa
-  `public/layers.js` (`LAYERS`).
+- Aineistoja on kolmetoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
+  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, asukkaat 250 m ruuduissa
+  (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat, kantakartan maastotiedot
+  sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet, vesialueet ja sadetutka.
+  Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
+- Kaupunginosan nimi on alueen rakennusten keskellä, koska kaupunginosien rajat ulottuvat
+  usein merelle (`kaupunginosat_nimet.geojson`, `build_data.py kaupunginosat`).
 - Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
   (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
 - Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,

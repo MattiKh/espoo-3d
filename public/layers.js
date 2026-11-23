@@ -92,8 +92,12 @@ const trafficVolume = ["max",
 // WMS-taso:   { id, title, wms: "TASO", service: "espoo" | "hsy", params: {...}, paint: {...} }
 //   service on oletuksena Espoon karttapalvelu; params lisää kyselyyn palvelukohtaisia
 //   parametreja, ja paint täydentää karttakuvan tyyliä.
+// Nimitaso:   { id, title, labels: "data/TIEDOSTO.geojson" }
+//   pisteiden nimi (kenttä nimi) näytetään tekstinä kaiken muun päällä.
 
 export const LAYERS = [
+  // Nimi on kaupunginosan rakennusten keskellä, koska rajat ulottuvat usein merelle (build_data.py).
+  { id: "kaupunginosat_nimet", title: "Kaupunginosien nimet", on: true, labels: "data/kaupunginosat_nimet.geojson" },
   {
     id: "maankaytto", title: "Asemakaavan käyttötarkoitukset", legend: "landuse",
     vector: [
