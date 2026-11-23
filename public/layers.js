@@ -3,6 +3,7 @@
 
 // Kaikki tässä käytetyt WMS-tasot on tarkistettu avoimiksi; osa Espoon tasoista
 // (esim. maaperäkartta, yleiskaava, johtokartta) vaatii tunnukset eikä ole mukana.
+// HSY:n ja GTK:n palveluita ei tällä hetkellä käytetä.
 export const WMS_SERVICES = {
   espoo: "https://kartat.espoo.fi/teklaogcweb/wms.ashx",
   hsy: "proxy/hsy/wms", // välityspalvelin (server.py tai julkaisualusta), koska HSY ei salli CORSia
@@ -10,7 +11,7 @@ export const WMS_SERVICES = {
 };
 export const ESPOO_WMS = WMS_SERVICES.espoo;
 
-// Pohjakarttana on aina Espoon ilmakuva. Ensimmäinen vuosi on oletus. Espoon WMS:ssä on
+// Ilmakuva on valinnainen (oletuksena pois). Ensimmäinen vuosi on oletus. Espoon WMS:ssä on
 // myös vuodet 1950, 1969, 2001, 2007–2013, 2017–2024 (tasot Ortokartta_VVVV).
 export const ORTHO_YEARS = [
   [2026, "Ortokartta"], [2015, "Ortokartta_2015"], [2005, "Ortokartta_2005"], [1996, "Ortokartta_1996"],
@@ -82,216 +83,67 @@ const trafficVolume = ["max",
 
 // ---------------------------------------------------------------- tasot
 //
+// Valittavat aineistot paneelin järjestyksessä. Karttakuvat (WMS) piirretään tässä järjestyksessä
+// alimmasta ylimpään, ja vektoritasot niiden päälle. on = päällä oletuksena.
+//
 // Vektoritaso: { id, title, vector: [MapLibre-tasomäärittelyt ilman id:tä ja lähdettä] }
-//   source-layer on oletuksena id; sourceLayer korvaa sen.
-// WMS-taso:   { id, title, wms: "TASO1,TASO2", service: "espoo" | "hsy" }
+//   source-layer on oletuksena id.
+// WMS-taso:   { id, title, wms: "TASO" } (Espoon karttapalvelu)
 
-export const GROUPS = [
+export const LAYERS = [
   {
-    title: "Kaavoitus",
-    layers: [
-      {
-        id: "maankaytto", title: "Asemakaavan käyttötarkoitukset", legend: "landuse",
-        vector: [
-          { type: "fill", paint: { "fill-color": landuseColor, "fill-opacity": 0.55 } },
-          { type: "line", minzoom: 13, paint: { "line-color": "#5a4a3a", "line-width": 0.4, "line-opacity": 0.6 } },
-        ],
-      },
-      {
-        id: "asemakaavat", title: "Asemakaava-alueiden rajat",
-        vector: [{ type: "line", paint: { "line-color": "#7b2cbf", "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.6, 16, 2] } }],
-      },
-      {
-        id: "kaavahankkeet", title: "Vireillä olevat kaavat",
-        vector: [
-          { type: "fill", paint: { "fill-color": "#ff006e", "fill-opacity": 0.18 } },
-          { type: "line", paint: { "line-color": "#ff006e", "line-width": 2, "line-dasharray": [2, 1.5] } },
-        ],
-      },
-      { id: "wms_ajantasa", title: "Ajantasa-asemakaava (kartta)", wms: "Ajantasa_asemakaava_vektori" },
-      { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta" },
-      { id: "wms_maanomistus", title: "Kaupungin maanomistus", wms: "Kaupungin_maanomistus" },
+    id: "maankaytto", title: "Asemakaavan käyttötarkoitukset", legend: "landuse",
+    vector: [
+      { type: "fill", paint: { "fill-color": landuseColor, "fill-opacity": 0.55 } },
+      { type: "line", minzoom: 13, paint: { "line-color": "#5a4a3a", "line-width": 0.4, "line-opacity": 0.6 } },
     ],
   },
   {
-    title: "Vedet",
-    layers: [
-      {
-        id: "vesialueet", title: "Vesialueet",
-        vector: [{ type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#2f80ed", "fill-opacity": 0.45 } }],
-      },
-      {
-        id: "virtavedet", title: "Arvokkaat virtavedet",
-        vector: [
-          { type: "fill", paint: { "fill-color": "#00b4d8", "fill-opacity": 0.35 } },
-          { type: "line", paint: { "line-color": "#0077b6", "line-width": 1.5 } },
-        ],
-      },
-      { id: "norot", title: "Norot", vector: [{ type: "line", paint: { "line-color": "#00a6fb", "line-width": 2.5 } }] },
-      {
-        id: "lahteet", title: "Lähteet",
-        vector: [{ type: "circle", paint: { "circle-color": "#00b4d8", "circle-radius": 5, "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 } }],
-      },
-      {
-        id: "herkat_vesikohteet", title: "Herkät vesikohteet",
-        vector: [{ type: "fill", paint: { "fill-color": "#48cae4", "fill-opacity": 0.3, "fill-outline-color": "#0096c7" } }],
-      },
-      {
-        id: "pohjavesialueet", title: "Pohjavesialueet",
-        vector: [
-          { type: "fill", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#4361ee", "fill-opacity": 0.2 } },
-          { type: "line", paint: { "line-color": "#3a0ca3", "line-width": 1.5, "line-dasharray": [3, 2] } },
-        ],
-      },
-      {
-        id: "rantaraitti", title: "Rantaraitti",
-        vector: [{ type: "line", paint: { "line-color": "#f72585", "line-width": 2.5 } }],
-      },
+    id: "kaavahankkeet", title: "Vireillä olevat kaavat",
+    vector: [
+      { type: "fill", paint: { "fill-color": "#ff006e", "fill-opacity": 0.18 } },
+      { type: "line", paint: { "line-color": "#ff006e", "line-width": 2, "line-dasharray": [2, 1.5] } },
     ],
+  },
+  { id: "wms_ajantasa", title: "Ajantasa-asemakaava", wms: "Ajantasa_asemakaava_vektori" },
+  { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta", on: true },
+  // Vektoriaineistosta (GIS:Vesialueet) puuttuu suuri osa merialueesta; karttakuvassa vedet ovat
+  // kokonaisina kunnan rajalle asti.
+  { id: "wms_vesistot", title: "Vesialueet", wms: "Vesistot", on: true },
+  {
+    id: "vaesto", title: "Asukkaat 250 m ruuduissa (3D)", legend: "population",
+    vector: [{
+      type: "fill-extrusion",
+      paint: {
+        "fill-extrusion-color": ["interpolate", ["linear"], ["get", "asukkaita"],
+          0, "#ffffcc", 200, "#a1dab4", 600, "#41b6c4", 1200, "#2c7fb8", 2500, "#253494"],
+        "fill-extrusion-height": ["*", ["get", "asukkaita"], 0.2],
+        "fill-extrusion-opacity": 0.85,
+      },
+    }],
   },
   {
-    title: "Maaperä ja energia",
-    layers: [
-      { id: "wms_maapera20k", title: "Maalajit 1:20 000", wms: "maapera_20k_pohjamaalajit", service: "gtk" },
-      { id: "wms_maapera200k", title: "Maalajit 1:200 000", wms: "maapera_200k_maalajit", service: "gtk" },
-      {
-        id: "sulfaattimaat", title: "Happamat sulfaattimaat",
-        vector: [{ type: "fill", paint: { "fill-color": "#bc6c25", "fill-opacity": 0.4, "fill-outline-color": "#7f4f24" } }],
+    id: "autoliikenne", title: "Autoliikenne (ajon./vrk)", legend: "traffic",
+    vector: [{
+      type: "line",
+      layout: { "line-cap": "round" },
+      paint: {
+        "line-color": ["interpolate", ["linear"], trafficVolume, 0, "#ffd166", 10000, "#f77f00", 30000, "#d62828", 70000, "#6a040f"],
+        "line-width": ["interpolate", ["linear"], trafficVolume, 0, 1.5, 10000, 3, 30000, 6, 70000, 10],
       },
-      { id: "wms_geoenergia", title: "Geoenergiapotentiaali", wms: "Geoenergiakartta" },
-      { id: "wms_aurinko", title: "Kattojen aurinkosähköpotentiaali", wms: "ilmasto_ja_energia:aurinkosahko_pks", service: "hsy" },
-    ],
+    }],
   },
-  {
-    title: "Luonto",
-    layers: [
-      {
-        id: "luonnonsuojelu", title: "Luonnonsuojelun kohteet",
-        vector: [
-          { type: "fill", paint: { "fill-color": "#2d6a4f", "fill-opacity": 0.3 } },
-          { type: "line", paint: { "line-color": "#1b4332", "line-width": 1.5 } },
-        ],
-      },
-      {
-        id: "luontokohteet", title: "Arvokkaat luontokohteet",
-        vector: [{ type: "fill", paint: { "fill-color": "#52b788", "fill-opacity": 0.45, "fill-outline-color": "#1b4332" } }],
-      },
-      {
-        id: "metsaverkosto", title: "Ekologinen metsäverkosto",
-        vector: [{ type: "fill", paint: { "fill-color": "#40916c", "fill-opacity": 0.3 } }],
-      },
-      {
-        id: "lintualueet", title: "Tärkeät lintualueet", sourceLayer: ["lintualueet_valtak", "lintualueet_maak"],
-        vector: [
-          { type: "fill", paint: { "fill-color": "#ffb703", "fill-opacity": 0.2 } },
-          { type: "line", paint: { "line-color": "#fb8500", "line-width": 1.5 } },
-        ],
-      },
-      {
-        id: "perinneymparistot", title: "Perinneympäristöt",
-        vector: [{ type: "fill", paint: { "fill-color": "#d4a373", "fill-opacity": 0.5, "fill-outline-color": "#8a5a44" } }],
-      },
-      { id: "wms_arvorasteri", title: "Ekologisen verkoston arvot", wms: "Arvorasteri" },
-      {
-        id: "luonnonmuistomerkit", title: "Luonnonmuistomerkit",
-        vector: [{ type: "circle", paint: { "circle-color": "#2b9348", "circle-radius": 5, "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 } }],
-      },
-      {
-        id: "geologiset", title: "Geologiset kohteet",
-        vector: [{ type: "circle", paint: { "circle-color": "#6c584c", "circle-radius": 5, "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 } }],
-      },
-      {
-        id: "luontopolut", title: "Luontopolut",
-        vector: [{ type: "line", paint: { "line-color": "#386641", "line-width": 2.5, "line-dasharray": [1.5, 1] } }],
-      },
-    ],
-  },
-  {
-    title: "Väestö ja liikenne",
-    layers: [
-      {
-        id: "vaesto", title: "Asukkaat 250 m ruuduissa (3D)", legend: "population",
-        vector: [{
-          type: "fill-extrusion",
-          paint: {
-            "fill-extrusion-color": ["interpolate", ["linear"], ["get", "asukkaita"],
-              0, "#ffffcc", 200, "#a1dab4", 600, "#41b6c4", 1200, "#2c7fb8", 2500, "#253494"],
-            "fill-extrusion-height": ["*", ["get", "asukkaita"], 0.2],
-            "fill-extrusion-opacity": 0.85,
-          },
-        }],
-      },
-      {
-        id: "autoliikenne", title: "Autoliikenne (ajon./vrk)", legend: "traffic",
-        vector: [{
-          type: "line",
-          layout: { "line-cap": "round" },
-          paint: {
-            "line-color": ["interpolate", ["linear"], trafficVolume, 0, "#ffd166", 10000, "#f77f00", 30000, "#d62828", 70000, "#6a040f"],
-            "line-width": ["interpolate", ["linear"], trafficVolume, 0, 1.5, 10000, 3, 30000, 6, 70000, 10],
-          },
-        }],
-      },
-      { id: "wms_melu_tie", title: "Tieliikenteen melu (Lden)", wms: "Espoo_tieliikenne Lden_EU (kadut ja maantiet)" },
-      { id: "wms_melu_raide", title: "Raideliikenteen melu (Lden)", wms: "Espoo_rautatieliikenne Lden_EU (juna)" },
-    ],
-  },
-  {
-    title: "Maanpeite (HSY)",
-    layers: [
-      {
-        id: "wms_maanpeite", title: "Maanpeite 2024", service: "hsy",
-        wms: ["avokalliot", "merialue", "muu_avoin_matala_kasvillisuus", "muu_vetta_lapaisematon_pinta",
-          "paallystamaton_tie", "paallystetty_tie", "paljas_maa", "pellot", "puusto_2_10m", "puusto_10_15m",
-          "puusto_15_20m", "puusto_yli20m", "rakennus", "vesi"].map((k) => `asuminen_ja_maankaytto:maanpeite_${k}_2024`).join(","),
-      },
-      { id: "wms_hiilinielu", title: "Hiilinielut", wms: "ilmasto_ja_energia:hiilinieluselvitys_espoo", service: "hsy" },
-    ],
-  },
-  {
-    title: "Kiinteistöt ja kantakartta",
-    layers: [
-      { id: "wms_kiinteistot", title: "Kiinteistörajat", wms: "PKSkiinteistokartta" },
-      { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot" },
-    ],
-  },
-  {
-    title: "Vanhat kartat",
-    layers: [
-      { id: "wms_kartta1958", title: "Espoon kartta 1958", wms: "Kartta_1958" },
-      { id: "wms_opas1973", title: "Opaskartta 1973", wms: "Opaskartta_1973" },
-      { id: "wms_opas1976", title: "Opaskartta 1976", wms: "Opaskartta_1976" },
-    ],
-  },
-  {
-    title: "Aluejaot",
-    layers: [
-      {
-        id: "kaupunginosat", title: "Kaupunginosat", on: true,
-        vector: [{ type: "line", paint: { "line-color": "#ffffff", "line-width": 1.6, "line-opacity": 0.85 } }],
-        labels: true,
-      },
-      {
-        id: "pienalueet", title: "Tilastolliset pienalueet",
-        vector: [{ type: "line", paint: { "line-color": "#ffd60a", "line-width": 1.2, "line-dasharray": [2, 2] } }],
-      },
-      {
-        id: "postinumerot", title: "Postinumeroalueet",
-        vector: [{ type: "line", paint: { "line-color": "#fca311", "line-width": 1.2 } }],
-      },
-    ],
-  },
+  { id: "wms_melu_tie", title: "Tieliikenteen melu (Lden)", wms: "Espoo_tieliikenne Lden_EU (kadut ja maantiet)" },
+  { id: "wms_melu_raide", title: "Raideliikenteen melu (Lden)", wms: "Espoo_rautatieliikenne Lden_EU (juna)" },
+  { id: "wms_kiinteistot", title: "Kiinteistörajat", wms: "PKSkiinteistokartta" },
+  { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot", on: true },
 ];
 
 // Ponnahdusikkunan otsikot ja kenttien nimet tutuimmille tasoille.
 export const POPUP_TITLES = {
   rakennukset: (p) => p.osoite || "Rakennus",
   maankaytto: (p) => `Käyttötarkoitus ${p.KAYTTOTARKOITUS ?? ""}`,
-  asemakaavat: (p) => p.KAAVANNIMI || "Asemakaava",
   kaavahankkeet: (p) => p.KaavanNimi || "Kaavahanke",
-  kaupunginosat: (p) => p.KAUPUNGINOSANNIMI_FI,
-  pienalueet: (p) => p.NIMI,
-  postinumerot: (p) => p.Postinumero_fi,
   vaesto: (p) => `${p.asukkaita} asukasta`,
   autoliikenne: (p) => p.Nimi || "Liikennemäärä",
 };

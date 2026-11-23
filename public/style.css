@@ -148,7 +148,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin: 4px 0 0;
 
 .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
 .check input, .layer input { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; flex: none; }
-.check .count { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stat { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.stat .count { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#ortho-options { margin-top: 8px; }
 
 select {
   font: inherit;
@@ -167,32 +169,8 @@ select {
 .gradient { margin-top: 8px; }
 .gradient .bar { height: 9px; border-radius: 5px; border: 1px solid var(--line); }
 
-.group { border-top: 1px solid var(--line); }
-.group:first-of-type { border-top: 0; }
-.group summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 9px 0;
-  font-weight: 600;
-  cursor: pointer;
-  list-style: none;
-}
-.group summary::-webkit-details-marker { display: none; }
-.group summary::after { content: "›"; transform: rotate(90deg); color: var(--muted); font-size: 16px; margin-left: 6px; transition: transform 0.15s; }
-.group:not([open]) summary::after { transform: rotate(0deg); }
-.group .count { margin-left: auto; font-size: 11px; font-weight: 500; color: var(--muted); }
-
 .layer { padding: 0 0 6px 2px; }
 .layer label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
-.layer .tag {
-  margin-left: auto;
-  font-size: 10.5px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--chip);
-  color: var(--muted);
-}
 .layer [data-legend] { padding-left: 23px; }
 
 footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
@@ -218,8 +196,6 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 #busy.on { opacity: 1; }
 #busy .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite alternate; }
 @keyframes pulse { from { opacity: 0.3; } to { opacity: 1; } }
-
-.layer.unavailable label { opacity: 0.45; cursor: not-allowed; }
 
 /* Joukkoliikenteen linjanumerot ajoneuvojen yllä */
 .vehicle-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 1; }

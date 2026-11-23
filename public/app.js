@@ -1,13 +1,11 @@
 import {
-  BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, GROUPS,
-  HIDDEN_FIELDS, LANDUSE_CLASSES, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
+  BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
+  LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
-const ATTR_GTK = '© <a href="https://www.gtk.fi" target="_blank" rel="noopener">GTK</a>';
-const ATTR = { espoo: ATTR_ESPOO, hsy: ATTR_HSY, gtk: ATTR_GTK };
 const ATTR_DEM = '<a href="https://mapterhorn.com/attribution" target="_blank" rel="noopener">Mapterhorn</a> / © Maanmittauslaitos (CC BY 4.0)';
 
 // Polut suhteessa sivuun, jotta kartta toimii myös alikansiossa (esim. GitHub Pages).
@@ -41,6 +39,7 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 });
 
 const state = {
+  ortho: false, // ilmakuva on valinnainen
   orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
@@ -97,33 +96,27 @@ function buildStyle() {
     rakennukset: {
       type: "vector", tiles: [`gz://${BASE}tiles/rakennukset/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`], minzoom: 11, maxzoom: 15,
     },
-    nimet: { type: "geojson", data: "data/kaupunginosat_nimet.geojson" },
   };
 
+  const visibility = (on) => (on ? "visible" : "none");
   const layers = [
     { id: "tausta", type: "background", paint: { "background-color": "#dfe6e9" } },
-    { id: "ortho", type: "raster", source: "ortho", paint: { "raster-fade-duration": 150 } },
+    { id: "ortho", type: "raster", source: "ortho", layout: { visibility: visibility(state.ortho) }, paint: { "raster-fade-duration": 150 } },
   ];
 
-  // Ryhmien tasot: ensin kaikki rasterit (alimmaiseksi), sitten alueet, viivat, pisteet ja 3D.
+  // Aineistot: ensin karttakuvat listan järjestyksessä (alimmaiseksi), sitten alueet, viivat ja 3D.
   const order = { raster: 0, fill: 1, line: 2, circle: 3, "fill-extrusion": 4 };
   const overlay = [];
-  for (const group of GROUPS) {
-    for (const def of group.layers) {
-      if (def.wms) {
-        sources[def.id] = {
-          type: "raster", tiles: wmsTiles(def.wms, { service: def.service }), tileSize: 512,
-          attribution: ATTR[def.service ?? "espoo"],
-        };
-        overlay.push({ id: def.id, type: "raster", source: def.id, layout: { visibility: "none" }, paint: { "raster-opacity": state.overlayOpacity } });
-        continue;
-      }
-      const sourceLayers = [def.sourceLayer ?? def.id].flat();
-      def.vector.forEach((spec, i) => sourceLayers.forEach((sl, j) => overlay.push({
-        ...spec, id: `${def.id}__${i}_${j}`, source: "kohteet", "source-layer": sl,
-        layout: { ...(spec.layout || {}), visibility: def.on ? "visible" : "none" },
-      })));
+  for (const def of LAYERS) {
+    if (def.wms) {
+      sources[def.id] = { type: "raster", tiles: wmsTiles(def.wms), tileSize: 512, attribution: ATTR_ESPOO };
+      overlay.push({ id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on) }, paint: { "raster-opacity": state.overlayOpacity } });
+      continue;
     }
+    def.vector.forEach((spec, i) => overlay.push({
+      ...spec, id: `${def.id}__${i}`, source: "kohteet", "source-layer": def.id,
+      layout: { ...(spec.layout || {}), visibility: visibility(def.on) },
+    }));
   }
   overlay.sort((a, b) => order[a.type] - order[b.type]);
   layers.push(...overlay.filter((l) => order[l.type] < 4));
@@ -137,15 +130,6 @@ function buildStyle() {
     },
   });
   layers.push(...overlay.filter((l) => order[l.type] === 4));
-  layers.push({
-    id: "kaupunginosat_nimet", type: "symbol", source: "nimet",
-    layout: {
-      "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"],
-      "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 15, 16], "text-letter-spacing": 0.04,
-      "text-max-width": 8, visibility: "visible",
-    },
-    paint: { "text-color": "#1d2a35", "text-halo-color": "rgba(255,255,255,0.92)", "text-halo-width": 1.6 },
-  });
 
   return {
     version: 8,
@@ -184,11 +168,7 @@ window.espooMap = map; // selaimen konsolia varten
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
-map.on("load", () => {
-  // Kaupunginosien rajojen näkyvyys seuraa myös nimiä.
-  syncLabels();
-  initTransit();
-});
+map.on("load", initTransit);
 
 const busy = document.getElementById("busy");
 // Ajoneuvojen vuoksi kartta piirtyy jatkuvasti, eikä idle-tapahtuma tule, joten latauksen
@@ -208,13 +188,14 @@ function setVisible(def, on) {
     }
   }
   def.on = on;
-  if (def.id === "kaupunginosat") syncLabels();
   renderLegends();
 }
 
-function syncLabels() {
-  const def = GROUPS.flatMap((g) => g.layers).find((d) => d.id === "kaupunginosat");
-  map.setLayoutProperty("kaupunginosat_nimet", "visibility", def.on ? "visible" : "none");
+function setOrtho(on) {
+  state.ortho = on;
+  map.setLayoutProperty("ortho", "visibility", on ? "visible" : "none");
+  document.getElementById("ortho-options").hidden = !on;
+  applyTimeFilter();
 }
 
 function setOrthoYear(index) {
@@ -223,18 +204,18 @@ function setOrthoYear(index) {
   applyTimeFilter();
 }
 
-// Rakennuksista näytetään aina ne, jotka olivat valmiina ilmakuvan vuonna. Uusimmalla
-// vuodella näytetään kaikki; vanhemmilla vuosilla rakennukset, joiden valmistumisvuotta
-// ei tiedetä, jätetään pois.
+// Kun ilmakuva on näkyvissä, rakennuksista näytetään ne, jotka olivat valmiina ilmakuvan
+// vuonna. Uusimmalla vuodella ja ilman ilmakuvaa näytetään kaikki; vanhemmilla vuosilla
+// rakennukset, joiden valmistumisvuotta ei tiedetä, jätetään pois.
 function applyTimeFilter() {
   const year = ORTHO_YEARS[state.orthoIndex][0];
   const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
-  map.setFilter("rakennukset", year >= latest ? null : ["all", ["has", "vuosi"], ["<=", ["get", "vuosi"], year]]);
+  map.setFilter("rakennukset", !state.ortho || year >= latest ? null : ["all", ["has", "vuosi"], ["<=", ["get", "vuosi"], year]]);
 }
 
 function setOverlayOpacity(v) {
   state.overlayOpacity = v;
-  for (const def of GROUPS.flatMap((g) => g.layers)) {
+  for (const def of LAYERS) {
     if (def.wms) map.setPaintProperty(def.id, "raster-opacity", v);
   }
 }
@@ -267,7 +248,7 @@ function renderLegends() {
       : state.buildingColor === "korkeus" ? gradientLegend(BUILDING_HEIGHT_STOPS, (v) => v + " m")
         : legendRows(BUILDING_CLASSES),
   );
-  for (const def of GROUPS.flatMap((g) => g.layers)) {
+  for (const def of LAYERS) {
     const slot = document.querySelector(`[data-legend="${def.id}"]`);
     if (!slot) continue;
     slot.replaceChildren();
@@ -282,6 +263,10 @@ function buildPanel() {
   document.getElementById("places").append(...PLACES.map(([name, place]) =>
     el("button", { type: "button", class: "chip", onclick: () => flyTo(place) }, name)));
 
+  const ortho = document.getElementById("ortho");
+  ortho.checked = state.ortho;
+  ortho.addEventListener("change", () => setOrtho(ortho.checked));
+  document.getElementById("ortho-options").hidden = !state.ortho;
   document.getElementById("ortho-years").append(...ORTHO_YEARS.map(([year], i) => el("label", { class: "seg" },
     el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
     el("span", {}, String(year)))));
@@ -298,40 +283,14 @@ function buildPanel() {
   opacity.value = state.overlayOpacity;
   opacity.addEventListener("input", () => setOverlayOpacity(+opacity.value));
 
-  const groups = document.getElementById("groups");
-  for (const group of GROUPS) {
-    const active = group.layers.some((d) => d.on);
-    groups.append(el("details", { class: "group", open: active },
-      el("summary", {}, group.title, el("span", { class: "count" }, String(group.layers.length))),
-      group.layers.map((def) => el("div", { class: "layer", "data-service": def.service ?? null },
-        el("label", {},
-          el("input", { type: "checkbox", checked: !!def.on, onchange: (e) => setVisible(def, e.target.checked) }),
-          el("span", {}, def.title),
-          def.wms ? el("span", { class: "tag" }, { hsy: "HSY", gtk: "GTK" }[def.service] ?? "kartta") : null),
-        def.legend ? el("div", { "data-legend": def.id }) : null)),
-    ));
-  }
+  document.getElementById("layers").append(...LAYERS.map((def) => el("div", { class: "layer" },
+    el("label", {},
+      el("input", { type: "checkbox", checked: !!def.on, onchange: (e) => setVisible(def, e.target.checked) }),
+      el("span", {}, def.title)),
+    def.legend ? el("div", { "data-legend": def.id }) : null)));
 
   document.getElementById("panel-toggle").addEventListener("click", () => document.body.classList.toggle("panel-closed"));
   renderLegends();
-  checkHsyProxy();
-}
-
-// HSY:n karttakuvat tarvitsevat välityspalvelimen. Jos julkaisussa ei ole sellaista,
-// tasot näytetään harmaina eikä niitä voi valita.
-async function checkHsyProxy() {
-  const probe = new URL(WMS_SERVICES.hsy, BASE);
-  probe.search = new URLSearchParams({
-    SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: "taustakartat_ja_aluejaot:Seutukartta",
-    STYLES: "", SRS: "EPSG:3857", BBOX: "2760000,8437000,2760100,8437100", WIDTH: "1", HEIGHT: "1", FORMAT: "image/png",
-  });
-  const ok = await fetch(probe).then((r) => r.ok && (r.headers.get("content-type") || "").startsWith("image/")).catch(() => false);
-  if (ok) return;
-  for (const row of document.querySelectorAll('.layer[data-service="hsy"]')) {
-    row.classList.add("unavailable");
-    row.querySelector("input").disabled = true;
-    row.title = "HSY:n karttakuvat vaativat välityspalvelimen, jota tässä julkaisussa ei ole.";
-  }
 }
 
 // ------------------------------------------------------------ joukkoliikenne
@@ -345,13 +304,12 @@ async function initTransit() {
   try {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
     transit = await createTransit(map, {
-      boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json",
-      beforeLayer: "kaupunginosat_nimet", undergroundBeforeLayer: "rakennukset",
+      boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json", undergroundBeforeLayer: "rakennukset",
     });
     window.espooTransit = transit;
+    // Joukkoliikenne näkyy aina; paneelissa vain ajoneuvojen määrät.
     const counts = {};
-    box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("label", { class: "check" },
-      el("input", { type: "checkbox", checked: true, onchange: (e) => transit.setGroup(id, e.target.checked) }),
+    box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("div", { class: "stat" },
       el("span", { class: "swatch", style: `background:${color}` }),
       el("span", {}, title),
       counts[id] = el("span", { class: "count" }, "–"))));
@@ -375,7 +333,7 @@ function layerKey(layerId) {
 
 function layerTitle(key) {
   if (key === "rakennukset") return "Rakennus";
-  return GROUPS.flatMap((g) => g.layers).find((d) => d.id === key)?.title ?? key;
+  return LAYERS.find((d) => d.id === key)?.title ?? key;
 }
 
 function formatValue(k, v) {

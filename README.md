@@ -1,9 +1,21 @@
 # Espoo 3D
 
 Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
-kaavoitus, vedet, maaperä, luonto, väestö ja liikenne, ja kaikki tieto tulee
-avoimista lähteistä. Espoon bussit, raitiovaunut, junat ja metro liikkuvat kartalla
-reaaliajassa 3D-malleina.
+kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteistä.
+Espoon bussit, raitiovaunut, junat ja metro liikkuvat kartalla aina reaaliajassa
+3D-malleina.
+
+## Paneeli
+
+- Joukkoliikenne näkyy aina; paneelissa näkyy ajoneuvojen määrä lajeittain.
+- Aineistoja on yksitoista: asemakaavan käyttötarkoitukset, vireillä olevat kaavat,
+  ajantasa-asemakaava, maankäyttökartta, vesialueet, asukkaat 250 m ruuduissa (3D),
+  autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat sekä kantakartan
+  maastotiedot. Oletuksena päällä ovat maankäyttökartta, vesialueet ja kantakartan
+  maastotiedot. Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
+- Ilmakuva on valinnainen ja oletuksena pois. Kun se on päällä, voi valita vuoden
+  (2026, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin
+  valmiina.
 
 ## Käynnistys
 
@@ -33,10 +45,9 @@ valmiit tiilet ovat.
 ## Julkaisu (Netlify)
 
 Netlify julkaisee `public/`-kansion sellaisenaan aina, kun GitHubin `main`-haaraan
-tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole, ja
-HSY:n karttakuvat välitetään reitin `/proxy/hsy/wms` kautta samoin kuin paikallisesti.
-Jos kartta julkaistaan palvelussa, jossa välitystä ei ole (esim. GitHub Pages), HSY:n
-kolme tasoa näkyvät harmaina ja muu kartta toimii normaalisti.
+tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole. HSY:n
+karttakuville on valmiina välitysreitti `/proxy/hsy/wms` (myös `server.py`), mutta niitä
+ei tällä hetkellä käytetä.
 
 Vektoritiilet ovat gzip-pakattuja, ja selain purkaa ne itse (`app.js`), joten
 palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
@@ -47,12 +58,9 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 |---|---|
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
-| Asemakaavat, käyttötarkoitukset, kaavahankkeet | Espoo WFS `GIS:*` |
-| Vedet, luontokohteet, sulfaattimaat, liikennemäärät, aluejaot | Espoo WFS `GIS:*` |
-| Ilmakuvat 1950–2026, opaskartat, vanhat kartat, kaava-, melu- ja kiinteistökartat | Espoo WMS |
-| Maalajit 1:20 000 ja 1:200 000 | GTK WMS |
+| Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
+| Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, vesistöt, melu, kiinteistörajat, kantakartta | Espoo WMS |
 | Väestöruudukko 250 m (2025) | HSY WFS |
-| Maanpeite, aurinkosähköpotentiaali, hiilinielut | HSY WMS (palvelimen välityksellä) |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
@@ -65,6 +73,10 @@ kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennet
 ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
 
 ## Huomioita aineistosta
+
+- Espoon avoimesta vesialueaineistosta (WFS `GIS:Vesialueet`) puuttuu suuri osa
+  merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista). Vesialueet näytetään
+  siksi karttakuvana (WMS `Vesistot`), jossa vedet ovat kokonaisina kunnan rajalle asti.
 
 - Espoon WFS tulkitsee BBOX-rajauksen samassa koordinaatistossa kuin `srsName`-tulosteen.
 - Kun tuloste pyydetään EPSG:3857:nä, osa rakennusten kärkipisteistä jää ETRS-GK25-
