@@ -1,0 +1,161 @@
+{
+ "versio": 1795438702,
+ "aineistot": [
+  {
+   "id": "maankaytto",
+   "lahde": "GIS:Maankayttoalueet",
+   "nimi": "Asemakaavan käyttötarkoitusalueet",
+   "koko": 16360861
+  },
+  {
+   "id": "asemakaavat",
+   "lahde": "GIS:Asemakaavat",
+   "nimi": "Asemakaava-alueiden rajat",
+   "koko": 10440157
+  },
+  {
+   "id": "kaavahankkeet",
+   "lahde": "GIS:Kaavoitushankkeet",
+   "nimi": "Vireillä olevat kaavahankkeet",
+   "koko": 606241
+  },
+  {
+   "id": "kaupunginosat",
+   "lahde": "GIS:Kaupunginosat",
+   "nimi": "Kaupunginosat",
+   "koko": 999194
+  },
+  {
+   "id": "pienalueet",
+   "lahde": "GIS:Tilastoalueet",
+   "nimi": "Tilastolliset alueet",
+   "koko": 1657653
+  },
+  {
+   "id": "postinumerot",
+   "lahde": "GIS:Postinumeroalueet",
+   "nimi": "Postinumeroalueet",
+   "koko": 1151936
+  },
+  {
+   "id": "vesialueet",
+   "lahde": "GIS:Vesialueet",
+   "nimi": "Vesialueet",
+   "koko": 8199031
+  },
+  {
+   "id": "norot",
+   "lahde": "GIS:Norot",
+   "nimi": "Norot",
+   "koko": 500787
+  },
+  {
+   "id": "lahteet",
+   "lahde": "GIS:Lahteita",
+   "nimi": "Lähteet",
+   "koko": 38489
+  },
+  {
+   "id": "virtavedet",
+   "lahde": "GIS:ArvokkaatVirtavedet",
+   "nimi": "Arvokkaat virtavedet",
+   "koko": 233465
+  },
+  {
+   "id": "herkat_vesikohteet",
+   "lahde": "GIS:Herkat_vesikohteet",
+   "nimi": "Herkät vesikohteet",
+   "koko": 915597
+  },
+  {
+   "id": "pohjavesialueet",
+   "lahde": "GIS:Pohjavesialueet",
+   "nimi": "Pohjavesialueet",
+   "koko": 14827
+  },
+  {
+   "id": "luontokohteet",
+   "lahde": "GIS:ArvokkaatLuontokohteet",
+   "nimi": "Arvokkaat luontokohteet",
+   "koko": 85248
+  },
+  {
+   "id": "luonnonsuojelu",
+   "lahde": "GIS:LuonnonsuojelunToimenpideohjelma",
+   "nimi": "Luonnonsuojelun toimenpideohjelma",
+   "koko": 239944
+  },
+  {
+   "id": "lintualueet_valtak",
+   "lahde": "GIS:Valtakunnallisesti_tarkeat_lintualueet",
+   "nimi": "Valtakunnallisesti tärkeät lintualueet",
+   "koko": 98625
+  },
+  {
+   "id": "lintualueet_maak",
+   "lahde": "GIS:Maakunnallisesti_tarkeat_lintualueet",
+   "nimi": "Maakunnallisesti tärkeät lintualueet",
+   "koko": 203165
+  },
+  {
+   "id": "luonnonmuistomerkit",
+   "lahde": "GIS:Luonnonmuistomerkit",
+   "nimi": "Luonnonmuistomerkit",
+   "koko": 39483
+  },
+  {
+   "id": "geologiset",
+   "lahde": "GIS:Geologiset_kohteet",
+   "nimi": "Geologiset kohteet",
+   "koko": 53971
+  },
+  {
+   "id": "perinneymparistot",
+   "lahde": "GIS:Perinneymparistot",
+   "nimi": "Perinneympäristöt",
+   "koko": 62202
+  },
+  {
+   "id": "metsaverkosto",
+   "lahde": "GIS:Ekologinen_verkosto_Metsaverkosto",
+   "nimi": "Ekologinen metsäverkosto",
+   "koko": 4007641
+  },
+  {
+   "id": "sulfaattimaat",
+   "lahde": "GIS:Potentiaaliset_happamat_sulfaattimaat",
+   "nimi": "Potentiaaliset happamat sulfaattimaat",
+   "koko": 2128098
+  },
+  {
+   "id": "luontopolut",
+   "lahde": "GIS:Luontopolut",
+   "nimi": "Luontopolut",
+   "koko": 1380253
+  },
+  {
+   "id": "rantaraitti",
+   "lahde": "GIS:Rantaraitti",
+   "nimi": "Rantaraitti",
+   "koko": 997376
+  },
+  {
+   "id": "autoliikenne",
+   "lahde": "GIS:Autoliikennemaarat",
+   "nimi": "Autoliikennemäärät",
+   "koko": 580369
+  },
+  {
+   "id": "vaesto",
+   "lahde": "HSY",
+   "nimi": "Väestö",
+   "koko": 766106
+  },
+  {
+   "id": "rakennukset",
+   "lahde": "bldg:building_lod0",
+   "nimi": "Rakennukset",
+   "koko": 33163419
+  }
+ ]
+}

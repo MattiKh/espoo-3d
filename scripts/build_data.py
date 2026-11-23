@@ -1,0 +1,720 @@
+#!/usr/bin/env python3
+"""Lataa Espoon ja HSY:n avoimet paikkatietoaineistot ja muuntaa ne GeoJSONiksi.
+
+Käyttö:  python3 scripts/build_data.py [aineisto ...]
+
+Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
+jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
+vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
+public/data/ vain tiedostot manifest.json ja kaupunginosat_nimet.geojson.
+"""
+import concurrent.futures as cf
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CACHE = os.path.join(ROOT, "cache")
+OUT = os.path.join(ROOT, "data")  # välivaiheen GeoJSONit, ei julkaista
+PUBLIC_DATA = os.path.join(ROOT, "public", "data")
+TILES = os.path.join(ROOT, "public", "tiles")
+
+ESPOO_WFS = "https://kartat.espoo.fi/teklaogcweb/wfs.ashx"
+HSY_WFS = "https://kartta.hsy.fi/geoserver/wfs"
+UA = "espoo3d-data-builder/1.0 (paikallinen avoimen datan katselin)"
+
+# Espoon alue (lon/lat), hieman WMS-palvelun ilmoittamaa laajuutta väljempänä.
+ESPOO_LONLAT = (24.47, 60.04, 24.90, 60.42)
+
+GML = "{http://www.opengis.net/gml}"
+R = 6378137.0
+
+# id, WFS-tyyppi, kuvaus. Kaikki Espoon avoimesta WFS-rajapinnasta.
+ESPOO_DATASETS = [
+    ("maankaytto", "GIS:Maankayttoalueet", "Asemakaavan käyttötarkoitusalueet"),
+    ("asemakaavat", "GIS:Asemakaavat", "Asemakaava-alueiden rajat"),
+    ("kaavahankkeet", "GIS:Kaavoitushankkeet", "Vireillä olevat kaavahankkeet"),
+    ("kaupunginosat", "GIS:Kaupunginosat", "Kaupunginosat"),
+    ("pienalueet", "GIS:Tilastoalueet", "Tilastolliset alueet"),
+    ("postinumerot", "GIS:Postinumeroalueet", "Postinumeroalueet"),
+    ("vesialueet", "GIS:Vesialueet", "Vesialueet"),
+    ("norot", "GIS:Norot", "Norot"),
+    ("lahteet", "GIS:Lahteita", "Lähteet"),
+    ("virtavedet", "GIS:ArvokkaatVirtavedet", "Arvokkaat virtavedet"),
+    ("herkat_vesikohteet", "GIS:Herkat_vesikohteet", "Herkät vesikohteet"),
+    ("pohjavesialueet", "GIS:Pohjavesialueet", "Pohjavesialueet"),
+    ("luontokohteet", "GIS:ArvokkaatLuontokohteet", "Arvokkaat luontokohteet"),
+    ("luonnonsuojelu", "GIS:LuonnonsuojelunToimenpideohjelma", "Luonnonsuojelun toimenpideohjelma"),
+    ("lintualueet_valtak", "GIS:Valtakunnallisesti_tarkeat_lintualueet", "Valtakunnallisesti tärkeät lintualueet"),
+    ("lintualueet_maak", "GIS:Maakunnallisesti_tarkeat_lintualueet", "Maakunnallisesti tärkeät lintualueet"),
+    ("luonnonmuistomerkit", "GIS:Luonnonmuistomerkit", "Luonnonmuistomerkit"),
+    ("geologiset", "GIS:Geologiset_kohteet", "Geologiset kohteet"),
+    ("perinneymparistot", "GIS:Perinneymparistot", "Perinneympäristöt"),
+    ("metsaverkosto", "GIS:Ekologinen_verkosto_Metsaverkosto", "Ekologinen metsäverkosto"),
+    ("sulfaattimaat", "GIS:Potentiaaliset_happamat_sulfaattimaat", "Potentiaaliset happamat sulfaattimaat"),
+    ("luontopolut", "GIS:Luontopolut", "Luontopolut"),
+    ("rantaraitti", "GIS:Rantaraitti", "Rantaraitti"),
+    ("autoliikenne", "GIS:Autoliikennemaarat", "Autoliikennemäärät"),
+]
+
+BUILDING_TYPE = "bldg:building_lod0"
+# Espoo jaetaan ruutuihin, jotta yksittäiset kyselyt pysyvät pieninä. Mercator-metreinä;
+# 60. leveyspiirillä 6000 m on maastossa noin 3 km.
+BUILDING_TILE = 6000
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def http_get(url, params, dest, timeout=300, retries=3):
+    """Hakee URL:n välimuistitiedostoon, ellei se jo ole siellä."""
+    if os.path.exists(dest) and os.path.getsize(dest) > 0:
+        return dest
+    full = url + "?" + urllib.parse.urlencode(params)
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(full, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r, open(dest + ".part", "wb") as f:
+                shutil.copyfileobj(r, f, 1 << 20)
+            os.replace(dest + ".part", dest)
+            return dest
+        except Exception as e:  # verkko- tai palvelinvirhe: yritä uudelleen
+            log(f"  virhe ({attempt + 1}/{retries}): {e}")
+            time.sleep(5 * (attempt + 1))
+    raise RuntimeError(f"Lataus epäonnistui: {full}")
+
+
+def bbox_filter(minx, miny, maxx, maxy):
+    # Palvelin tulkitsee rajauksen aina samassa koordinaatistossa kuin srsName-tulosteen,
+    # joten Envelope annetaan Web Mercatorina.
+    return (
+        '<ogc:Filter xmlns:ogc="http://www.opengis.net/ogc" xmlns:gml="http://www.opengis.net/gml">'
+        "<ogc:BBOX><ogc:PropertyName>Geometry</ogc:PropertyName>"
+        f'<gml:Envelope srsName="EPSG:3857"><gml:lowerCorner>{minx} {miny}</gml:lowerCorner>'
+        f"<gml:upperCorner>{maxx} {maxy}</gml:upperCorner></gml:Envelope></ogc:BBOX></ogc:Filter>"
+    )
+
+
+def espoo_params(type_name, flt=None):
+    # Koordinaatit pyydetään Web Mercatorina (EPSG:3857): se on konforminen, joten
+    # kaavojen kaarisegmentit voi tihentää ympyränkaariksi metreissä.
+    p = {
+        "service": "WFS",
+        "version": "1.1.0",
+        "request": "GetFeature",
+        "typeName": type_name,
+        "srsName": "EPSG:3857",
+    }
+    if flt:
+        p["filter"] = flt
+    return p
+
+
+# ---------------------------------------------------------------- geometria
+
+
+def lonlat_to_merc(lon, lat):
+    return R * math.radians(lon), R * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+
+
+def merc_to_lonlat(x, y):
+    lon = math.degrees(x / R)
+    lat = math.degrees(2 * math.atan(math.exp(y / R)) - math.pi / 2)
+    return [round(lon, 7), round(lat, 7)]
+
+
+def local(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def read_positions(el):
+    """Palauttaa elementin suorat pos/posList-koordinaatit [(x, y), ...] (z jätetään pois)."""
+    pts = []
+    for c in el:
+        t = local(c.tag)
+        if t == "pos":
+            v = c.text.split()
+            pts.append((float(v[0]), float(v[1])))
+        elif t == "posList":
+            dim = int(c.get("srsDimension") or el.get("srsDimension") or 2)
+            v = [float(s) for s in c.text.split()]
+            pts.extend((v[i], v[i + 1]) for i in range(0, len(v), dim))
+        elif t == "pointProperty":
+            pts.extend(read_positions(c.find(GML + "Point")))
+    return [q for q in (fix_position(p) for p in pts) if q]
+
+
+def fix_position(p):
+    """Korjaa Espoon WFS:n muunnosvirheet. Pyydetyssä EPSG:3857-tulosteessa osa pisteistä
+    jää ETRS-GK25-koordinaateiksi (yleensä renkaan ensimmäinen piste), ja osa on roskaa
+    (INF tai lähellä nollaa). GK25-pisteet muunnetaan itse, roskat jätetään pois."""
+    x, y = p
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    if 25_000_000 < x < 26_000_000 and 6_500_000 < y < 6_900_000:
+        return lonlat_to_merc(*gk25_to_lonlat(x, y))
+    if abs(x) < 1_000_000 and abs(y) < 1_000_000:
+        return None
+    return p
+
+
+def gk25_to_lonlat(e, n_):
+    """ETRS-GK25 (EPSG:3879) → ETRS89-maantieteelliset koordinaatit, JHS 154 -kaavat."""
+    f = 1 / 298.257222101
+    a = 6378137.0
+    n = f / (2 - f)
+    a1 = a / (1 + n) * (1 + n ** 2 / 4 + n ** 4 / 64)
+    ecc = math.sqrt(2 * f - f * f)
+    h = (
+        n / 2 - 2 * n ** 2 / 3 + 37 * n ** 3 / 96 - n ** 4 / 360,
+        n ** 2 / 48 + n ** 3 / 15 - 437 * n ** 4 / 1440,
+        17 * n ** 3 / 480 - 37 * n ** 4 / 840,
+        4397 * n ** 4 / 161280,
+    )
+    xi = n_ / a1
+    eta = (e - 25_500_000) / a1
+    xi_p = xi - sum(h[i] * math.sin(2 * (i + 1) * xi) * math.cosh(2 * (i + 1) * eta) for i in range(4))
+    eta_p = eta - sum(h[i] * math.cos(2 * (i + 1) * xi) * math.sinh(2 * (i + 1) * eta) for i in range(4))
+    beta = math.asin(math.sin(xi_p) / math.cosh(eta_p))
+    l = math.asin(math.tanh(eta_p) / math.cos(beta))
+    q = math.asinh(math.tan(beta))
+    qp = q + ecc * math.atanh(ecc * math.tanh(q))
+    for _ in range(5):
+        qp = q + ecc * math.atanh(ecc * math.tanh(qp))
+    return 25 + math.degrees(l), math.degrees(math.atan(math.sinh(qp)))
+
+
+def densify_arc(p1, p2, p3, step=1.5):
+    """Kolmen pisteen kautta kulkeva ympyränkaari pisteiksi (metreinä)."""
+    (x1, y1), (x2, y2), (x3, y3) = p1, p2, p3
+    d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-9:
+        return [p1, p2, p3]
+    ux = ((x1 * x1 + y1 * y1) * (y2 - y3) + (x2 * x2 + y2 * y2) * (y3 - y1) + (x3 * x3 + y3 * y3) * (y1 - y2)) / d
+    uy = ((x1 * x1 + y1 * y1) * (x3 - x2) + (x2 * x2 + y2 * y2) * (x1 - x3) + (x3 * x3 + y3 * y3) * (x2 - x1)) / d
+    r = math.hypot(x1 - ux, y1 - uy)
+    a1 = math.atan2(y1 - uy, x1 - ux)
+    a2 = math.atan2(y2 - uy, x2 - ux)
+    a3 = math.atan2(y3 - uy, x3 - ux)
+    tau = 2 * math.pi
+    ccw = (a2 - a1) % tau < (a3 - a1) % tau  # kulkeeko kaari vastapäivään p2:n kautta
+    sweep = (a3 - a1) % tau if ccw else -((a1 - a3) % tau)
+    n = max(4, min(128, int(abs(sweep) * r / step)))
+    return [(ux + r * math.cos(a1 + sweep * i / n), uy + r * math.sin(a1 + sweep * i / n)) for i in range(n + 1)]
+
+
+def curve_points(el):
+    t = local(el.tag)
+    if t in ("LineString", "LineStringSegment", "LinearRing"):
+        return read_positions(el)
+    if t in ("Arc", "ArcString"):
+        p = read_positions(el)
+        out = []
+        for i in range(0, len(p) - 2, 2):
+            seg = densify_arc(p[i], p[i + 1], p[i + 2])
+            out.extend(seg if not out else seg[1:])
+        return out
+    if t == "Curve":
+        out = []
+        for seg in el.find(GML + "segments"):
+            pts = curve_points(seg)
+            out.extend(pts if not out else pts[1:])
+        return out
+    if t == "Ring":
+        out = []
+        for cm in el.findall(GML + "curveMember"):
+            for c in cm:
+                pts = curve_points(c)
+                out.extend(pts if not out else pts[1:])
+        return out
+    if t == "CompositeCurve":
+        out = []
+        for cm in el.findall(GML + "curveMember"):
+            for c in cm:
+                pts = curve_points(c)
+                out.extend(pts if not out else pts[1:])
+        return out
+    return []
+
+
+def signed_area(ring):
+    return sum(ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1] for i in range(len(ring) - 1)) / 2
+
+
+def to_ring(pts, outer):
+    if len(pts) < 3:
+        return None
+    if pts[0] != pts[-1]:
+        pts = pts + [pts[0]]
+    if len(pts) < 4:
+        return None
+    # GeoJSON (RFC 7946): ulkoreuna vastapäivään, reiät myötäpäivään.
+    a = signed_area(pts)
+    if (outer and a < 0) or (not outer and a > 0):
+        pts = pts[::-1]
+    return [merc_to_lonlat(x, y) for x, y in pts]
+
+
+def polygon_coords(el):
+    rings = []
+    for part, outer in (("exterior", True), ("outerBoundaryIs", True), ("interior", False), ("innerBoundaryIs", False)):
+        for b in el.findall(GML + part):
+            for ring_el in b:
+                ring = to_ring(curve_points(ring_el), outer)
+                if ring:
+                    rings.append(ring)
+    return rings if rings and rings[0] else None
+
+
+def to_geojson(el):
+    """GML-geometria → (tyyppi, koordinaatit) tai None."""
+    t = local(el.tag)
+    if t == "Point":
+        p = read_positions(el)
+        return ("Point", merc_to_lonlat(*p[0])) if p else None
+    if t in ("LineString", "Curve", "CompositeCurve"):
+        pts = curve_points(el)
+        return ("LineString", [merc_to_lonlat(x, y) for x, y in pts]) if len(pts) > 1 else None
+    if t in ("Polygon", "PolygonPatch"):
+        rings = polygon_coords(el)
+        return ("Polygon", rings) if rings else None
+    if t in ("Surface", "MultiSurface", "MultiPolygon", "PolyhedralSurface", "CompositeSurface"):
+        polys = []
+        for p in el.iter():
+            if local(p.tag) in ("Polygon", "PolygonPatch"):
+                c = polygon_coords(p)
+                if c:
+                    polys.append(c)
+        return ("MultiPolygon", polys) if polys else None
+    if t in ("MultiCurve", "MultiLineString"):
+        lines = []
+        for m in el:
+            for c in m:
+                pts = curve_points(c)
+                if len(pts) > 1:
+                    lines.append([merc_to_lonlat(x, y) for x, y in pts])
+        return ("MultiLineString", lines) if lines else None
+    if t == "MultiPoint":
+        pts = [merc_to_lonlat(*p) for m in el for c in m for p in read_positions(c)]
+        return ("MultiPoint", pts) if pts else None
+    return None
+
+
+GEOM_TAGS = {
+    "Point", "LineString", "Curve", "CompositeCurve", "Polygon", "Surface", "MultiSurface", "MultiPolygon",
+    "PolyhedralSurface", "CompositeSurface", "MultiCurve", "MultiLineString", "MultiPoint",
+}
+
+
+def merge_geoms(geoms):
+    """Yhdistää saman kohteen useat geometriat (esim. viiva + alue) yhdeksi."""
+    if len(geoms) == 1:
+        return {"type": geoms[0][0], "coordinates": geoms[0][1]}
+    polys, lines, points = [], [], []
+    for t, c in geoms:
+        if t == "Polygon":
+            polys.append(c)
+        elif t == "MultiPolygon":
+            polys.extend(c)
+        elif t == "LineString":
+            lines.append(c)
+        elif t == "MultiLineString":
+            lines.extend(c)
+        elif t == "Point":
+            points.append(c)
+        elif t == "MultiPoint":
+            points.extend(c)
+    # Alue riittää karttaesitykseen; viivat ovat usein vain sen rajoja.
+    if polys:
+        return {"type": "MultiPolygon", "coordinates": polys} if len(polys) > 1 else {"type": "Polygon", "coordinates": polys[0]}
+    if lines:
+        return {"type": "MultiLineString", "coordinates": lines}
+    return {"type": "MultiPoint", "coordinates": points}
+
+
+def convert_value(v):
+    v = v.strip()
+    if len(v) > 300:
+        v = v[:300] + "…"
+    try:
+        if v and (v.lstrip("-").replace(".", "", 1).isdigit()) and not (len(v) > 1 and v[0] == "0" and v[1] != "."):
+            f = float(v)
+            return int(f) if f.is_integer() and "." not in v else round(f, 3)
+    except ValueError:
+        pass
+    return v
+
+
+def parse_features(path, geom_prefer=None):
+    """Lukee Espoon WFS:n GML-vastauksen ja palauttaa GeoJSON-kohteet."""
+    feats = []
+    for _, el in ET.iterparse(path, events=("end",)):
+        if el.tag != GML + "featureMember":
+            continue
+        for f in el:
+            props, geoms = {}, []
+            fid = f.get(GML + "id")
+            for c in f:
+                name = local(c.tag)
+                if name.endswith("Attribute") and c.get("name"):
+                    v = c.find("{http://www.opengis.net/citygml/generics/1.0}value")
+                    if v is None:
+                        v = next(iter(c), None)
+                    if v is not None and v.text:
+                        props[c.get("name")] = convert_value(v.text)
+                    continue
+                gchild = next((g for g in c.iter() if g.tag.startswith(GML) and local(g.tag) in GEOM_TAGS), None)
+                if gchild is not None:
+                    if geom_prefer and name not in geom_prefer:
+                        continue
+                    g = to_geojson(gchild)
+                    if g:
+                        geoms.append(g)
+                elif len(c) == 0 and c.text and c.text.strip() and not name.startswith("_"):
+                    props[name] = convert_value(c.text)
+            if geoms:
+                feat = {"type": "Feature", "properties": props, "geometry": merge_geoms(geoms)}
+                if fid:
+                    feat["id_gml"] = fid
+                feats.append(feat)
+        el.clear()
+    return feats
+
+
+def write_geojson(name, feats, folder=OUT):
+    path = os.path.join(folder, name + ".geojson")
+    for f in feats:
+        f.pop("id_gml", None)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"type": "FeatureCollection", "features": feats}, fh, ensure_ascii=False, separators=(",", ":"))
+    log(f"  → {name}.geojson: {len(feats)} kohdetta, {os.path.getsize(path) / 1e6:.1f} Mt")
+    return path
+
+
+# ------------------------------------------------------------- aineistot
+
+
+def build_simple(ds_id, type_name):
+    log(f"{ds_id} ({type_name})")
+    raw = http_get(ESPOO_WFS, espoo_params(type_name), os.path.join(CACHE, ds_id + ".xml"))
+    feats = parse_features(raw)
+    if ds_id == "maankaytto":
+        for f in feats:
+            f["properties"]["luokka"] = landuse_class(str(f["properties"].get("KAYTTOTARKOITUS", "")))
+    return write_geojson(ds_id, feats)
+
+
+LANDUSE = [  # asemakaavamerkinnän alkukirjaimet → pääluokka
+    ("W", "vesi"), ("SL", "suojelu"), ("S", "suojelu"), ("V", "virkistys"), ("E", "erityis"),
+    ("L", "liikenne"), ("T", "teollisuus"), ("Y", "julkinen"), ("P", "palvelu"), ("K", "liike"),
+    ("A", "asuminen"), ("M", "maa_metsa"), ("R", "loma"), ("C", "keskusta"),
+]
+
+
+def landuse_class(code):
+    code = code.strip().upper()
+    for prefix, cls in LANDUSE:
+        if code.startswith(prefix):
+            return cls
+    return "muu"
+
+
+def build_buildings():
+    log(f"rakennukset ({BUILDING_TYPE}), ruudut {BUILDING_TILE} m")
+    minx, miny = (int(v) for v in lonlat_to_merc(ESPOO_LONLAT[0], ESPOO_LONLAT[1]))
+    maxx, maxy = (int(v) + 1 for v in lonlat_to_merc(ESPOO_LONLAT[2], ESPOO_LONLAT[3]))
+    tiles = [
+        (x, y, min(x + BUILDING_TILE, maxx), min(y + BUILDING_TILE, maxy))
+        for x in range(minx, maxx, BUILDING_TILE)
+        for y in range(miny, maxy, BUILDING_TILE)
+    ]
+
+    def fetch(t):
+        dest = os.path.join(CACHE, "rakennukset", f"{t[0]}_{t[1]}.xml")
+        return http_get(ESPOO_WFS, espoo_params(BUILDING_TYPE, bbox_filter(*t)), dest, timeout=600)
+
+    os.makedirs(os.path.join(CACHE, "rakennukset"), exist_ok=True)
+    paths, done = [], 0
+    with cf.ThreadPoolExecutor(max_workers=3) as ex:  # maltillinen rinnakkaisuus palvelimen takia
+        for p in ex.map(fetch, tiles):
+            paths.append(p)
+            done += 1
+            if done % 10 == 0 or done == len(tiles):
+                log(f"  ladattu {done}/{len(tiles)} ruutua")
+
+    seen, feats = set(), []
+    for p in paths:
+        for f in parse_features(p, geom_prefer={"lod0FootPrint"}):
+            if f.get("id_gml") in seen:
+                continue  # ruutujen rajalla olevat rakennukset tulevat kahdesti
+            seen.add(f.get("id_gml"))
+            feats.append(building_props(f))
+    path = write_geojson("rakennukset", feats)
+    make_building_tiles(path)
+
+
+def building_props(f):
+    p = f["properties"]
+    height = p.get("measuredHeight")
+    floors = p.get("kerrosluku") if isinstance(p.get("kerrosluku"), (int, float)) else p.get("storeysAboveGround")
+    if not isinstance(height, (int, float)) or height <= 0:
+        height = (floors * 3.2) if isinstance(floors, (int, float)) and floors > 0 else 4.0
+    # Valmistumispäivä on muotoa pp.kk.vvvv tai vvvv-kk-pp. CityGML:n yearOfConstruction
+    # on 1900 silloinkin, kun vuotta ei tiedetä, joten sitä ei käytetä.
+    # Myös valmistumispäivissä vuosi 1900 on lähes aina tuntemattoman vuoden paikka-arvo.
+    year = None
+    v = str(p.get("valmistumispvm", ""))
+    if len(v) >= 4 and v[-4:].isdigit():
+        year = int(v[-4:])
+    elif v[:4].isdigit():
+        year = int(v[:4])
+    if year == 1900:
+        year = None
+    f["properties"] = {
+        k: v for k, v in {
+            "korkeus": round(float(height), 1),
+            "kerrokset": floors if isinstance(floors, (int, float)) else None,
+            "vuosi": year,
+            "kaytto": p.get("kayttotarkoitus"),
+            "osoite": p.get("osoite"),
+            "asunnot": p.get("asunnot"),
+            "rakenne": p.get("kantavarakenne"),
+            "tunnus": p.get("rakennustunnus"),
+        }.items() if v not in (None, "", "Ei arvoa")
+    }
+    f["properties"]["luokka"] = building_class(str(f["properties"].get("kaytto", "")))
+    return f
+
+
+def building_class(use):
+    u = use.lower()
+    for keys, cls in (
+        (("kerrostalo",), "kerrostalo"),
+        (("rivitalo", "ketjutalo"), "rivitalo"),
+        (("pientalo", "omakotitalo", "erillinen", "paritalo", "yhden asunnon", "kahden asunnon"), "pientalo"),
+        (("vapaa-ajan", "loma"), "vapaa_aika"),
+        (("liike", "toimisto", "myymälä", "kauppa", "hotelli", "ravintola"), "liike"),
+        (("teollisuus", "varasto", "tuotanto", "energia", "huolto", "kierrätys"), "teollisuus"),
+        (("pysäköinti", "liikenne", "asema", "autotalli", "autosuoja", "kulkuneuvo"), "liikenne"),
+        (("koulu", "opetus", "oppilaitos", "päiväkod", "terveys", "hoito", "sairaala", "laitos", "avopalvelu",
+          "kuntoutus", "kirkko", "seurakunta", "uskonno", "seura-", "kokoontumis", "kirjasto", "museo",
+          "teatteri", "näyttely", "urheilu", "liikunta", "halli", "julkinen"), "julkinen"),
+        (("talous", "sauna", "maatalous", "maa- metsä", "talli", "karja", "sikala", "lantala", "kasvihuone", "eläin"), "talous"),
+        (("asuin", "asunto"), "asuin_muu"),
+    ):
+        if any(k in u for k in keys):
+            return cls
+    return "muu"
+
+
+def make_building_tiles(geojson_path):
+    exe = shutil.which("tippecanoe")
+    if not exe:
+        log("  tippecanoe puuttuu – rakennukset näytetään suoraan GeoJSONista")
+        return
+    shutil.rmtree(os.path.join(TILES, "rakennukset"), ignore_errors=True)
+    # Tiilet jäävät gzip-pakatuiksi; server.py lisää niihin Content-Encoding-otsakkeen.
+    cmd = [
+        exe, "--output-to-directory", "public/tiles/rakennukset", "--force",
+        "-l", "rakennukset", "-Z", "11", "-z", "15", "--no-feature-limit", "--no-tile-size-limit",
+        "--no-simplification-of-shared-nodes", "--simplification", "2", "--quiet",
+        os.path.relpath(geojson_path, ROOT),
+    ]
+    run_tippecanoe(cmd)
+    log("  → tiles/rakennukset (z11–15)")
+
+
+def build_population():
+    log("vaesto (HSY väestötietoruudukko 2025, 250 m)")
+    params = {
+        "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+        "typeNames": "asuminen_ja_maankaytto:Vaestotietoruudukko_2025",
+        "outputFormat": "application/json", "srsName": "EPSG:4326",
+        "bbox": ",".join(map(str, (ESPOO_LONLAT[1], ESPOO_LONLAT[0], ESPOO_LONLAT[3], ESPOO_LONLAT[2]))) + ",urn:ogc:def:crs:EPSG::4326",
+    }
+    raw = http_get(HSY_WFS, params, os.path.join(CACHE, "vaesto.json"))
+    with open(raw, encoding="utf-8") as fh:
+        data = json.load(fh)
+    espoo = espoo_polygons()
+    feats = []
+    for f in data["features"]:
+        ring = f["geometry"]["coordinates"][0]
+        cx = sum(p[0] for p in ring[:-1]) / (len(ring) - 1)
+        cy = sum(p[1] for p in ring[:-1]) / (len(ring) - 1)
+        if espoo and not any(point_in_polygon(cx, cy, poly) for poly in espoo):
+            continue  # ruudun keskipiste naapurikunnassa
+        p = f["properties"]
+        ages = {k: v for k, v in p.items() if k.startswith("ika") and v != 99}  # 99 = suojattu pieni luku
+        f["properties"] = {"asukkaita": p.get("asukkaita"), "asumisvaljyys": p.get("asvaljyys"), **ages}
+        feats.append(f)
+    return write_geojson("vaesto", feats)
+
+
+def espoo_polygons():
+    """Espoon kaupunginosat polygonilistana (rajaukseen); tyhjä, jos aineistoa ei vielä ole."""
+    path = os.path.join(OUT, "kaupunginosat.geojson")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        polys = []
+        for f in json.load(fh)["features"]:
+            g = f["geometry"]
+            polys.extend([g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"])
+    return polys
+
+
+def build_district_labels():
+    """Kaupunginosien nimille yksi piste kunkin alueen sisältä. Rajat ulottuvat usein
+    merelle, joten nimi sijoitetaan alueen rakennusten keskelle, kun rakennukset on ladattu."""
+    path = os.path.join(OUT, "kaupunginosat.geojson")
+    with open(path, encoding="utf-8") as fh:
+        src = json.load(fh)["features"]
+    buildings = building_points()
+    feats = []
+    for f in src:
+        g = f["geometry"]
+        polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+        poly = max(polys, key=lambda p: abs(signed_area(p[0])))
+        point = building_center(polys, buildings) or label_point(poly)
+        feats.append({
+            "type": "Feature",
+            "properties": {"nimi": str(f["properties"].get("KAUPUNGINOSANNIMI_FI", "")).title(),
+                           "namn": str(f["properties"].get("KAUPUNGINOSANNIMI_SE", "")).title()},
+            "geometry": {"type": "Point", "coordinates": point},
+        })
+    write_geojson("kaupunginosat_nimet", feats, PUBLIC_DATA)
+
+
+def building_points():
+    path = os.path.join(OUT, "rakennukset.geojson")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        pts = []
+        for f in json.load(fh)["features"]:
+            g = f["geometry"]
+            ring = (g["coordinates"] if g["type"] == "Polygon" else g["coordinates"][0])[0]
+            pts.append((ring[0][0], ring[0][1]))
+    return pts
+
+
+def building_center(polys, pts):
+    """Alueen sisällä olevista rakennuksista se, joka on lähimpänä niiden keskipistettä."""
+    coarse = [[r[:: max(1, len(r) // 200)] + [r[-1]] for r in poly] for poly in polys]
+    xs = [p[0] for poly in polys for p in poly[0]]
+    ys = [p[1] for poly in polys for p in poly[0]]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    inside = [p for p in pts if minx <= p[0] <= maxx and miny <= p[1] <= maxy
+              and any(point_in_polygon(p[0], p[1], c) for c in coarse)]
+    if len(inside) < 5:
+        return None
+    mx = sum(p[0] for p in inside) / len(inside)
+    my = sum(p[1] for p in inside) / len(inside)
+    best = min(inside, key=lambda p: ((p[0] - mx) * 0.5) ** 2 + (p[1] - my) ** 2)
+    return [round(best[0], 6), round(best[1], 6)]
+
+
+def label_point(poly):
+    """Karkea 'kauimpana reunoista' -piste: ruudukkohaku monikulmion sisältä.
+    Etäisyys lasketaan harvennettuun reunaan, sillä tarkkuudeksi riittää nimen sijoitus."""
+    ring = poly[0]
+    xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+    step = max(1, len(ring) // 150)
+    coarse = [r[::step] + [r[-1]] for r in poly]
+    best, best_d = None, -1.0
+    n = 16
+    for i in range(1, n):
+        for j in range(1, n):
+            x = min(xs) + (max(xs) - min(xs)) * i / n
+            y = min(ys) + (max(ys) - min(ys)) * j / n
+            if not point_in_polygon(x, y, poly):
+                continue
+            d = min(seg_dist(x, y, r[k], r[k + 1]) for r in coarse for k in range(len(r) - 1))
+            if d > best_d:
+                best, best_d = [round(x, 6), round(y, 6)], d
+    return best or ring[0]
+
+
+def seg_dist(x, y, a, b):
+    # Leveyspiirillä 60° pituusaste on noin puolet leveysasteesta, joten x skaalataan.
+    k = 0.5
+    ax, ay, bx, by = a[0] * k, a[1], b[0] * k, b[1]
+    px, py = x * k, y
+    dx, dy = bx - ax, by - ay
+    t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
+
+
+def point_in_polygon(x, y, poly):
+    inside = False
+    for ring in poly:  # reiät kääntävät tuloksen takaisin
+        for i in range(len(ring) - 1):
+            (x1, y1), (x2, y2) = ring[i], ring[i + 1]
+            if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                inside = not inside
+    return inside
+
+
+def make_overlay_tiles():
+    """Kaikki muut aineistot yhdeksi monitasoiseksi vektoritiilistöksi."""
+    exe = shutil.which("tippecanoe")
+    if not exe:
+        log("tippecanoe puuttuu – aineistot luetaan suoraan GeoJSONeista")
+        return
+    layers = [d[0] for d in ESPOO_DATASETS] + ["vaesto"]
+    args = []
+    for name in layers:
+        if os.path.exists(os.path.join(OUT, name + ".geojson")):
+            args += ["-L", f"{name}:data/{name}.geojson"]
+    shutil.rmtree(os.path.join(TILES, "kohteet"), ignore_errors=True)
+    run_tippecanoe(
+        [exe, "--output-to-directory", "public/tiles/kohteet", "--force", "-Z", "8", "-z", "15",
+         "--no-feature-limit", "--no-tile-size-limit", "--detect-shared-borders", "--quiet", *args]
+    )
+    log("→ tiles/kohteet (z8–15)")
+
+
+def run_tippecanoe(cmd):
+    # tippecanoe ei luo tulostekansion yläkansioita eikä käsittele välilyöntejä sisältäviä
+    # polkuja oikein, joten se ajetaan projektikansiossa suhteellisilla poluilla.
+    os.makedirs(TILES, exist_ok=True)
+    subprocess.run(cmd, check=True, cwd=ROOT)
+
+
+def main():
+    for folder in (CACHE, OUT, PUBLIC_DATA):
+        os.makedirs(folder, exist_ok=True)
+    only = set(sys.argv[1:])
+    want = lambda k: not only or k in only
+    manifest = []
+    for ds_id, type_name, title in ESPOO_DATASETS:
+        if want(ds_id):
+            build_simple(ds_id, type_name)
+    if want("kaupunginosat"):
+        build_district_labels()
+    if want("vaesto"):
+        build_population()
+    if want("rakennukset"):
+        build_buildings()
+    if want("tiilet"):
+        make_overlay_tiles()
+    for ds_id, type_name, title in ESPOO_DATASETS + [("vaesto", "HSY", "Väestö"), ("rakennukset", BUILDING_TYPE, "Rakennukset")]:
+        path = os.path.join(OUT, ds_id + ".geojson")
+        if os.path.exists(path):
+            manifest.append({"id": ds_id, "lahde": type_name, "nimi": title, "koko": os.path.getsize(path)})
+    # Versio lisätään tiiliosoitteisiin, jotta selain ei käytä vanhoja tiiliä välimuistista.
+    with open(os.path.join(PUBLIC_DATA, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"versio": int(time.time()), "aineistot": manifest}, fh, ensure_ascii=False, indent=1)
+    log("valmis")
+
+
+if __name__ == "__main__":
+    main()

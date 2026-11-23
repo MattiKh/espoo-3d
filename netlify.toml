@@ -1,0 +1,13 @@
+# Netlify julkaisee public/-kansion sellaisenaan. Aineistot ja tiilet on tehty valmiiksi
+# (scripts/build_data.py), joten erillistä build-vaihetta ei ole.
+[build]
+  publish = "public"
+  command = ""
+
+# HSY:n WMS ei salli selaimen suoria hakuja (CORS), joten Netlify välittää ne.
+# Vastaa paikallisen server.py:n reittiä /proxy/hsy/wms; kyselyparametrit siirtyvät mukana.
+[[redirects]]
+  from = "/proxy/hsy/wms"
+  to = "https://kartta.hsy.fi/geoserver/wms"
+  status = 200
+  force = true

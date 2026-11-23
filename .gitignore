@@ -1,0 +1,7 @@
+# Ladatut raakavastaukset ja välivaiheen GeoJSONit (scripts/build_data.py luo ne uudelleen)
+/cache/
+/data/
+
+.DS_Store
+__pycache__/
+.claude/
