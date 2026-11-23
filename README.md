@@ -2,8 +2,8 @@
 
 Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
 kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteistä.
-Espoon bussit, raitiovaunut, junat ja metro sekä Espoon yllä lentävät koneet liikkuvat
-kartalla aina reaaliajassa 3D-malleina.
+Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset sekä Espoon
+yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina.
 
 ## Paneeli
 
@@ -66,6 +66,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
+| Alusten sijainnit, nimet, tyypit, mitat ja määränpäät | Fintraffic / Digitraffic AIS (REST, CC BY 4.0) |
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
 | Lentojen reitit ja lentoyhtiöt | adsbdb.com (lentotunnuksen mukaan) |
 | Haukilahden vesitornin muoto | Wikipedia (Haukilahti water tower), Docomomo Suomi |
@@ -139,6 +140,20 @@ nousunopeuden mukaan, ja uuden sijainnin tuoma korjaus häivytetään pehmeästi
 koneet näytetään suurennettuina. Reitit tulevat lentotunnuksen perusteella tietokannasta, joka
 voi olla vanhentunut; jos matalalla lentävän koneen reitissä ei ole Helsinki-Vantaata, reitti
 merkitään epävarmaksi.
+
+## Laivat ja veneet
+
+Alusten AIS-sijainnit haetaan Digitrafficista kymmenen sekunnin välein 25 km:n säteeltä, ja
+kartalle otetaan alukset, jotka ovat Espoon vesillä tai enintään kahden kilometrin päässä rajasta.
+Yli 30 minuuttia vanhat sijainnit jätetään pois, samoin paikallaan olevat lähettimet, joiden
+kohdalla maasto on korkeusmallin mukaan yli viisi metriä merenpinnan yläpuolella (esim.
+laitevalmistajien testilaitteet). Hakujen välissä alusta liikutetaan nopeuden ja kurssin mukaan.
+
+Alustyypin mukaan malli on rahtialus, säiliöalus, matkustaja-alus, työvene (myös hinaajat,
+luotsi- ja pelastusveneet), purjevene tai moottorivene. Nimi, tyyppi, määränpää ja mitat haetaan
+kerran alusta kohden. AIS kertoo GPS-antennin etäisyyden keulaan, perään ja kumpaankin kylkeen,
+joten malli skaalataan aluksen todelliseen pituuteen ja leveyteen ja sijoitetaan oikein antennin
+suhteen.
 
 ## Maamerkit
 

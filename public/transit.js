@@ -1,6 +1,6 @@
 // Liikenne reaaliajassa. Bussien, raitiovaunujen, lähijunien ja metron sijainnit tulevat
-// HSL:n avoimesta HFP-syötteestä, kauko- ja tavarajunien sijainnit Digitrafficista ja Espoon
-// yllä lentävät koneet adsb.fi:stä. Ajoneuvot piirretään 3D-malleina MapLibren omalle tasolle
+// HSL:n avoimesta HFP-syötteestä, kauko- ja tavarajunien ja Espoon merialueen alusten sijainnit
+// Digitrafficista ja Espoon yllä lentävät koneet adsb.fi:stä. Ajoneuvot piirretään 3D-malleina MapLibren omalle tasolle
 // three.js:llä, ja niiden liike lasketaan tasaiseksi vastaanotettujen sijaintien välillä.
 // Samalle tasolle piirretään myös maamerkkien 3D-mallit (landmarks.js).
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
@@ -42,6 +42,7 @@ export const TRANSIT_GROUPS = [
   ["ratikat", "Raitiovaunut", "#00985f"],
   ["junat", "Junat", "#8c4799"],
   ["metro", "Metro", "#ff6319"],
+  ["laivat", "Laivat ja veneet", "#1d6fa5"],
   ["lentokoneet", "Lentokoneet", "#e63946"],
 ];
 
@@ -929,7 +930,7 @@ function buildTunnels() {
 // tasoitetusta sijainnista, joten pisteetkin liikkuvat pehmeästi.
 const DOT_CAP = 3000;
 const dotPos = new Float32Array(DOT_CAP * 3), dotCol = new Float32Array(DOT_CAP * 3);
-const dotColors = Object.fromEntries(Object.entries(COLORS).map(([k, hex]) => [k, col(hex)]));
+const dotColors = Object.fromEntries(Object.entries({ ...COLORS, ship: "#1d6fa5" }).map(([k, hex]) => [k, col(hex)]));
 const dots = (() => {
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(dotPos, 3).setUsage(THREE.DynamicDrawUsage));
@@ -1249,6 +1250,297 @@ function planeContent(p) {
     node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
 }
 
+// ------------------------------------------------------------ laivat ja veneet
+
+// Espoon merialueen alukset Digitrafficin AIS-sijainneista. Sijainnit haetaan kymmenen sekunnin
+// välein, ja välissä alusta liikutetaan nopeuden ja kurssin mukaan. Nimi, tyyppi, määränpää ja
+// mitat haetaan kerran alusta kohden; mittojen avulla malli on oikean kokoinen ja oikeassa
+// kohdassa (AIS-sijainti on GPS-antennin paikka, ei aluksen keskikohta).
+const SHIP_API = "https://meri.digitraffic.fi/api/ais/v1";
+const SHIP_AREA = "latitude=60.12&longitude=24.70&radius=25"; // km
+const SHIP_POLL = 10000; // ms
+const SHIP_MAX_AGE = 30 * 60000; // tätä vanhempia sijainteja ei näytetä
+const SHIP_MARGIN = 2000; // m: alukset näkyvät vielä näin kaukana Espoon rajan takana
+const SHIP_HEADERS = { "Digitraffic-User": "Espoo3D" };
+const SHIP_COLOR = "#1d6fa5";
+const SHIP_LAND = 5; // m: paikallaan oleva lähetin tätä korkeammalla maalla ei ole vesillä
+const ships = new Map();
+const shipMeta = new Map();
+const shipState = { ok: true };
+
+// AIS:n alustyyppi mallin ja kuvauksen mukaan.
+function shipClass(type, length) {
+  if (type === 36) return ["sail", "Purjevene"];
+  if (type === 37) return ["motor", "Huvivene"];
+  if (type === 30) return ["work", "Kalastusalus"];
+  if (type === 31 || type === 32 || type === 52) return ["work", "Hinaaja"];
+  if (type === 35) return ["work", "Sotilasalus"];
+  if (type === 50) return ["work", "Luotsivene"];
+  if (type === 51) return ["work", "Meripelastusalus"];
+  if (type === 55) return ["work", "Viranomaisalus"];
+  if ((type >= 33 && type <= 34) || (type >= 53 && type <= 59)) return ["work", "Työalus"];
+  if (type >= 40 && type <= 49) return ["passenger", "Pika-alus"];
+  if (type >= 60 && type <= 69) return ["passenger", "Matkustaja-alus"];
+  if (type >= 70 && type <= 79) return ["cargo", "Rahtialus"];
+  if (type >= 80 && type <= 89) return ["tanker", "Säiliöalus"];
+  if (length >= 60) return ["tanker", "Alus"];
+  if (length >= 15) return ["work", "Alus"];
+  return ["motor", "Vene"];
+}
+
+const NAV_STATUS = {
+  0: "Konevoimalla matkalla", 1: "Ankkurissa", 2: "Ei ohjattavissa", 3: "Rajoitettu ohjailukyky",
+  4: "Syväyksen rajoittama", 5: "Kiinnitettynä", 6: "Karilla", 7: "Kalastamassa", 8: "Purjeilla matkalla",
+};
+// Lippuvaltio MMSI-numeron kolmesta ensimmäisestä numerosta (yleisimmät).
+const FLAGS = {
+  230: "Suomi", 276: "Viro", 265: "Ruotsi", 266: "Ruotsi", 257: "Norja", 258: "Norja", 259: "Norja",
+  211: "Saksa", 218: "Saksa", 219: "Tanska", 220: "Tanska", 273: "Venäjä", 275: "Latvia", 277: "Liettua",
+  244: "Alankomaat", 245: "Alankomaat", 246: "Alankomaat", 305: "Antigua ja Barbuda", 209: "Kypros",
+  210: "Kypros", 212: "Kypros", 248: "Malta", 249: "Malta", 256: "Malta", 636: "Liberia", 538: "Marshallinsaaret",
+};
+
+// Runko: perä suora, keula suippenee. Pohja on hieman vesirajan alla.
+function hullShape(s, L, W, top, color, bow = 0.2) {
+  const hl = L / 2, hw = W / 2, yb = hl - L * bow, rise = top * 0.15;
+  s.box(-hw, hw, -hl, yb, -0.6, top, color);
+  s.hexa([[-hw, yb, -0.6], [hw, yb, -0.6], [hw * 0.08, hl, -0.6], [-hw * 0.08, hl, -0.6],
+    [-hw, yb, top], [hw, yb, top], [hw * 0.08, hl, top + rise], [-hw * 0.08, hl, top + rise]], color);
+}
+
+// Mallit: x poikittain, y pituussuunnassa (keula +y), z ylöspäin, origo keskellä vesirajassa.
+function cargoShipModel() {
+  const s = new Shape(), white = col("#eef0f2");
+  hullShape(s, 100, 16, 7, col("#2f3e4e"));
+  s.box(-7.6, 7.6, -48, 28, 7, 7.3, col("#5d4037"));
+  const boxes = ["#c0392b", "#2c7bb6", "#e67e22", "#7f8c8d", "#27ae60", "#8e44ad"].map(col);
+  let c = 0;
+  for (let y = -28; y < 26; y += 6.5) {
+    for (const x of [-5, 0, 5]) { // kontit kahdessa tai yhdessä kerroksessa
+      s.box(x - 2.3, x + 2.3, y, y + 6, 7.3, 7.3 + ((c * 7) % 3 ? 5.2 : 2.6), boxes[c % boxes.length]);
+      c++;
+    }
+  }
+  s.box(-7, 7, -46, -36, 7.3, 19, white); // komentosilta
+  s.box(-7.6, 7.6, -40, -36.5, 17, 19.5, white);
+  s.box(-6.6, 6.6, -36.1, -35.8, 16, 18, P.glass);
+  s.box(-1.6, 1.6, -45, -42, 19, 24, col("#c0392b")); // savupiippu
+  return s.geometry();
+}
+
+function tankerModel() {
+  const s = new Shape(), white = col("#eef0f2");
+  hullShape(s, 100, 16, 7, col("#5b1f1f"));
+  s.box(-7.6, 7.6, -48, 42, 7, 7.3, col("#8a3b2e"));
+  s.box(-0.6, 0.6, -34, 38, 7.3, 8.3, col("#b0b6bb")); // putkisto
+  s.box(-7, 7, -46, -36, 7.3, 19, white);
+  s.box(-6.6, 6.6, -36.1, -35.8, 16, 18, P.glass);
+  s.box(-1.6, 1.6, -45, -42, 19, 24, col("#1f2d3a"));
+  return s.geometry();
+}
+
+function passengerModel() {
+  const s = new Shape(), white = col("#f4f5f6"), blue = col("#1f5fa8");
+  hullShape(s, 40, 9, 3.2, white, 0.22);
+  s.box(-4.55, 4.55, -20, 11, 0.8, 1.3, blue); // vyö
+  s.box(-4, 4, -17, 8, 3.2, 5.6, white);
+  s.box(-4.05, 4.05, -16, 7, 4.0, 5.0, P.glass);
+  s.box(-3.4, 3.4, -12, 4, 5.6, 7.8, white);
+  s.box(-3.45, 3.45, -11, 3.5, 6.3, 7.2, P.glass);
+  s.box(-2.6, 2.6, 0, 3, 7.8, 9.2, white); // komentosilta
+  s.box(-0.8, 0.8, -9, -7, 7.8, 10, blue); // savupiippu
+  return s.geometry();
+}
+
+function workboatModel() {
+  const s = new Shape(), white = col("#f2f2ef");
+  hullShape(s, 20, 6, 2.2, col("#c0392b"), 0.25);
+  s.box(-2.3, 2.3, -3, 4, 2.2, 5.0, white); // ohjaamo
+  s.box(-2.35, 2.35, 1, 3.8, 3.8, 4.7, P.glass);
+  s.box(-0.15, 0.15, 0, 0.3, 5.0, 8.5, P.dark); // masto
+  s.box(-1.0, 1.0, -9.5, -5, 2.2, 2.6, P.dark);
+  return s.geometry();
+}
+
+function sailboatModel() {
+  const s = new Shape(), white = col("#f6f6f3"), sail = col("#fbfbf8");
+  hullShape(s, 11, 3.6, 1.2, white, 0.3);
+  s.box(-1.1, 1.1, -2.5, 1.5, 1.2, 2.0, white); // kajuutta
+  s.box(-0.08, 0.08, 0.8, 1.0, 1.2, 15, P.dark); // masto
+  s.hexa([[-0.03, 0.8, 1.9], [0.03, 0.8, 1.9], [0.03, -3.6, 1.9], [-0.03, -3.6, 1.9], // isopurje
+    [-0.03, 0.8, 14.5], [0.03, 0.8, 14.5], [0.03, 0.6, 14.5], [-0.03, 0.6, 14.5]], sail);
+  s.hexa([[-0.03, 5.2, 1.3], [0.03, 5.2, 1.3], [0.03, 1.0, 1.6], [-0.03, 1.0, 1.6], // keulapurje
+    [-0.03, 1.05, 13], [0.03, 1.05, 13], [0.03, 1.0, 13], [-0.03, 1.0, 13]], sail);
+  return s.geometry();
+}
+
+function motorboatModel() {
+  const s = new Shape(), white = col("#f4f4f1");
+  hullShape(s, 9, 3, 1.0, white, 0.3);
+  s.box(-1.2, 1.2, -1, 1.2, 1.0, 1.9, white);
+  s.box(-1.25, 1.25, 0.9, 1.3, 1.2, 1.8, P.glass); // tuulilasi
+  return s.geometry();
+}
+
+// Malli, sen luonnollinen pituus ja leveys (m) sekä instanssien enimmäismäärä.
+const SHIP_MODELS = {
+  cargo: [cargoShipModel, 100, 16, 60], tanker: [tankerModel, 100, 16, 60], passenger: [passengerModel, 40, 9, 80],
+  work: [workboatModel, 20, 6, 150], sail: [sailboatModel, 11, 3.6, 300], motor: [motorboatModel, 9, 3, 300],
+};
+const shipMeshes = Object.fromEntries(Object.entries(SHIP_MODELS).map(([key, [build, , , cap]]) => {
+  const mesh = new THREE.InstancedMesh(build(), new THREE.MeshLambertMaterial({ vertexColors: true }), cap);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  mesh.count = 0;
+  scene.add(mesh);
+  return [key, mesh];
+}));
+const shipDummy = new THREE.Object3D();
+
+// Aluksen tiedot haetaan kerran. Palauttaa null, kun tietoa vielä haetaan tai sitä ei ole.
+function metaFor(mmsi) {
+  if (shipMeta.has(mmsi)) return shipMeta.get(mmsi) || null;
+  shipMeta.set(mmsi, null);
+  fetch(`${SHIP_API}/vessels/${mmsi}`, { headers: SHIP_HEADERS })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((m) => shipMeta.set(mmsi, m || false))
+    .catch(() => shipMeta.set(mmsi, false));
+  return null;
+}
+
+async function pollShips() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch(`${SHIP_API}/locations?${SHIP_AREA}`, { headers: SHIP_HEADERS });
+    if (!r.ok) throw new Error(`Digitraffic ${r.status}`);
+    const data = await r.json(), now = Date.now();
+    for (const f of data.features ?? []) updateShip(f, now);
+    shipState.ok = true;
+  } catch {
+    shipState.ok = false;
+  }
+}
+
+function predictShipFix(f, t) {
+  const dt = Math.min(Math.max((t - f.t) / 1000, 0), 90);
+  return [f.x + f.vx * dt, f.y + f.vy * dt];
+}
+
+function predictShip(sh, t) {
+  const q = predictShipFix(sh.fix, t), d = Math.exp(-(t - sh.errAt) / 2000);
+  return [q[0] + sh.err[0] * d, q[1] + sh.err[1] * d];
+}
+
+function updateShip(f, now) {
+  const p = f.properties, [lon, lat] = f.geometry.coordinates, t = p.timestampExternal;
+  if (!(now - t < SHIP_MAX_AGE)) return; // vanha sijainti (lähetin ollut pitkään pois päältä)
+  const id = `ship/${p.mmsi}`, [x, y] = toLocal(lon, lat);
+  let sh = ships.get(id);
+  if (!nearRegion(x, y, SHIP_MARGIN)) { if (sh) removeShip(sh); return; }
+  const v = (p.sog ?? 0) >= 0.3 ? p.sog * KT : 0, cog = (p.cog ?? 0) * D2R;
+  const fix = { t, x, y, vx: v * Math.sin(cog), vy: v * Math.cos(cog) };
+  // Keulan suunta: ilmoitettu keulasuunta (511 = ei tiedossa) tai liikkuvan aluksen kurssi.
+  const heading = p.heading != null && p.heading !== 511 ? p.heading * D2R : v > 0.5 ? cog : null;
+  if (!sh) {
+    sh = { isShip: true, id, mmsi: p.mmsi, fix, err: [0, 0], errAt: now, heading: heading ?? cog, targetHeading: heading };
+    ships.set(id, sh);
+  } else if (t > sh.fix.t) {
+    const old = predictShip(sh, now), nu = predictShipFix(fix, now);
+    sh.err = Math.hypot(old[0] - nu[0], old[1] - nu[1]) < 300 ? [old[0] - nu[0], old[1] - nu[1]] : [0, 0];
+    sh.errAt = now;
+    sh.fix = fix;
+  }
+  if (heading != null) sh.targetHeading = heading;
+  sh.sog = p.sog ?? 0;
+  sh.navStat = p.navStat;
+  sh.lastSeen = now;
+  sh.meta = metaFor(p.mmsi);
+}
+
+function removeShip(sh) {
+  ships.delete(sh.id);
+  if (selected === sh) { selected = null; popup.remove(); }
+}
+
+function advanceShips(wall, dt) {
+  const kh = 1 - Math.exp(-dt / 600);
+  for (const sh of ships.values()) {
+    [sh.x, sh.y] = predictShip(sh, wall);
+    if (sh.targetHeading != null) sh.heading += angleDiff(sh.targetHeading, sh.heading) * kh;
+  }
+}
+
+// AIS-lähettimiä on myös maalla (esim. tukiasemat ja laitevalmistajien testilaitteet). Paikallaan
+// oleva lähetin, jonka kohdalla maasto on selvästi merenpintaa korkeammalla, jätetään pois.
+function onLand(sh, centerElev, exag, now) {
+  if (sh.sog >= 0.5) return false;
+  if (sh.landAt == null || now - sh.landAt > 5000) {
+    sh.land = ((mapRef.queryTerrainElevation([lonOf(sh.x), latOf(sh.y)]) ?? 0) + centerElev) / exag > SHIP_LAND;
+    sh.landAt = now;
+  }
+  return sh.land;
+}
+
+// Aluksen mitat: pituus, leveys ja antennin paikka keskikohdasta (eteen, oikealle).
+function shipDims(sh) {
+  const m = sh.meta, a = m?.referencePointA ?? 0, b = m?.referencePointB ?? 0, c = m?.referencePointC ?? 0, d = m?.referencePointD ?? 0;
+  const [cls, label] = shipClass(m?.shipType ?? 0, a + b);
+  const [, mL, mW] = SHIP_MODELS[cls];
+  const known = a + b > 1 && c + d > 0.5;
+  return { cls, label, L: known ? a + b : mL, W: known ? c + d : mW, ahead: known ? (a - b) / 2 : 0, right: known ? (d - c) / 2 : 0, known };
+}
+
+function drawShips(map, ctx) {
+  const { zoom, cmx, cmy, sc, cosC, centerElev, exag, e, W, H, now } = ctx;
+  for (const mesh of Object.values(shipMeshes)) mesh.count = 0;
+  if (zoom < MODEL_MINZOOM) return; // kaukaa pisteinä
+  const enlarge = Math.min(MAX_ENLARGE, Math.max(1, 2 ** ((15 - zoom) * 0.6)));
+  for (const sh of ships.values()) {
+    if (sh.x == null || onLand(sh, centerElev, exag, now)) continue;
+    const dim = shipDims(sh), [, mL, mW] = SHIP_MODELS[dim.cls], mesh = shipMeshes[dim.cls];
+    if (mesh.count >= mesh.instanceMatrix.count) continue;
+    // Mallin keskikohta antennin paikasta aluksen mittojen mukaan.
+    const fx = Math.sin(sh.heading), fy = Math.cos(sh.heading);
+    const cx = sh.x + fx * dim.ahead + fy * dim.right, cy = sh.y + fy * dim.ahead - fx * dim.right;
+    const lon = lonOf(cx), lat = latOf(cy), k = cosC / Math.cos(lat * D2R);
+    const wx = (mercX(lon) - cmx) / sc, wy = -(mercY(lat) - cmy) / sc, wz = -centerElev * k; // merenpinta
+    const sx = dim.W / mW, sy = dim.L / mL, sz = Math.min(2, Math.max(0.5, Math.sqrt(sx * sy)));
+    shipDummy.position.set(wx, wy, wz);
+    shipDummy.rotation.set(0, 0, -sh.heading);
+    shipDummy.scale.set(sx * k * enlarge, sy * k * enlarge, sz * k * enlarge);
+    shipDummy.updateMatrix();
+    mesh.setMatrixAt(mesh.count++, shipDummy.matrix);
+    sh.screen = toScreen(e, wx, wy, wz + 3 * k * enlarge, W, H);
+    sh.screenAt = now;
+    // Nimi liikkuvien ja isojen alusten yllä; laitureissa olevat veneet ilman nimeä.
+    if (sh.meta?.name && (sh.sog > 1 || dim.L >= 40)) {
+      const top = toScreen(e, wx, wy, wz + (8 + dim.L * 0.12) * sz * k * enlarge, W, H);
+      if (top && top[0] > -60 && top[0] < W + 60 && top[1] > -30 && top[1] < H + 60) {
+        placeLabel(sh.id, sh.meta.name.trim(), SHIP_COLOR, "vlabel ship", top[0], top[1]);
+      }
+    }
+  }
+  for (const mesh of Object.values(shipMeshes)) mesh.instanceMatrix.needsUpdate = true;
+}
+
+function shipContent(sh) {
+  const m = sh.meta, dim = shipDims(sh), knots = sh.sog ?? 0;
+  const speed = knots < 0.3 ? "paikallaan" : `${knots.toFixed(1).replace(".", ",")} solmua (${Math.round(knots * KT * 3.6)} km/h)`;
+  const rows = [
+    ["Määränpää", m?.destination?.trim() || null],
+    ["Nopeus", speed],
+    ["Tila", NAV_STATUS[sh.navStat] ?? null],
+    ["Pituus", dim.known ? `${Math.round(dim.L)} m` : null],
+    ["Syväys", m?.draught ? `${(m.draught / 10).toFixed(1).replace(".", ",")} m` : null],
+    ["Lippu", FLAGS[Math.floor(sh.mmsi / 1e6)] ?? null],
+    ["MMSI", String(sh.mmsi)],
+  ].filter(([, val]) => val);
+  return node("div", { class: "pop" },
+    node("div", { class: "kind" }, dim.label),
+    node("h3", {}, m?.name?.trim() || `MMSI ${sh.mmsi}`),
+    node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
+}
+
 // ------------------------------------------------------------ maamerkit
 
 const landmarks = LANDMARKS.map((l) => {
@@ -1294,6 +1586,7 @@ function tick() {
   lastDt = dt;
   const k = 1 - Math.exp(-dt / SMOOTH_MS), wall = Date.now();
   for (const v of vehicles.values()) advance(v, wall, k);
+  advanceShips(wall, dt);
   if (selected) popup.setLngLat(anchorOf(selected, now));
 }
 
@@ -1303,7 +1596,7 @@ function anchorOf(sel, now) {
   let scr = null;
   if (sel.isLandmark) scr = sel.screen;
   else if (sel.isPlane) scr = sel.screenAt > now - 500 ? sel.screen : null;
-  else if (KINDS[sel.kind].underground && sel.drawnAt > now - 500 && sel.screen?.length) {
+  else if (!sel.isShip && KINDS[sel.kind].underground && sel.drawnAt > now - 500 && sel.screen?.length) {
     const n = sel.screen.length / 2;
     scr = [sel.screen[2 * (n >> 1)], sel.screen[2 * (n >> 1) + 1]];
   }
@@ -1378,7 +1671,7 @@ function placeLabel(id, text, color, className, sx, sy) {
 function hideStaleLabels() {
   for (const [id, el] of labels) {
     if (el.frame === frameNo) continue;
-    if (vehicles.has(id) || planes.has(id)) el.hidden = true;
+    if (vehicles.has(id) || planes.has(id) || ships.has(id)) el.hidden = true;
     else { el.remove(); labels.delete(id); }
   }
 }
@@ -1440,6 +1733,17 @@ function draw(gl, matrix) {
       v.dotAt = now;
       nDots++;
     }
+    const shipDot = dotColors.ship;
+    for (const sh of ships.values()) {
+      if (sh.x == null || nDots >= DOT_CAP || onLand(sh, centerElev, exag, now)) continue;
+      const lat = latOf(sh.y), wx = (mercX(lonOf(sh.x)) - cmx) / sc, wy = -(mercY(lat) - cmy) / sc;
+      const z = -centerElev * (cosC / Math.cos(lat * D2R));
+      dotPos[3 * nDots] = wx; dotPos[3 * nDots + 1] = wy; dotPos[3 * nDots + 2] = z;
+      dotCol[3 * nDots] = shipDot.r; dotCol[3 * nDots + 1] = shipDot.g; dotCol[3 * nDots + 2] = shipDot.b;
+      sh.dot = toScreen(e, wx, wy, z, W, H);
+      sh.dotAt = now;
+      nDots++;
+    }
     const u = dots.material.uniforms;
     u.uRadius.value = Math.min(5.5, Math.max(2.5, 2.5 + ((zoom - 9) / 5) * 3));
     u.uOpacity.value = Math.min(1, Math.max(0, (DOT_MAXZOOM - zoom) / 1));
@@ -1498,8 +1802,9 @@ function draw(gl, matrix) {
       v.drawnAt = now;
     }
   }
-  const ctx = { zoom, cmx, cmy, sc, cosC, centerElev, e, W, H, now };
+  const ctx = { zoom, cmx, cmy, sc, cosC, centerElev, exag, e, W, H, now };
   drawPlanes(map, ctx);
+  drawShips(map, ctx);
   drawLandmarks(map, ctx);
   hideStaleLabels();
   for (const mesh of Object.values(meshes)) mesh.instanceMatrix.needsUpdate = true;
@@ -1533,6 +1838,7 @@ function delayText(dl) {
 
 function popupContent(v) {
   if (v.isPlane) return planeContent(v);
+  if (v.isShip) return shipContent(v);
   if (v.isLandmark) return landmarkContent(v);
   const kind = KINDS[v.kind], i = v.info;
   const rows = [
@@ -1570,6 +1876,13 @@ function pick(point) {
     const d = (p.screen[0] - point.x) ** 2 + (p.screen[1] - point.y) ** 2;
     if (d < bestD) { bestD = d; best = p; }
   }
+  for (const sh of ships.values()) {
+    if (sh.land) continue;
+    const probe = sh.screenAt > recent ? sh.screen : sh.dotAt > recent ? sh.dot : null;
+    if (!probe) continue;
+    const d = (probe[0] - point.x) ** 2 + (probe[1] - point.y) ** 2;
+    if (d < bestD) { bestD = d; best = sh; }
+  }
   for (const l of landmarks) {
     if (!l.screen) continue;
     const d = ((l.screen[0] - point.x) ** 2 + (l.screen[1] - point.y) ** 2) / 4; // iso kohde: väljempi osuma
@@ -1582,11 +1895,13 @@ function stats() {
   const counts = Object.fromEntries(TRANSIT_GROUPS.map(([id]) => [id, 0]));
   for (const v of vehicles.values()) if (v.x != null) counts[KINDS[v.kind].group]++;
   counts.lentokoneet = planes.size;
+  counts.laivat = [...ships.values()].filter((sh) => sh.x != null && !sh.land).length;
   let message = "Sijainnit päivittyvät sekunnin välein. Lähennä karttaa, niin näet ajoneuvot 3D-malleina.";
   if (document.hidden) message = "";
   else if (hfp.client && !hfp.ok) message = "Yhdistetään HSL:n reaaliaikapalveluun…";
   else if (rail.client && !rail.ok) message = "Kaukojunien sijainnit (Digitraffic) eivät juuri nyt päivity.";
   else if (!planeState.ok) message = "Lentokoneiden sijainnit (adsb.fi) eivät juuri nyt päivity.";
+  else if (!shipState.ok) message = "Alusten sijainnit (Digitraffic) eivät juuri nyt päivity.";
   return { counts, message };
 }
 
@@ -1644,6 +1959,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, bef
       if (wall - v.lastRx > (KINDS[v.kind].rail != null ? RAIL_TIMEOUT : HFP_TIMEOUT)) removeVehicle(v);
     }
     for (const p of planes.values()) if (wall - p.lastRx > PLANE_TIMEOUT) removePlane(p);
+    for (const sh of ships.values()) if (wall - sh.lastSeen > 3 * SHIP_POLL) removeShip(sh);
     if (selected) popup.setDOMContent(popupContent(selected));
     const s = stats();
     for (const fn of listeners) fn(s);
@@ -1653,17 +1969,19 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, bef
   planeState.url = planesUrl;
   pollPlanes();
   setInterval(pollPlanes, PLANE_POLL);
+  pollShips();
+  setInterval(pollShips, SHIP_POLL);
 
   return {
-    vehicles, planes, scene, // selaimen konsolia varten
+    vehicles, planes, ships, scene, // selaimen konsolia varten
     setGroup(id, on) {
       groupOn[id] = on;
-      if (selected && !groupOn[KINDS[selected.kind].group]) popup.remove();
+      if (selected?.kind && !groupOn[KINDS[selected.kind].group]) popup.remove();
       syncConnections();
       map.triggerRepaint();
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },
-    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai maamerkkiin (ja tiedot avattiin).
+    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen, alukseen tai maamerkkiin (ja tiedot avattiin).
     click(point) {
       const v = pick(point);
       if (!v) { popup.remove(); return false; }

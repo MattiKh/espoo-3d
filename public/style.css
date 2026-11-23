@@ -215,6 +215,7 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 }
 .vlabel.underground { opacity: 0.45; }
 .vlabel.plane { opacity: 0.8; border-radius: 3px; }
+.vlabel.ship { opacity: 0.8; }
 
 /* Ponnahdusikkuna */
 .maplibregl-popup { z-index: 4; }
