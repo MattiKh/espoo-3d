@@ -3,7 +3,7 @@
 
 // Kaikki tässä käytetyt WMS-tasot on tarkistettu avoimiksi; osa Espoon tasoista
 // (esim. maaperäkartta, yleiskaava, johtokartta) vaatii tunnukset eikä ole mukana.
-// HSY:n ja GTK:n palveluita ei tällä hetkellä käytetä.
+// GTK:n palvelua ei tällä hetkellä käytetä.
 export const WMS_SERVICES = {
   espoo: "https://kartat.espoo.fi/teklaogcweb/wms.ashx",
   hsy: "proxy/hsy/wms", // välityspalvelin (server.py tai julkaisualusta), koska HSY ei salli CORSia
@@ -89,7 +89,9 @@ const trafficVolume = ["max",
 //
 // Vektoritaso: { id, title, vector: [MapLibre-tasomäärittelyt ilman id:tä ja lähdettä] }
 //   source-layer on oletuksena id.
-// WMS-taso:   { id, title, wms: "TASO" } (Espoon karttapalvelu)
+// WMS-taso:   { id, title, wms: "TASO", service: "espoo" | "hsy", params: {...}, paint: {...} }
+//   service on oletuksena Espoon karttapalvelu; params lisää kyselyyn palvelukohtaisia
+//   parametreja, ja paint täydentää karttakuvan tyyliä.
 
 export const LAYERS = [
   {
@@ -108,9 +110,16 @@ export const LAYERS = [
   },
   { id: "wms_ajantasa", title: "Ajantasa-asemakaava", wms: "Ajantasa_asemakaava_vektori" },
   { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta" },
-  // Vektoriaineistosta (GIS:Vesialueet) puuttuu suuri osa merialueesta; karttakuvassa vedet ovat
-  // kokonaisina kunnan rajalle asti.
-  { id: "wms_vesistot", title: "Vesialueet", wms: "Vesistot", on: true },
+  // Espoon omista vesiaineistoista (WFS GIS:Vesialueet ja WMS Vesistot) puuttuu paloja
+  // merialueesta, esim. Haukilahden lahdelta. HSY:n maanpeiteaineistossa meri ja sisävedet ovat
+  // kokonaisina. HSY:n oletussininen vaalennetaan, ja reunojen pehmennys otetaan pois, jottei
+  // karttaruutujen rajoille jää vaaleita saumoja.
+  {
+    id: "wms_vesialueet", title: "Vesialueet", on: true, service: "hsy",
+    wms: "asuminen_ja_maankaytto:maanpeite_merialue_2024,asuminen_ja_maankaytto:maanpeite_vesi_2024",
+    params: { FORMAT_OPTIONS: "antialias:none" },
+    paint: { "raster-brightness-min": 0.3, "raster-saturation": -0.15 },
+  },
   {
     id: "vaesto", title: "Asukkaat 250 m ruuduissa (3D)", legend: "population",
     vector: [{

@@ -46,8 +46,10 @@ valmiit tiilet ovat.
 Netlify julkaisee `public/`-kansion sellaisenaan aina, kun GitHubin `main`-haaraan
 tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole.
 Lentokoneiden sijainnit (adsb.fi) välitetään reitin `/proxy/adsb/...` kautta, koska palvelu ei
-salli selaimen suoria hakuja; `server.py` tekee saman paikallisesti. HSY:n karttakuville on
-valmiina välitysreitti `/proxy/hsy/wms`, mutta niitä ei tällä hetkellä käytetä.
+salli selaimen suoria hakuja; `server.py` tekee saman paikallisesti. Samasta syystä HSY:n
+karttakuvat (vesialueet) välitetään reitin `/proxy/hsy/wms` kautta. Jos kartta julkaistaan
+palvelussa, jossa välitystä ei ole (esim. GitHub Pages), vesialueita ja lentokoneita ei näy,
+mutta muu kartta toimii.
 
 Vektoritiilet ovat gzip-pakattuja, ja selain purkaa ne itse (`app.js`), joten
 palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
@@ -59,7 +61,8 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
-| Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, vesistöt, melu, kiinteistörajat, kantakartta | Espoo WMS |
+| Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
+| Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
@@ -79,8 +82,10 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
 ## Huomioita aineistosta
 
 - Espoon avoimesta vesialueaineistosta (WFS `GIS:Vesialueet`) puuttuu suuri osa
-  merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista). Vesialueet näytetään
-  siksi karttakuvana (WMS `Vesistot`), jossa vedet ovat kokonaisina kunnan rajalle asti.
+  merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista), ja myös Espoon
+  Vesistöt-karttakuvasta (WMS `Vesistot`) puuttuu paloja, esimerkiksi suorakulmainen alue
+  Haukilahden lahdelta ja venesataman altaat. Vesialueet näytetään siksi HSY:n
+  maanpeiteaineistosta (meri- ja vesialueet 2024), jossa meri ja sisävedet ovat kokonaisina.
 
 - Espoon WFS tulkitsee BBOX-rajauksen samassa koordinaatistossa kuin `srsName`-tulosteen.
 - Kun tuloste pyydetään EPSG:3857:nä, osa rakennusten kärkipisteistä jää ETRS-GK25-

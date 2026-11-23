@@ -47,11 +47,11 @@ const state = {
 
 // ------------------------------------------------------------ apufunktiot
 
-function wmsTiles(layers, { service = "espoo", transparent = true } = {}) {
+function wmsTiles(layers, { service = "espoo", transparent = true, extra = {} } = {}) {
   const base = new URL(WMS_SERVICES[service], BASE).href;
   const params = new URLSearchParams({
     SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layers, STYLES: "",
-    SRS: "EPSG:3857", WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: transparent ? "TRUE" : "FALSE",
+    SRS: "EPSG:3857", WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: transparent ? "TRUE" : "FALSE", ...extra,
   });
   // {bbox-epsg-3857} ei saa mennä URL-koodaukseen, joten se lisätään perään sellaisenaan.
   return [`${base}?${params}&BBOX={bbox-epsg-3857}`];
@@ -109,8 +109,14 @@ function buildStyle() {
   const overlay = [];
   for (const def of LAYERS) {
     if (def.wms) {
-      sources[def.id] = { type: "raster", tiles: wmsTiles(def.wms), tileSize: 512, attribution: ATTR_ESPOO };
-      overlay.push({ id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on) }, paint: { "raster-opacity": state.overlayOpacity } });
+      sources[def.id] = {
+        type: "raster", tiles: wmsTiles(def.wms, { service: def.service, extra: def.params }), tileSize: 512,
+        attribution: def.service === "hsy" ? ATTR_HSY : ATTR_ESPOO,
+      };
+      overlay.push({
+        id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on) },
+        paint: { "raster-opacity": state.overlayOpacity, ...def.paint },
+      });
       continue;
     }
     def.vector.forEach((spec, i) => overlay.push({
