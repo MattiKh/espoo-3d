@@ -406,7 +406,11 @@ map.on("click", (e) => {
   const p = f.properties;
   const rows = Object.entries(p)
     .filter(([k, v]) => !HIDDEN_FIELDS.has(k) && v !== "" && v !== null && !(k.startsWith("Liikennemäärä") && v === 0))
-    .map(([k, v]) => el("tr", {}, el("th", {}, FIELD_LABELS[k] ?? k.replace(/_/g, " ")), el("td", {}, formatValue(k, v))));
+    .map(([k, v]) => {
+      // Rakennusrekisteristä täydennettyjen rakennusten korkeus on arvioitu kerrosluvusta.
+      const label = k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
+      return el("tr", {}, el("th", {}, label), el("td", {}, formatValue(k, v)));
+    });
   const title = POPUP_TITLES[key]?.(p) ?? p.Nimi ?? p.nimi ?? p.NIMI ?? layerTitle(key);
   const more = feats.length > 1 ? el("p", { class: "more" }, `+ ${feats.length - 1} muuta kohdetta tässä kohdassa`) : null;
   popup.setLngLat(e.lngLat)

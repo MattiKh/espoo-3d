@@ -310,4 +310,4 @@ export const FIELD_LABELS = {
   ika_yli80: "Yli 80-vuotiaat",
 };
 
-export const HIDDEN_FIELDS = new Set(["luokka", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);
+export const HIDDEN_FIELDS = new Set(["luokka", "arvio", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);

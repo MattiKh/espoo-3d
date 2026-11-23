@@ -8,6 +8,7 @@ jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
 public/data/ vain tiedostot manifest.json ja kaupunginosat_nimet.geojson.
 """
+import collections
 import concurrent.futures as cf
 import json
 import math
@@ -68,6 +69,8 @@ BUILDING_TYPE = "bldg:building_lod0"
 # Espoo jaetaan ruutuihin, jotta yksittäiset kyselyt pysyvät pieninä. Mercator-metreinä;
 # 60. leveyspiirillä 6000 m on maastossa noin 3 km.
 BUILDING_TILE = 6000
+# Rakennusrekisteri: kattavampi kuin 3D-malli, mutta ilman mitattua korkeutta.
+REGISTER_TYPE = "GIS:Rakennukset"
 
 
 def log(*a):
@@ -427,8 +430,8 @@ def landuse_class(code):
     return "muu"
 
 
-def build_buildings():
-    log(f"rakennukset ({BUILDING_TYPE}), ruudut {BUILDING_TILE} m")
+def fetch_tiled(type_name, subdir):
+    """Lataa aineiston Espoon alueelta ruuduittain välimuistiin ja palauttaa tiedostopolut."""
     minx, miny = (int(v) for v in lonlat_to_merc(ESPOO_LONLAT[0], ESPOO_LONLAT[1]))
     maxx, maxy = (int(v) + 1 for v in lonlat_to_merc(ESPOO_LONLAT[2], ESPOO_LONLAT[3]))
     tiles = [
@@ -438,27 +441,104 @@ def build_buildings():
     ]
 
     def fetch(t):
-        dest = os.path.join(CACHE, "rakennukset", f"{t[0]}_{t[1]}.xml")
-        return http_get(ESPOO_WFS, espoo_params(BUILDING_TYPE, bbox_filter(*t)), dest, timeout=600)
+        dest = os.path.join(CACHE, subdir, f"{t[0]}_{t[1]}.xml")
+        return http_get(ESPOO_WFS, espoo_params(type_name, bbox_filter(*t)), dest, timeout=600)
 
-    os.makedirs(os.path.join(CACHE, "rakennukset"), exist_ok=True)
+    os.makedirs(os.path.join(CACHE, subdir), exist_ok=True)
     paths, done = [], 0
     with cf.ThreadPoolExecutor(max_workers=3) as ex:  # maltillinen rinnakkaisuus palvelimen takia
         for p in ex.map(fetch, tiles):
             paths.append(p)
             done += 1
-            if done % 10 == 0 or done == len(tiles):
-                log(f"  ladattu {done}/{len(tiles)} ruutua")
+            if done % 20 == 0 or done == len(tiles):
+                log(f"  {type_name}: ladattu {done}/{len(tiles)} ruutua")
+    return paths
 
+
+def build_buildings():
+    log(f"rakennukset ({BUILDING_TYPE} + {REGISTER_TYPE}), ruudut {BUILDING_TILE} m")
     seen, feats = set(), []
-    for p in paths:
+    for p in fetch_tiled(BUILDING_TYPE, "rakennukset"):
         for f in parse_features(p, geom_prefer={"lod0FootPrint"}):
             if f.get("id_gml") in seen:
                 continue  # ruutujen rajalla olevat rakennukset tulevat kahdesti
             seen.add(f.get("id_gml"))
             feats.append(building_props(f))
+    register, seen = [], set()
+    for p in fetch_tiled(REGISTER_TYPE, "rakennusrekisteri"):
+        for f in parse_features(p):
+            key = f["properties"].get("PYSYVARAKENNUSTUNNUS") or f.get("id_gml")
+            if key in seen:
+                continue
+            seen.add(key)
+            register.append(f)
+    feats += register_supplement(feats, register)
     path = write_geojson("rakennukset", feats)
     make_building_tiles(path)
+
+
+def register_supplement(lod0, register):
+    """3D-mallista (LOD0) puuttuu kokonaisia alueita, esim. Etelä-Leppävaaran pientaloalue.
+    Rakennusrekisterin rakennukset, joita ei löydy mallista tunnuksen eikä sijainnin
+    perusteella, lisätään. Niiden korkeus arvioidaan kerrosluvusta: arvo on mallissa
+    olevien saman kerrosluvun rakennusten mitattujen korkeuksien mediaani."""
+    ids = {f["properties"].get("tunnus") for f in lod0}
+    cell = lambda x, y: (int(x * 200), int(y * 400))  # noin 250 m ruudut
+    grid = collections.defaultdict(list)
+    for f in lod0:
+        polys = geom_polygons(f["geometry"])
+        xs = [p[0] for poly in polys for p in poly[0]]
+        ys = [p[1] for poly in polys for p in poly[0]]
+        for cx in range(cell(min(xs), 0)[0], cell(max(xs), 0)[0] + 1):
+            for cy in range(cell(0, min(ys))[1], cell(0, max(ys))[1] + 1):
+                grid[(cx, cy)].append(polys)
+
+    heights = collections.defaultdict(list)
+    for f in lod0:
+        p = f["properties"]
+        if isinstance(p.get("kerrokset"), (int, float)) and p["kerrokset"] > 0:
+            heights[min(int(p["kerrokset"]), 30)].append(p["korkeus"])
+    median = {k: sorted(v)[len(v) // 2] for k, v in heights.items() if len(v) >= 5}
+    all_h = sorted(h for v in heights.values() for h in v)
+    fallback = all_h[len(all_h) // 2] if all_h else 6.0
+
+    added = []
+    for f in register:
+        p = f["properties"]
+        polys = geom_polygons(f["geometry"])
+        if not polys or p.get("PYSYVARAKENNUSTUNNUS") in ids:
+            continue
+        ring = polys[0][0]
+        x = sum(q[0] for q in ring[:-1]) / (len(ring) - 1)
+        y = sum(q[1] for q in ring[:-1]) / (len(ring) - 1)
+        if any(point_in_polygon(x, y, poly) for polys in grid.get(cell(x, y), []) for poly in polys):
+            continue
+        floors = p.get("KERROSLUKU") if isinstance(p.get("KERROSLUKU"), (int, float)) and p["KERROSLUKU"] > 0 else None
+        height = median.get(min(int(floors), 30), floors * 3.2) if floors else fallback
+        year = p.get("VALMISTUNUTYYYYMMDD")
+        year = year // 10000 if isinstance(year, int) and year > 10000 else None
+        number = p.get("OSOITENUMERO2") or p.get("OSOITENUMERO")
+        address = f"{p['OSOITE']} {number}, {p.get('POSTINUMERO', '')} ESPOO" if p.get("OSOITE") else None
+        props = {
+            "korkeus": round(float(height), 1),
+            "arvio": 1,
+            "kerrokset": floors,
+            "vuosi": None if year == 1900 else year,
+            "kaytto": p.get("KAYTTOTARKOITUS"),
+            "osoite": address,
+            "asunnot": int(p["HUONEISTOT"]) if isinstance(p.get("HUONEISTOT"), (int, float)) else None,
+            "rakenne": p.get("KANTAVARAKENNE"),
+            "tunnus": p.get("PYSYVARAKENNUSTUNNUS"),
+        }
+        props = {k: v for k, v in props.items() if v not in (None, "", "Ei arvoa")}
+        props["luokka"] = building_class(str(props.get("kaytto", "")))
+        added.append({"type": "Feature", "properties": props, "geometry": f["geometry"]})
+    log(f"  rekisteristä lisätty {len(added)} rakennusta, joita 3D-mallissa ei ole (korkeus arvioitu)")
+    return added
+
+
+def geom_polygons(g):
+    return [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"] if g["type"] == "MultiPolygon" else []
 
 
 def building_props(f):

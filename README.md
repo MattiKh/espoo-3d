@@ -44,6 +44,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Aineisto | Lähde |
 |---|---|
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
+| Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavat, käyttötarkoitukset, kaavahankkeet | Espoo WFS `GIS:*` |
 | Vedet, luontokohteet, sulfaattimaat, liikennemäärät, aluejaot | Espoo WFS `GIS:*` |
 | Ilmakuvat 1950–2026, opaskartat, vanhat kartat, kaava-, melu- ja kiinteistökartat | Espoo WMS |
@@ -63,6 +64,11 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
   koordinaateiksi, ja osa on roskaa (INF tai lähellä nollaa). `build_data.py` muuntaa
   GK25-pisteet itse JHS 154 -kaavoilla ja jättää roskapisteet pois.
 - Rakennusten vuosi 1900 on aineistossa tuntemattoman vuoden paikka-arvo, joten se jätetään tyhjäksi.
+- Rakennusten 3D-mallista (LOD0) puuttuu kokonaisia alueita, esimerkiksi Etelä-Leppävaaran
+  ja Laajalahden pientaloalueita. Puuttuvat rakennukset täydennetään rakennusrekisteristä
+  (`GIS:Rakennukset`), ja niiden korkeus arvioidaan kerrosluvusta: arvona käytetään mallissa
+  olevien saman kerrosluvun rakennusten mitattujen korkeuksien mediaania. Kohteen tiedoissa
+  näkyy silloin "Korkeus (m, arvio)".
 
 ## Rakenne
 
