@@ -4,6 +4,7 @@
 // tasaiseksi vastaanotettujen sijaintien välillä.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
+import { deckHeightAt, rawElevationAt } from "./bridges.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
 const RAIL_MQTT_URL = "wss://rata.digitraffic.fi:443/mqtt";
@@ -22,6 +23,10 @@ const REGION_MARGIN = 300; // m: ajoneuvot näkyvät vielä näin kaukana Espoon
 const MODEL_MINZOOM = 12.5; // tätä kauempaa ajoneuvot näytetään vain pisteinä
 const MAX_ENLARGE = 2; // mallit näytetään kaukaa suurennettuina, jotta ne erottuvat
 const LIFT = 0.15; // m maanpinnan yläpuolella
+// Länsimetro kulkee tunnelissa noin 15–30 metrin syvyydessä. Näkymässä metro piirretään
+// matalammalle, jottei se lähikuvassa siirry kauas kohdastaan maan päällä.
+const METRO_DEPTH = 12; // m
+const ELEV_SMOOTH_MS = 250; // korkeuden muutosten pehmennys
 
 export const TRANSIT_GROUPS = [
   ["bussit", "Bussit", "#007ac9"],
@@ -36,18 +41,22 @@ const COLORS = {
 };
 
 // Vaunut keulasta taaksepäin: [malli, pituus (m), käännetty]. Takimmainen ohjaamovaunu on
-// sama malli käännettynä, joten molemmissa päissä on keula.
+// sama malli käännettynä, joten molemmissa päissä on keula. height on katon korkeus (m),
+// jonka yläpuolelle linjanumero sijoitetaan.
 const KINDS = {
-  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0 },
-  tram: { group: "ratikat", label: "Raitiovaunu", cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]], gap: 0.5 },
-  train: { group: "junat", label: "Lähijuna", cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]], gap: 0.6 },
-  metro: { group: "metro", label: "Metro", cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]], gap: 0.6 },
-  intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8 },
+  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3 },
+  tram: { group: "ratikat", label: "Raitiovaunu", cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]], gap: 0.5, height: 3.7 },
+  train: { group: "junat", label: "Lähijuna", cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]], gap: 0.6, height: 4.4 },
+  metro: {
+    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true,
+    cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
+  },
+  intercity: { group: "junat", label: "Kaukojuna", cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])], gap: 0.8, height: 5.0 },
   freight: {
-    group: "junat", label: "Tavarajuna", gap: 0.9,
+    group: "junat", label: "Tavarajuna", gap: 0.9, height: 4.3,
     cars: [["cargoLoco", 19.6], ...Array.from({ length: 12 }, (_, i) => (i % 3 === 1 ? ["tankWagon", 14] : ["boxWagon", 15.5]))],
   },
-  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0 },
+  locomotive: { group: "junat", label: "Veturi", cars: [["cargoLoco", 19.6]], gap: 0, height: 4.3 },
 };
 for (const k of Object.values(KINDS)) {
   // Kunkin vaunun keulan ja perän etäisyys ajoneuvon keulasta.
@@ -421,7 +430,7 @@ function newVehicle(id, kind, clock) {
   return {
     id, kind, clock, num: ++vehicleSeq, samples: [], trail: [], x: null, y: null,
     dir: null, guessed: true, seedAt: null, info: {}, lastRx: Date.now(), outAt: null,
-    elev: null, elevAt: 0, centers: null, drawnAt: 0, cell: null,
+    elev: null, elevShown: null, elevAt: 0, screen: null, drawnAt: 0, cell: null,
   };
 }
 
@@ -714,8 +723,9 @@ let renderer = null;
 
 {
   const solid = new THREE.MeshLambertMaterial({ vertexColors: true });
-  // Metro kulkee Espoossa koko matkan tunnelissa, joten se piirretään läpikuultavana.
-  const tunnel = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.6, depthWrite: false });
+  // Metro kulkee Espoossa koko matkan tunnelissa. Se piirretään maan alle läpikuultavana ja
+  // maaston läpi näkyvänä (syvyystestiä ei tehdä).
+  const tunnel = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, depthTest: false });
   for (const [key, [build, cap]] of Object.entries(MODELS)) {
     const mesh = new THREE.InstancedMesh(build(), key.startsWith("metro") ? tunnel : solid, cap);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -744,10 +754,12 @@ function putInstance(mesh, wx, wy, wz, yaw, pitch, k) {
 
 let lastTick = performance.now();
 let lastRender = 0;
+let lastDt = 16;
 
 function tick() {
   const now = performance.now(), dt = Math.min(now - lastTick, 500);
   lastTick = now;
+  lastDt = dt;
   const k = 1 - Math.exp(-dt / SMOOTH_MS), wall = Date.now();
   for (const v of vehicles.values()) advance(v, wall, k);
   if (selected?.x != null) popup.setLngLat([lonOf(selected.x), latOf(selected.y)]);
@@ -755,10 +767,79 @@ function tick() {
 
 const pts = new Float64Array(64);
 
+// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla
+// korkeusmalli on nostettu kannen tasolle (bridges.js). Ajoneuvo pysyy kannella, jos se tuli
+// sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo pysyy
+// alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
+function groundAt(v, x, y, prev, centerElev, exag) {
+  const lon = lonOf(x), lat = latOf(y);
+  const dem = (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
+  if (KINDS[v.kind].underground) return dem;
+  const deck = deckHeightAt(lon, lat);
+  if (deck == null) return dem;
+  const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag, top = deck * exag;
+  if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
+  const from = prev ?? approachElevation(v, centerElev);
+  if (Math.abs(from - top) >= Math.abs(from - raw)) return raw; // sillan alla
+  return rawM == null ? Math.max(dem, top) : dem; // kannella (nostettu maasto on kannen pinta)
+}
+
+// Maanpinnan korkeus siinä reitin kohdassa, josta ajoneuvo tuli sillalle.
+function approachElevation(v, centerElev) {
+  const T = v.trail;
+  for (let i = T.length - 1; i >= 0; i--) {
+    if (deckHeightAt(lonOf(T[i][0]), latOf(T[i][1])) == null || i === 0) {
+      return (mapRef.queryTerrainElevation([lonOf(T[i][0]), latOf(T[i][1])]) ?? 0) + centerElev;
+    }
+  }
+  return (mapRef.queryTerrainElevation([lonOf(v.x), latOf(v.y)]) ?? 0) + centerElev;
+}
+
+// Maailmankoordinaatit näytön pikseleiksi (null, jos piste on kameran takana).
+function toScreen(e, wx, wy, wz, W, H) {
+  const w = e[3] * wx + e[7] * wy + e[11] * wz + e[15];
+  if (w <= 0) return null;
+  const x = (e[0] * wx + e[4] * wy + e[8] * wz + e[12]) / w, y = (e[1] * wx + e[5] * wy + e[9] * wz + e[13]) / w;
+  return [((x + 1) / 2) * W, ((1 - y) / 2) * H];
+}
+
+// ------------------------------------------------------------ linjanumerot
+
+// Linjanumerot ovat karttakuvan päällä olevia elementtejä, joita siirretään joka ruudussa
+// ajoneuvon mukana, joten ne liikkuvat yhtä tasaisesti kuin mallit.
+let labelLayer = null;
+const labels = new Map();
+let frameNo = 0;
+
+function placeLabel(v, sx, sy) {
+  let el = labels.get(v.id);
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "vlabel";
+    el.style.background = COLORS[v.kind];
+    labelLayer.append(el);
+    labels.set(v.id, el);
+  }
+  const text = v.info.line ?? "";
+  if (el.textContent !== text) el.textContent = text;
+  el.style.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px) translate(-50%, -100%)`;
+  el.hidden = false;
+  el.frame = frameNo;
+}
+
+function hideStaleLabels() {
+  for (const [id, el] of labels) {
+    if (el.frame === frameNo) continue;
+    if (vehicles.has(id)) el.hidden = true;
+    else { el.remove(); labels.delete(id); }
+  }
+}
+
 function draw(gl, matrix) {
   const map = mapRef;
   for (const mesh of Object.values(meshes)) mesh.count = 0;
   const zoom = map.getZoom();
+  frameNo++;
   if (zoom >= MODEL_MINZOOM) {
     const c = map.getCenter(), cmx = mercX(c.lng), cmy = mercY(c.lat);
     const sc = 1 / (EARTH_CIRC * Math.cos(c.lat * D2R)), cosC = Math.cos(c.lat * D2R);
@@ -768,8 +849,11 @@ function draw(gl, matrix) {
       .multiply(matS.makeScale(sc, -sc, sc));
     camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
     const centerElev = map.transform.elevation ?? 0;
+    const exag = map.getTerrain()?.exaggeration ?? 1;
     const scale = Math.min(MAX_ENLARGE, Math.max(1, 2 ** ((15 - zoom) * 0.6)));
     const b = map.getBounds(), [vx0, vy0] = toLocal(b.getWest(), b.getSouth()), [vx1, vy1] = toLocal(b.getEast(), b.getNorth());
+    const e = camera.projectionMatrix.elements, W = map.transform.width, H = map.transform.height;
+    const ke = 1 - Math.exp(-lastDt / ELEV_SMOOTH_MS);
     const now = performance.now();
     for (const v of vehicles.values()) {
       const kind = KINDS[v.kind];
@@ -778,29 +862,43 @@ function draw(gl, matrix) {
       const n = kind.cars.length;
       walkTrail(v, kind.ds, scale, pts);
       if (!v.elev || v.elev.length !== 2 * n || now - v.elevAt > 300) {
-        // Maaston korkeus haetaan harvemmin kuin piirretään; tallennetaan absoluuttisena.
-        v.elev = v.elev?.length === 2 * n ? v.elev : new Float64Array(2 * n);
-        for (let j = 0; j < 2 * n; j++) {
-          v.elev[j] = (map.queryTerrainElevation([lonOf(pts[2 * j]), latOf(pts[2 * j + 1])]) ?? 0) + centerElev;
-        }
+        // Korkeus haetaan harvemmin kuin piirretään ja tallennetaan absoluuttisena.
+        const prev = v.elev?.length === 2 * n ? v.elev : null;
+        v.elev = new Float64Array(2 * n);
+        for (let j = 0; j < 2 * n; j++) v.elev[j] = groundAt(v, pts[2 * j], pts[2 * j + 1], prev?.[j], centerElev, exag);
         v.elevAt = now + Math.random() * 100;
       }
-      v.centers ??= [];
-      v.centers.length = 0;
+      // Näytetty korkeus seuraa haettua pehmeästi, jottei ajoneuvo hypi pystysuunnassa.
+      if (!v.elevShown || v.elevShown.length !== v.elev.length) v.elevShown = Float64Array.from(v.elev);
+      for (let j = 0; j < v.elev.length; j++) {
+        const d = v.elev[j] - v.elevShown[j];
+        v.elevShown[j] = Math.abs(d) > 40 ? v.elev[j] : v.elevShown[j] + d * ke;
+      }
+      const base = kind.underground ? -METRO_DEPTH : LIFT;
+      v.screen ??= [];
+      v.screen.length = 0;
       for (let i = 0; i < n; i++) {
         const [model, len, flip] = kind.cars[i];
         const fx = pts[4 * i], fy = pts[4 * i + 1], bx = pts[4 * i + 2], by = pts[4 * i + 3];
         const lon = lonOf((fx + bx) / 2), lat = latOf((fy + by) / 2);
         const k = cosC / Math.cos(lat * D2R);
-        const zf = v.elev[2 * i] - centerElev, zb = v.elev[2 * i + 1] - centerElev;
+        const zf = v.elevShown[2 * i] - centerElev, zb = v.elevShown[2 * i + 1] - centerElev;
         const yaw = Math.atan2(-(fx - bx), fy - by) + (flip ? Math.PI : 0);
         const pitch = Math.atan2(flip ? zb - zf : zf - zb, len * scale);
-        putInstance(meshes[model], (mercX(lon) - cmx) / sc, -(mercY(lat) - cmy) / sc, ((zf + zb) / 2 + LIFT) * k, yaw, pitch, k * scale);
-        v.centers.push(lon, lat);
+        const wx = (mercX(lon) - cmx) / sc, wy = -(mercY(lat) - cmy) / sc, wz = ((zf + zb) / 2 + base) * k;
+        putInstance(meshes[model], wx, wy, wz, yaw, pitch, k * scale);
+        const mid = toScreen(e, wx, wy, wz + (kind.height / 2) * k * scale, W, H);
+        if (mid) v.screen.push(mid[0], mid[1]);
+        if (i === n >> 1) {
+          const top = toScreen(e, wx, wy, wz + (kind.height * scale + 1.2) * k, W, H);
+          if (top && top[0] > -60 && top[0] < W + 60 && top[1] > -30 && top[1] < H + 60) placeLabel(v, top[0], top[1]);
+        }
       }
       v.drawnAt = now;
     }
   }
+  labelLayer.hidden = zoom < MODEL_MINZOOM;
+  hideStaleLabels();
   for (const mesh of Object.values(meshes)) mesh.instanceMatrix.needsUpdate = true;
   renderer.resetState();
   renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
@@ -853,18 +951,23 @@ function popupContent(v) {
     node("div", { class: "kind" }, kind.label),
     node("h3", {}, [i.line, i.headsign].filter(Boolean).join(" → ")),
     node("table", {}, rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))),
-    v.kind === "metro" ? node("p", { class: "more" }, "Metro kulkee Espoossa tunnelissa.") : null);
+    v.kind === "metro" ? node("p", { class: "more" }, "Metro kulkee Espoossa tunnelissa, ja se näytetään maan alla.") : null);
 }
 
+// Lähikuvassa verrataan piirrettyjen vaunujen näyttösijainteihin (myös maan alla kulkeva metro
+// ja sillalla kulkevat ajoneuvot osuvat oikein), kaukaa ajoneuvon pisteeseen.
 function pick(point) {
   const map = mapRef, recent = performance.now() - 500;
   let best = null, bestD = 22 * 22;
   for (const v of vehicles.values()) {
     if (v.x == null || !groupOn[KINDS[v.kind].group]) continue;
-    const probes = v.drawnAt > recent && v.centers?.length ? v.centers : [lonOf(v.x), latOf(v.y)];
+    let probes = v.drawnAt > recent && v.screen?.length ? v.screen : null;
+    if (!probes) {
+      const p = map.project([lonOf(v.x), latOf(v.y)]);
+      probes = [p.x, p.y];
+    }
     for (let i = 0; i < probes.length; i += 2) {
-      const p = map.project([probes[i], probes[i + 1]]);
-      const d = (p.x - point.x) ** 2 + (p.y - point.y) ** 2;
+      const d = (probes[i] - point.x) ** 2 + (probes[i + 1] - point.y) ** 2;
       if (d < bestD) { bestD = d; best = v; }
     }
   }
@@ -886,6 +989,9 @@ function stats() {
 export async function createTransit(map, { boundaryUrl, beforeLayer }) {
   mapRef = map;
   await loadRegion(boundaryUrl);
+  labelLayer = document.createElement("div");
+  labelLayer.className = "vehicle-labels";
+  map.getContainer().append(labelLayer);
 
   map.addLayer({
     id: "joukkoliikenne", type: "custom", renderingMode: "3d",
@@ -916,14 +1022,6 @@ export async function createTransit(map, { boundaryUrl, beforeLayer }) {
       "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.2,
       "circle-opacity": fade, "circle-stroke-opacity": fade,
     },
-  });
-  map.addLayer({
-    id: "joukkoliikenne-linjat", type: "symbol", source: OVERVIEW, minzoom: 12, maxzoom: 15,
-    layout: {
-      "text-field": ["get", "linja"], "text-font": ["Noto Sans Bold"], "text-size": 10.5,
-      "text-offset": [0, -1.15], "text-allow-overlap": true, "text-ignore-placement": true,
-    },
-    paint: { "text-color": "#1d2a35", "text-halo-color": "rgba(255,255,255,0.95)", "text-halo-width": 1.3, "text-opacity": fade },
   });
 
   map.on("moveend", syncCells);

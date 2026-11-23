@@ -2,6 +2,7 @@ import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, GROUPS,
   HIDDEN_FIELDS, LANDUSE_CLASSES, ORTHO_YEARS, PLACES, POPUP_TITLES, TERRAIN_EXAGGERATION, WMS_SERVICES,
 } from "./layers.js";
+import { patchDemTile } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -27,6 +28,16 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
     data = await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   }
   return { data };
+});
+
+// Korkeusmallin tiilet: sillat nostetaan kannen tasolle (bridges.js), koska ne puuttuvat
+// korkeusmallista ja ilmakuvan tie muuten notkahtaisi sillan kohdalla.
+maplibregl.addProtocol("dem", async (params, abortController) => {
+  const url = "https://" + params.url.slice("dem://".length);
+  const res = await fetch(url, { signal: abortController.signal });
+  if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
+  const [z, x, y] = url.match(/(\d+)\/(\d+)\/(\d+)\.webp$/).slice(1).map(Number);
+  return { data: await patchDemTile(await res.arrayBuffer(), z, x, y) };
 });
 
 const state = {
@@ -74,7 +85,7 @@ function buildingColorExpr(mode) {
 function buildStyle() {
   const sources = {
     dem: {
-      type: "raster-dem", tiles: ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
+      type: "raster-dem", tiles: ["dem://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.

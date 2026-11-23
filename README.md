@@ -22,7 +22,7 @@ python3 scripts/build_data.py
 
 Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
-(`public/tiles/`). Tiilitykseen tarvitaan
+(`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json`. Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
@@ -56,6 +56,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
+| Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
@@ -86,9 +87,24 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   kellojen ero arvioidaan hitaasti kaikista viesteistä, jottei arvion muutos nytkäytä ajoneuvoja.
 - Vaunut seuraavat keulan kulkemaa reittiä, joten nivelraitiovaunut ja junat kaartavat.
 - HSL:n lähijunat tulevat HFP-syötteestä, joten Digitrafficista otetaan vain kauko- ja tavarajunat.
-- Metro kulkee Espoossa tunnelissa, joten se piirretään läpikuultavana.
+- Metro kulkee Espoossa tunnelissa, joten se piirretään läpikuultavana maan alle (12 metriä
+  pinnan alapuolelle) ja maaston läpi näkyvänä.
+- Linjanumerot ovat karttakuvan päällä olevia läpikuultavia elementtejä, joita siirretään joka
+  ruudussa ajoneuvon mukana.
 - Lähikuvassa tilataan vain näkymän ympäristön HFP-ruudut. Taustalle jääneen välilehden
   yhteydet suljetaan 30 sekunnin kuluttua.
+
+## Sillat
+
+Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten ilmakuvan tie notkahti sillan
+kohdalla alla olevan tien tai joen tasolle, ja ajoneuvot sukelsivat mukana. Espoon kantakartan
+siltojen reunaviivoissa on kannen mitattu korkeus. `build_data.py` muodostaa niistä kansialueet:
+kannen reunoiksi tulkitaan samansuuntaiset, samalla korkeudella olevat viivat 3–40 metrin päässä
+toisistaan. Selain nostaa korkeusmallin tiilet kansialueilla kannen tasolle (`public/bridges.js`)
+ja muistaa alkuperäisen maanpinnan korkeuden.
+
+Ajoneuvo pysyy kannella, jos se tuli sillalle kannen korkeudelta, esimerkiksi penkereeltä.
+Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
 
 ## Rakenne
 
@@ -98,3 +114,4 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, liikkeen tasoitus ja 3D-mallit (three.js)
+- `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille

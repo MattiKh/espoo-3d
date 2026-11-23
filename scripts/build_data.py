@@ -6,8 +6,8 @@ Käyttö:  python3 scripts/build_data.py [aineisto ...]
 Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
-public/data/ vain tiedostot manifest.json, kaupunginosat_nimet.geojson ja
-espoo_raja.geojson.
+public/data/ vain tiedostot manifest.json, kaupunginosat_nimet.geojson,
+espoo_raja.geojson ja sillat.json.
 """
 import collections
 import concurrent.futures as cf
@@ -73,6 +73,8 @@ BUILDING_TYPE = "bldg:building_lod0"
 BUILDING_TILE = 6000
 # Rakennusrekisteri: kattavampi kuin 3D-malli, mutta ilman mitattua korkeutta.
 REGISTER_TYPE = "GIS:Rakennukset"
+# Kantakartan sillat: reunaviivat, joiden jokaisella pisteellä on mitattu korkeus (N2000).
+BRIDGE_TYPE = "kanta:Silta"
 
 
 def log(*a):
@@ -662,6 +664,96 @@ def build_boundary():
     write_geojson("espoo_raja", feats, PUBLIC_DATA)
 
 
+def build_bridges():
+    """Siltojen reunaviivat korkeuksineen. Korkeusmallista sillat puuttuvat, joten selain
+    nostaa niiden avulla silloilla kulkevat ajoneuvot kannen tasolle."""
+    log(f"sillat ({BRIDGE_TYPE})")
+    lines = {}
+    for path in fetch_tiled(BRIDGE_TYPE, "sillat"):
+        for _, el in ET.iterparse(path):
+            if local(el.tag) != "Silta":
+                continue
+            fid = el.get(GML + "id")  # sama silta voi tulla useasta ruudusta
+            for ls in el.iter(GML + "LineString"):
+                pts = read_positions_3d(ls)
+                if len(pts) >= 2 and any(z for _, _, z in pts):  # korkeus 0 = korkeus puuttuu
+                    lines.setdefault(fid, []).append(
+                        [v for x, y, z in pts for v in (*merc_to_lonlat(x, y), round(z, 2))])
+            el.clear()
+    viivat = [line for group in lines.values() for line in group]
+    for line in viivat:
+        line[:] = [round(v, 6) for v in line]
+    kannet = bridge_decks(viivat)
+    path = os.path.join(PUBLIC_DATA, "sillat.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "Espoon kantakartta (kanta:Silta)", "viivat": viivat, "kannet": kannet}, fh, separators=(",", ":"))
+    log(f"  → sillat.json: {len(viivat)} reunaviivaa, {len(kannet)} kantta, {os.path.getsize(path) / 1e6:.2f} Mt")
+
+
+def bridge_decks(viivat):
+    """Kansialueet reunaviivapareista. Aineistossa ei kerrota, mitkä viivat ovat saman kannen
+    reunoja, joten kannen reunoiksi tulkitaan kaksi samansuuntaista, samalla korkeudella
+    olevaa viivaa 3–40 metrin päässä toisistaan. Kullekin viivalle otetaan lähin pari
+    kummaltakin puolelta. Selain nostaa maaston kannen tasolle vain siellä, missä maasto
+    on kantta alempana, joten tasaisella maalla väärä pari ei muuta mitään."""
+    lon0, lat0, kx, ky = 24.7, 60.2, 55462.0, 111415.0
+    edges = []
+    for line in viivat:
+        pts = [((line[i] - lon0) * kx, (line[i + 1] - lat0) * ky, line[i + 2]) for i in range(0, len(line), 3)]
+        (x0, y0, _), (x1, y1, _) = pts[0], pts[-1]
+        length = math.hypot(x1 - x0, y1 - y0)
+        if length < 6:  # tukipilarit ja muut suljetut tai lyhyet viivat
+            continue
+        edges.append({"line": line, "pts": pts, "x0": x0, "y0": y0, "ux": (x1 - x0) / length, "uy": (y1 - y0) / length,
+                      "len": length, "z": sum(p[2] for p in pts) / len(pts),
+                      "mx": sum(p[0] for p in pts) / len(pts), "my": sum(p[1] for p in pts) / len(pts)})
+    grid = collections.defaultdict(list)
+    for i, e in enumerate(edges):
+        grid[(int(e["mx"] // 100), int(e["my"] // 100))].append(i)
+    pairs = set()
+    for i, a in enumerate(edges):
+        best = {}
+        cx, cy = int(a["mx"] // 100), int(a["my"] // 100)
+        for j in (j for gx in range(cx - 2, cx + 3) for gy in range(cy - 2, cy + 3) for j in grid[(gx, gy)]):
+            b = edges[j]
+            if j == i or abs(a["ux"] * b["ux"] + a["uy"] * b["uy"]) < 0.966 or abs(a["z"] - b["z"]) > 1.5:  # 15°
+                continue
+            across = [(x - a["x0"]) * -a["uy"] + (y - a["y0"]) * a["ux"] for x, y, _ in b["pts"]]
+            along = [(x - a["x0"]) * a["ux"] + (y - a["y0"]) * a["uy"] for x, y, _ in b["pts"]]
+            t = sum(across) / len(across)
+            overlap = min(a["len"], max(along)) - max(0.0, min(along))
+            if not 3 <= abs(t) <= 40 or max(across) - min(across) > 8 or overlap < 0.5 * min(a["len"], b["len"]):
+                continue
+            side = t > 0
+            if side not in best or abs(t) < best[side][0]:
+                best[side] = (abs(t), j)
+        for _, j in best.values():
+            pairs.add((min(i, j), max(i, j)))
+    decks = []
+    for i, j in sorted(pairs):
+        a, b = edges[i]["line"], edges[j]["line"]
+        if edges[i]["ux"] * edges[j]["ux"] + edges[i]["uy"] * edges[j]["uy"] < 0:  # sama kulkusuunta
+            b = [v for k in range(len(b) - 3, -1, -3) for v in b[k:k + 3]]
+        decks.append([a, b])
+    return decks
+
+
+def read_positions_3d(el):
+    """Kuten read_positions, mutta palauttaa myös korkeuden: [(x, y, z), ...]."""
+    out = []
+    for c in el:
+        t = local(c.tag)
+        dim = int(c.get("srsDimension") or el.get("srsDimension") or 2)
+        if dim < 3 or t not in ("pos", "posList"):
+            continue
+        v = [float(s) for s in c.text.split()]
+        for i in range(0, len(v) - 2, 3):
+            q = fix_position((v[i], v[i + 1]))
+            if q and math.isfinite(v[i + 2]):
+                out.append((q[0], q[1], v[i + 2]))
+    return out
+
+
 def espoo_polygons():
     """Espoon kaupunginosat polygonilistana (rajaukseen); tyhjä, jos aineistoa ei vielä ole."""
     path = os.path.join(OUT, "kaupunginosat.geojson")
@@ -808,6 +900,8 @@ def main():
         build_population()
     if want("raja"):
         build_boundary()
+    if want("sillat"):
+        build_bridges()
     if want("rakennukset"):
         build_buildings()
     if want("tiilet"):
