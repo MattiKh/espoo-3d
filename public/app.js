@@ -44,37 +44,24 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 // kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa, ja kartan pysähdyttyä näkymän
 // ympäriltä haetaan valmiiksi naapuriruudut. Karttaa siirrettäessä ne tulevat välimuistista heti.
 const ORTHO_PREFETCH_RADIUS = 2; // ruutua keskiruudun ympäriltä samalla tasolla (yksi karkeammalla)
-// Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, josta tausta näkyi
-// vaaleana rakona. Ruutu haetaan siksi muutaman pikselin suurempana, ja reunat leikataan pois.
-const ORTHO_PAD = 2; // px
-const ORTHO_BACKGROUND = "#868b84"; // ilmakuvan keskisävy: kuvauksen ulkopuoliset alueet ja mahdolliset raot
+// Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin. Ilmakuvan alla tausta on
+// siksi ilmakuvan keskisävyinen harmaa, jottei rako näy vaaleana (myös kuvauksen ulkopuoliset alueet).
+const ORTHO_BACKGROUND = "#868b84";
 const orthoInflight = new Map();
 const orthoPrefetched = new Set();
 let orthoQueue = [], orthoActive = 0;
 
-function tileBBox(z, x, y, pad = 0) {
+function tileBBox(z, x, y) {
   const world = 2 * Math.PI * 6378137, size = world / 2 ** z, x0 = -world / 2 + x * size, y1 = world / 2 - y * size;
-  const m = (size / 512) * pad;
-  return `${x0 - m},${y1 - size - m},${x0 + size + m},${y1 + m}`;
+  return `${x0},${y1 - size},${x0 + size},${y1}`;
 }
 
 function orthoUrl(layer, z, x, y) {
   const params = new URLSearchParams({
     SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layer, STYLES: "", SRS: "EPSG:3857",
-    WIDTH: String(512 + 2 * ORTHO_PAD), HEIGHT: String(512 + 2 * ORTHO_PAD), FORMAT: "image/png", TRANSPARENT: "TRUE",
-    BBOX: tileBBox(z, x, y, ORTHO_PAD),
+    WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: "TRUE", BBOX: tileBBox(z, x, y),
   });
   return `${WMS_SERVICES.espoo}?${params}`;
-}
-
-// Ruudun keskiosa 512 × 512 (WebP, läpinäkyvyys säilyy; selain, joka ei osaa WebP:tä, tekee PNG:n).
-async function cropOrtho(buffer) {
-  if (!buffer.byteLength) return buffer;
-  const bmp = await createImageBitmap(new Blob([buffer]));
-  const canvas = new OffscreenCanvas(512, 512);
-  canvas.getContext("2d").drawImage(bmp, ORTHO_PAD, ORTHO_PAD, 512, 512, 0, 0, 512, 512);
-  bmp.close();
-  return (await canvas.convertToBlob({ type: "image/webp", quality: 0.9 })).arrayBuffer();
 }
 
 // Sama ruutu haetaan vain kerran, vaikka ennakkohaku ja kartta pyytäisivät sitä yhtä aikaa.
@@ -89,7 +76,7 @@ function fetchOrtho(url, priority) {
 
 maplibregl.addProtocol("ortho", async (params) => {
   const [layer, z, x, y] = params.url.slice("ortho://".length).split("/");
-  return { data: await cropOrtho(await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high")) };
+  return { data: await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high") };
 });
 
 function prefetchOrtho() {
