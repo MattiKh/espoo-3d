@@ -1,5 +1,5 @@
 {
- "versio": 1795467987,
+ "versio": 1795478419,
  "aineistot": [
   {
    "id": "maankaytto",
@@ -155,7 +155,7 @@
    "id": "rakennukset",
    "lahde": "bldg:building_lod0",
    "nimi": "Rakennukset",
-   "koko": 35040407
+   "koko": 35648526
   }
  ]
 }

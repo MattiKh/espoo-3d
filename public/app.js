@@ -203,6 +203,7 @@ function buildStyle() {
     },
     rakennukset: {
       type: "vector", tiles: [`gz://${BASE}tiles/rakennukset/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`], minzoom: 11, maxzoom: 15,
+      promoteId: "tunnus", // katot (roofs.js) merkitään rakennuksen tilaan tunnuksella
     },
   };
 
@@ -242,7 +243,9 @@ function buildStyle() {
     filter: buildingFilter(),
     paint: {
       "fill-extrusion-color": buildingColorExpr(state.buildingColor),
-      "fill-extrusion-height": ["get", "korkeus"],
+      // Kaltevakattoisen rakennuksen seinät räystääseen, kun sen katto on ladattu (roofs.js).
+      "fill-extrusion-height": ["case", ["boolean", ["feature-state", "katto"], false],
+        ["coalesce", ["get", "raystas"], ["get", "korkeus"]], ["get", "korkeus"]],
       "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 0.92],
       "fill-extrusion-vertical-gradient": true,
     },
@@ -301,6 +304,7 @@ map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 map.on("load", () => {
   initTransit();
   initStreams();
+  initRoofs();
   refreshRadar();
   setInterval(refreshRadar, 120000);
   prefetchOrtho();
@@ -361,6 +365,7 @@ function buildingFilter() {
 
 function applyTimeFilter() {
   map.setFilter("rakennukset", buildingFilter());
+  roofs?.refresh();
 }
 
 function setOverlayOpacity(v) {
@@ -427,11 +432,14 @@ function buildPanel() {
     el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
     el("span", {}, String(year)))));
 
-  document.getElementById("buildings").addEventListener("change", (e) =>
-    map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none"));
+  document.getElementById("buildings").addEventListener("change", (e) => {
+    map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none");
+    roofs?.setVisible(e.target.checked);
+  });
   document.getElementById("building-color").addEventListener("change", (e) => {
     state.buildingColor = e.target.value;
     map.setPaintProperty("rakennukset", "fill-extrusion-color", buildingColorExpr(state.buildingColor));
+    roofs?.refresh();
     renderLegends();
   });
 
@@ -502,6 +510,61 @@ async function initStreams() {
   }
 }
 
+// ------------------------------------------------------------ katot
+
+let roofs = null;
+
+// Katon ja räystään yläpuolisten seinien väri samoin kuin 3D-rakennuksissa (buildingColorExpr).
+function buildingColor(b) {
+  if (state.buildingColor === "vuosi") return b.vuosi ? interpolateColor(BUILDING_YEAR_STOPS, b.vuosi) : "#9e9e9e";
+  if (state.buildingColor === "korkeus") return interpolateColor(BUILDING_HEIGHT_STOPS, b.korkeus);
+  return BUILDING_CLASSES.find(([k]) => k === b.luokka)?.[2] ?? "#bdbdbd";
+}
+
+function interpolateColor(stops, v) {
+  if (v <= stops[0][0]) return stops[0][1];
+  for (let i = 1; i < stops.length; i++) {
+    const [v1, c1] = stops[i];
+    if (v > v1) continue;
+    const [v0, c0] = stops[i - 1], t = (v - v0) / (v1 - v0);
+    const a = parseInt(c0.slice(1), 16), b = parseInt(c1.slice(1), 16);
+    const ch = (s) => Math.round(((a >> s) & 255) + (((b >> s) & 255) - ((a >> s) & 255)) * t);
+    return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+  }
+  return stops[stops.length - 1][1];
+}
+
+// Sama ehto kuin buildingFilter: maamerkit piiloon, vanhoilla ilmakuvilla vain silloin valmiit.
+function buildingShown(b) {
+  if (LANDMARKS.some((l) => String(l.building) === b.tunnus)) return false;
+  const year = ORTHO_YEARS[state.orthoIndex][0], latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
+  return !(state.ortho && year < latest) || (b.vuosi != null && b.vuosi <= year);
+}
+
+// Katot 3D-mallista (roofs.js), piirretään joukkoliikenteen 3D-tasolla (transit.js).
+async function initRoofs() {
+  try {
+    const [{ createRoofs }, { addExtra }] = await Promise.all([import("./roofs.js"), import("./transit.js")]);
+    roofs = await createRoofs(map, {
+      url: `${BASE}tiles/katot`, version: TILE_VERSION, colorOf: buildingColor, isVisible: buildingShown,
+      visible: document.getElementById("buildings").checked,
+    });
+    addExtra(roofs.drawable);
+  } catch (err) {
+    console.warn("Kattoja ei saatu ladattua", err);
+  }
+}
+
+// Katto ei kuulu MapLibren 3D-rakennuksiin, joten sen rakennus haetaan tunnuksella.
+function pickRoof(point) {
+  const b = roofs?.pick(point);
+  if (!b) return null;
+  const [f] = map.querySourceFeatures("rakennukset", {
+    sourceLayer: "rakennukset", filter: ["==", ["to-string", ["get", "tunnus"]], b.tunnus],
+  });
+  return f ? { properties: f.properties, layer: { id: "rakennukset", type: "fill-extrusion" } } : null;
+}
+
 // Ohut uomaviiva osuu helpommin, kun klikkauksen ympäriltä haetaan muutaman pikselin alue.
 function pickStream(point) {
   if (!streams || !map.getLayer("purot") || map.getLayoutProperty("purot", "visibility") === "none") return null;
@@ -528,7 +591,7 @@ function formatValue(k, v) {
   }
   if (k === "korkeus" && typeof v === "number") return v.toFixed(1).replace(".", ",");
   if (typeof v === "number" && !Number.isInteger(v)) return v.toLocaleString("fi-FI", { maximumFractionDigits: 2 });
-  if (typeof v === "number" && k !== "vuosi" && Math.abs(v) >= 10000) return v.toLocaleString("fi-FI");
+  if (typeof v === "number" && k !== "vuosi" && k !== "tunnus" && Math.abs(v) >= 10000) return v.toLocaleString("fi-FI");
   return String(v);
 }
 
@@ -538,6 +601,8 @@ map.on("click", (e) => {
     .filter((l) => (l.id === "rakennukset" || l.id.includes("__")) && map.getLayoutProperty(l.id, "visibility") !== "none")
     .map((l) => l.id);
   const feats = map.queryRenderedFeatures(e.point, { layers: queryable });
+  const roof = pickRoof(e.point);
+  if (roof) feats.unshift(roof);
   // Rakennus tai pistemäinen kohde ennen sen alla olevia alueita.
   const rank = { "fill-extrusion": 0, circle: 1, line: 2, fill: 3 };
   feats.sort((a, b) => rank[a.layer.type] - rank[b.layer.type]);

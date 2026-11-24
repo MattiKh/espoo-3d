@@ -5,18 +5,21 @@ Käyttö:  python3 scripts/build_data.py [aineisto ...]
 
 Raakavastaukset tallentuvat kansioon cache/, joten ajon voi keskeyttää ja
 jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
-vektoritiilet kansioon public/tiles/ (tippecanoe). Selain tarvitsee kansiosta
+vektoritiilet kansioon public/tiles/ (tippecanoe); rakennusten katot ovat kansiossa
+public/tiles/katot. Selain tarvitsee kansiosta
 public/data/ vain tiedostot manifest.json, espoo_raja.geojson, kaupunginosat_nimet.geojson,
 sillat.json, raiteet.json ja lataus.json.
 """
 import collections
 import concurrent.futures as cf
+import gzip
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -710,6 +713,261 @@ def make_building_tiles(geojson_path):
     ]
     run_tippecanoe(cmd)
     log("  → tiles/rakennukset (z11–15)")
+
+
+# ---------------------------------------------------------------- katot
+
+# LOD0-mallissa rakennuksella on vain yksi korkeus, joten kaikki katot piirtyisivät tasakattoina.
+# Kaltevakattoisten rakennusten seinät piirretään räystään korkeuteen (ominaisuus raystas), ja
+# 3D-mallin (LOD2) kattopinnat sekä räystään yläpuoliset seinänosat (päätykolmiot, korkeampien
+# osien seinät) piirretään niiden päälle kolmioina (public/roofs.js).
+ROOF_CELL = 1500  # mercator-m (noin 750 m maastossa): 3D-malli haetaan näin suurissa ruuduissa
+ROOF_TILE_ZOOM = 14  # selaimen kattotiedostojen ruutujako (Web Mercator -tiilet, noin 1,2 km)
+ROOF_FLAT_NZ = math.cos(math.radians(10))  # tätä loivempi kattopinta on tasainen
+ROOF_MIN_PITCHED = 0.15  # katto piirretään, jos vähintään tämä osuus sen alasta on kaltevaa
+ROOF_MIN_AREA = 0.05  # m²: pienemmät kolmiot jätetään pois
+
+
+def build_roofs():
+    """Kaltevat katot 3D-mallista. Rakennus tunnistetaan rakennustunnuksesta. LOD2-pinnat on
+    CityGML:n tapaan kierretty ulospäin, joten kolmioiden kiertosuunta säilytetään (katot
+    käännetään silti aina ylöspäin). Tiedostot public/tiles/katot/14/x/y.bin (gzip) jakavat
+    rakennukset keskipisteen mukaan, ja index.json luettelee ne. Rakennusaineistoon lisätään
+    räystään korkeus, ja rakennustiilet tehdään uudelleen."""
+    log(f"katot ({LOD2_TYPE}), ruudut {ROOF_CELL} m")
+    path = os.path.join(OUT, "rakennukset.geojson")
+    with open(path, encoding="utf-8") as fh:
+        feats = json.load(fh)["features"]
+    targets = roof_targets(feats)
+    cells = sorted({(int(t["mx"] // ROOF_CELL), int(t["my"] // ROOF_CELL)) for t in targets.values()})
+    os.makedirs(os.path.join(CACHE, "lod2_ruudut"), exist_ok=True)
+
+    def fetch(cell):
+        x0, y0 = cell[0] * ROOF_CELL, cell[1] * ROOF_CELL
+        dest = os.path.join(CACHE, "lod2_ruudut", f"{cell[0]}_{cell[1]}.xml")
+        return http_get(ESPOO_WFS, espoo_params(LOD2_TYPE, bbox_filter(x0, y0, x0 + ROOF_CELL, y0 + ROOF_CELL)), dest, timeout=900)
+
+    roofs, flat = {}, set()
+    with cf.ThreadPoolExecutor(max_workers=3) as ex:  # maltillinen rinnakkaisuus palvelimen takia
+        for i, raw in enumerate(ex.map(fetch, cells), 1):
+            for tunnus, roof in parse_roofs(raw, targets):
+                if roof:
+                    roofs.setdefault(tunnus, roof)  # ruutujen rajalla olevat rakennukset tulevat kahdesti
+                else:
+                    flat.add(tunnus)
+            if i % 25 == 0 or i == len(cells):
+                log(f"  {i}/{len(cells)} ruutua: kaltevia kattoja {len(roofs)}, tasakattoja tai ilman kattopintoja {len(flat - set(roofs))}")
+    for f in feats:
+        roof = roofs.get(str(f["properties"].get("tunnus")))
+        if roof:
+            f["properties"]["raystas"] = roof["raystas"]
+    write_roof_tiles(roofs, targets)
+    make_building_tiles(write_geojson("rakennukset", feats))
+
+
+def roof_targets(feats):
+    """LOD0-rakennukset tunnuksittain: kärkipisteiden keskipiste (MapLibre nostaa 3D-rakennuksen
+    katon sen maastokorkeudelle), suurin korkeus, luokka ja valmistumisvuosi. Rekisteristä
+    täydennetyt rakennukset (arvio) puuttuvat 3D-mallista."""
+    acc = {}
+    for f in feats:
+        p = f["properties"]
+        if not p.get("tunnus") or p.get("arvio"):
+            continue
+        a = acc.setdefault(str(p["tunnus"]), {"sx": 0.0, "sy": 0.0, "n": 0, "korkeus": 0.0, "luokka": p.get("luokka"), "vuosi": p.get("vuosi")})
+        for poly in geom_polygons(f["geometry"]):
+            for x, y in poly[0][:-1]:
+                a["sx"] += x
+                a["sy"] += y
+                a["n"] += 1
+        a["korkeus"] = max(a["korkeus"], p.get("korkeus") or 0)
+    out = {}
+    for tunnus, a in acc.items():
+        if a["n"]:
+            lon, lat = a["sx"] / a["n"], a["sy"] / a["n"]
+            mx, my = lonlat_to_merc(lon, lat)
+            out[tunnus] = {"lon": lon, "lat": lat, "mx": mx, "my": my, "korkeus": a["korkeus"],
+                           "luokka": a["luokka"] or "muu", "vuosi": a["vuosi"]}
+    return out
+
+
+def parse_roofs(path, targets):
+    """Ruudun LOD2-tiedoston rakennukset: (tunnus, katto tai None tasakatolle)."""
+    for _, el in ET.iterparse(path):
+        if el.tag != BLDG + "Building":
+            continue
+        attrs = {a.get("name"): a.findtext(GEN + "value") for a in el.iter(GEN + "stringAttribute")}
+        tunnus = attrs.get("rakennustunnus")
+        if tunnus in targets:
+            yield tunnus, roof_mesh(el, targets[tunnus])
+        el.clear()
+
+
+def surface_rings(el, kind, t):
+    """Pintojen ulkoreunat metreinä rakennuksen keskipisteestä (x itään, y pohjoiseen, z N2000)."""
+    k = math.cos(math.radians(t["lat"]))  # Web Mercatorin metrit maaston metreiksi
+    out = []
+    for surface in el.iter(BLDG + kind):
+        for poly in surface.iter(GML + "Polygon"):
+            ring = poly.find(f"{GML}exterior/{GML}LinearRing")
+            pts = read_positions_3d(ring) if ring is not None else []
+            if len(pts) > 3 and pts[0] == pts[-1]:
+                pts = pts[:-1]
+            if len(pts) >= 3:
+                out.append([((x - t["mx"]) * k, (y - t["my"]) * k, z) for x, y, z in pts])
+    return out
+
+
+def roof_mesh(el, t):
+    """Räystään yläpuolinen osa rakennuksesta kolmioina tai None, jos katto on tasainen.
+    Kärkipisteet ovat desimetreinä (x, y keskipisteestä, z maanpinnasta), ja kukin pinta saa omat
+    kärkipisteensä, jotta selain voi varjostaa pinnat erikseen."""
+    roofs, walls = surface_rings(el, "RoofSurface", t), surface_rings(el, "WallSurface", t)
+    if not roofs or not walls:
+        return None
+    ground = min(z for r in surface_rings(el, "GroundSurface", t) or walls for _, _, z in r)
+    flat = slope = 0.0
+    for i, r in enumerate(roofs):
+        nx, ny, nz = newell(r)
+        if nz < 0:
+            roofs[i] = r[::-1]
+            nz = -nz
+        area = math.sqrt(nx * nx + ny * ny + nz * nz) / 2
+        if nz >= ROOF_FLAT_NZ * 2 * area:
+            flat += area
+        else:
+            slope += area
+    if slope < ROOF_MIN_PITCHED * (flat + slope):
+        return None
+    eave = min(z for r in roofs for _, _, z in r)
+    ground = min(ground, eave)  # esim. maanalaisen pysäköintitilan katto maanpinnan tasolla
+    if eave - ground > t["korkeus"] - 0.3:
+        return None  # LOD0-mallin mukaan räystään yläpuolella ei ole mitään
+    verts, tris = [], ([], [])
+    for kind, rings in ((0, roofs), (1, [clip_above(r, eave + 0.05) for r in walls])):
+        for ring in rings:
+            index = {}
+            for tri in triangulate(ring):
+                if triangle_area(*tri) < ROOF_MIN_AREA:
+                    continue
+                ids = []
+                for x, y, z in tri:
+                    key = (round(x * 10), round(y * 10), round((z - ground) * 10))
+                    if key not in index:
+                        index[key] = len(verts)
+                        verts.append(key)
+                    ids.append(index[key])
+                tris[kind].append(ids)
+    if not tris[0] or len(verts) > 65535 or any(abs(v) > 32767 for p in verts for v in p):
+        return None
+    return {"raystas": round(eave - ground, 1), "verts": verts, "katto": tris[0], "seinat": tris[1]}
+
+
+def newell(pts):
+    """Monikulmion normaali (pituus = kaksi kertaa pinta-ala)."""
+    nx = ny = nz = 0.0
+    for (x1, y1, z1), (x2, y2, z2) in zip(pts, pts[1:] + pts[:1]):
+        nx += (y1 - y2) * (z1 + z2)
+        ny += (z1 - z2) * (x1 + x2)
+        nz += (x1 - x2) * (y1 + y2)
+    return nx, ny, nz
+
+
+def triangle_area(a, b, c):
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    return math.sqrt((uy * vz - uz * vy) ** 2 + (uz * vx - ux * vz) ** 2 + (ux * vy - uy * vx) ** 2) / 2
+
+
+def clip_above(poly, zc):
+    """Monikulmion osa tason z = zc yläpuolella (Sutherland–Hodgman, kiertosuunta säilyy)."""
+    out = []
+    for i, a in enumerate(poly):
+        b = poly[(i + 1) % len(poly)]
+        if a[2] >= zc:
+            out.append(a)
+        if (a[2] >= zc) != (b[2] >= zc):
+            s = (zc - a[2]) / (b[2] - a[2])
+            out.append((a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1]), zc))
+    return out if len(out) >= 3 else []
+
+
+def triangulate(poly):
+    """Tasomaisen monikulmion kolmiot korvanleikkauksella. Monikulmio projisoidaan tasoon, jonka
+    normaalin suuntaa se on lähimpänä, niin että kolmioiden kiertosuunta säilyy."""
+    n = newell(poly)
+    ax = max(range(3), key=lambda i: abs(n[i]))
+    u, v = ((1, 2), (2, 0), (0, 1))[ax]
+    if n[ax] < 0:
+        u, v = v, u
+    p = [(q[u], q[v]) for q in poly]
+    cross = lambda a, b, c: (p[b][0] - p[a][0]) * (p[c][1] - p[a][1]) - (p[b][1] - p[a][1]) * (p[c][0] - p[a][0])
+
+    def inside(q, a, b, c):
+        return cross(a, b, q) >= 0 and cross(b, c, q) >= 0 and cross(c, a, q) >= 0
+
+    # Samalla suoralla olevat ja toistuvat pisteet pois (m²: kolmion ala lähes nolla).
+    idx = list(range(len(poly)))
+    i = 0
+    while len(idx) > 3 and i < len(idx):
+        if abs(cross(idx[i - 1], idx[i], idx[(i + 1) % len(idx)])) < 1e-4:
+            idx.pop(i)
+            i = max(0, i - 1)
+        else:
+            i += 1
+    tris = []
+    while len(idx) > 3:
+        reflex = [idx[i] for i in range(len(idx)) if cross(idx[i - 1], idx[i], idx[(i + 1) % len(idx)]) < 0]
+        for i in range(len(idx)):
+            a, b, c = idx[i - 1], idx[i], idx[(i + 1) % len(idx)]
+            if cross(a, b, c) <= 0 or any(inside(q, a, b, c) for q in reflex if q not in (a, b, c)):
+                continue
+            tris.append((a, b, c))
+            idx.pop(i)
+            break
+        else:
+            break  # rappeutunut monikulmio: loput jätetään pois
+    if len(idx) == 3 and cross(*idx) > 0:
+        tris.append(tuple(idx))
+    return [(poly[a], poly[b], poly[c]) for a, b, c in tris]
+
+
+def write_roof_tiles(roofs, targets):
+    """Katot tiilittäin pakattuina binääritiedostoina. Rakennus: tunnus (u8 pituus + UTF-8),
+    luokka (u8, index.json:n luokat), valmistumisvuosi (u16, 0 = ei tiedossa), keskipiste
+    (i32 lon, lat × 10⁷), korkeus ja räystäs (u16 dm), kärkipisteiden, kattokolmioiden ja
+    seinäkolmioiden määrät (u16), kärkipisteet (i16 x, y, z dm) ja kolmiot (u16)."""
+    root = os.path.join(TILES, "katot")
+    shutil.rmtree(root, ignore_errors=True)
+    n = 2 ** ROOF_TILE_ZOOM
+    classes = sorted({t["luokka"] for t in targets.values()})
+    groups = collections.defaultdict(list)
+    for tunnus, r in roofs.items():
+        t = targets[tunnus]
+        lat = math.radians(t["lat"])
+        tx = int((t["lon"] + 180) / 360 * n)
+        ty = int((1 - math.log(math.tan(lat) + 1 / math.cos(lat)) / math.pi) / 2 * n)
+        groups[(tx, ty)].append((tunnus, t, r))
+    size = 0
+    for (tx, ty), items in groups.items():
+        buf = bytearray(b"KAT1") + struct.pack("<I", len(items))
+        for tunnus, t, r in items:
+            name = tunnus.encode("utf-8")
+            buf += struct.pack("<B", len(name)) + name
+            dm = lambda v: min(65535, max(0, round(v * 10)))
+            buf += struct.pack("<BHiiHHHHH", classes.index(t["luokka"]), min(65535, max(0, t["vuosi"] or 0)),
+                               round(t["lon"] * 1e7), round(t["lat"] * 1e7), dm(t["korkeus"]),
+                               dm(r["raystas"]), len(r["verts"]), len(r["katto"]), len(r["seinat"]))
+            buf += struct.pack(f"<{3 * len(r['verts'])}h", *(v for p in r["verts"] for v in p))
+            buf += struct.pack(f"<{3 * (len(r['katto']) + len(r['seinat']))}H", *(i for tri in r["katto"] + r["seinat"] for i in tri))
+        path = os.path.join(root, str(ROOF_TILE_ZOOM), str(tx), f"{ty}.bin")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(gzip.compress(bytes(buf), 9))
+        size += os.path.getsize(path)
+    with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as fh:
+        json.dump({"zoom": ROOF_TILE_ZOOM, "luokat": classes, "tiilet": sorted(f"{x}/{y}" for x, y in groups)}, fh)
+    log(f"  → tiles/katot: {len(roofs)} kattoa, {len(groups)} tiiltä, {size / 1e6:.1f} Mt")
 
 
 def build_population():
@@ -1987,6 +2245,8 @@ def main():
         build_streams()
     if want("rakennukset"):
         build_buildings()
+    if want("rakennukset") or want("katot"):
+        build_roofs()  # lisää rakennuksiin räystään korkeuden ja tekee rakennustiilet uudelleen
     if want("kaupunginosat"):
         build_district_labels()  # rakennusten jälkeen: nimi sijoitetaan rakennusten keskelle
     if want("lataus"):

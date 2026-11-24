@@ -187,7 +187,7 @@ export const POPUP_TITLES = {
 };
 
 export const FIELD_LABELS = {
-  korkeus: "Korkeus (m)", kerrokset: "Kerroksia", vuosi: "Valmistunut", kaytto: "Käyttötarkoitus",
+  korkeus: "Korkeus (m)", raystas: "Räystäs (m)", kerrokset: "Kerroksia", vuosi: "Valmistunut", kaytto: "Käyttötarkoitus",
   asunnot: "Asuntoja", rakenne: "Kantava rakenne", tunnus: "Rakennustunnus", osoite: "Osoite",
   asukkaita: "Asukkaita", asumisvaljyys: "Asumisväljyys (m²/as.)",
   ika0_9: "0–9-vuotiaat", ika10_19: "10–19-vuotiaat", ika20_29: "20–29-vuotiaat", ika30_39: "30–39-vuotiaat",

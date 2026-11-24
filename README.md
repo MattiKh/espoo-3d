@@ -45,7 +45,9 @@ Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
 (`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json` ja
 raiteet tiedostoon `public/data/raiteet.json` ja sähköautojen latauspaikat pysäköintiruutuineen
-tiedostoon `public/data/lataus.json`. Tiilitykseen tarvitaan
+tiedostoon `public/data/lataus.json`. Rakennusten kaltevat katot tallentuvat kansioon
+`public/tiles/katot` (`python3 scripts/build_data.py katot`; ensimmäinen ajo lataa koko
+Espoon 3D-mallin, noin 2,5 Gt). Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
@@ -70,7 +72,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Aineisto | Lähde |
 |---|---|
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
-| Epäilyttävien korkeuksien korjaus (kattopinnat, LOD2) | Espoo WFS `bldg:building_lod2` |
+| Kaltevat katot ja epäilyttävien korkeuksien korjaus (kattopinnat, LOD2) | Espoo WFS `bldg:building_lod2` |
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
 | Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
@@ -125,6 +127,33 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
   (`GIS:Rakennukset`), ja niiden korkeus arvioidaan kerrosluvusta: arvona käytetään mallissa
   olevien saman kerrosluvun rakennusten mitattujen korkeuksien mediaania. Kohteen tiedoissa
   näkyy silloin "Korkeus (m, arvio)".
+
+## Katot
+
+LOD0-mallissa rakennuksella on vain yksi korkeus, joten 3D-rakennukset olisivat tasakattoisia
+laatikoita. Espoon tarkemmassa 3D-mallissa (LOD2) on jokaisen katon pinnat, mutta ei valmista
+kattotyyppiä (eikä sitä ole rakennusrekisterissäkään; OpenStreetMapissa kattomuoto on vain noin
+7 %:lla Espoon rakennuksista). `build_data.py katot` hakee mallin koko Espoon rakennuksille
+(653 noin 750 metrin ruutua, noin 2,4 Gt välimuistiin `cache/lod2_ruudut/`). Rakennukselle,
+jonka kattopinta-alasta vähintään 15 % on yli 10° kalteva, lasketaan
+
+- räystään korkeus: kattopintojen alin kohta maanpinnasta. Se lisätään rakennusaineistoon
+  (`raystas`), ja rakennuksen tiedoissa näkyy "Räystäs (m)".
+- kolmioverkko kattopinnoista ja räystään yläpuolisista seinänosista (päätykolmiot, korkeampien
+  osien seinät). Pintojen kiertosuunta säilytetään CityGML:n mukaisena (ulospäin), ja katot
+  käännetään aina ylöspäin.
+
+Kaltevia kattoja on 41 768; 18 425 rakennusta on tasakattoisia tai niiltä puuttuvat kattopinnat,
+ja ne näkyvät ennallaan. Verkot ovat tiilinä `public/tiles/katot/14/x/y.bin` (278 tiiltä,
+13 Mt, gzip-pakattu binääri; muoto on kuvattu `write_roof_tiles`-funktiossa).
+
+Selain (`public/roofs.js`) lataa lähikuvassa (zoom ≥ 13,5) näkymän keskipisteen ympäriltä
+tiilet enintään 2,5 km:n päästä ja piirtää katot joukkoliikenteen 3D-tasolla. Katto nostetaan
+rakennuksen keskipisteen maastokorkeudelle samoin kuin MapLibre nostaa 3D-rakennuksen.
+Ladattujen rakennusten seinät lasketaan räystään korkeuteen MapLibren feature-state-tilalla
+(`katto`), joten rakennus, jonka kattoa ei ole ladattu, näkyy LOD0-korkeudessaan. Katon väri
+seuraa rakennusten väritystä hieman tummempana, ilmakuvavuoden suodatus koskee myös kattoja,
+ja kattoa klikkaamalla saa rakennuksen tiedot.
 
 ## Joukkoliikenne reaaliajassa
 
@@ -293,5 +322,6 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
+- `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
