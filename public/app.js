@@ -260,7 +260,7 @@ function buildStyle() {
       // Kaltevakattoisen rakennuksen seinät räystääseen, kun sen katto on ladattu (roofs.js).
       "fill-extrusion-height": ["case", ["boolean", ["feature-state", "katto"], false],
         ["coalesce", ["get", "raystas"], ["get", "korkeus"]], ["get", "korkeus"]],
-      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 0.92],
+      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1], // läpinäkymättömät lähikuvassa
       "fill-extrusion-vertical-gradient": true,
     },
   });
