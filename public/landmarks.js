@@ -120,3 +120,49 @@ export const LANDMARK_MODELS = {
   haukilahden_vesitorni: haukilahdenVesitorni,
   otaniemen_vesitorni: otaniemenVesitorni,
 };
+
+// Maamerkki Espoon 3D-kaupunkimallista (LOD2) valokuvatekstuureineen (scripts/build_data.py,
+// build_landmarks). Geometria ladataan heti, tekstuurit vasta, kun maamerkki tulee lähelle
+// (transit.js kutsuu userData.loadTextures). Siihen asti pinnat ovat vaaleita (seinät) ja
+// tummempia (katot). Mallin origo ja korkeus tulevat tiedostosta.
+export function lod2Landmark(entry) {
+  const group = new THREE.Group();
+  const plain = [0x8b8e90, 0xd8d5ce].map((color) => new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  fetch(entry.lod2).then((r) => r.json()).then((data) => {
+    entry.lon = data.lon;
+    entry.lat = data.lat;
+    group.userData.anchor = data.korkeus * 0.7;
+    // Yksi verkko tekstuuria kohden; tekstuurittomat pinnat lajeittain (katto, seinä).
+    const parts = new Map();
+    for (const [img, kind, v, uv, tri] of data.pinnat) {
+      const key = img >= 0 ? img : `laji${kind}`;
+      if (!parts.has(key)) parts.set(key, { img, kind, pos: [], uv: [], idx: [] });
+      const p = parts.get(key), base = p.pos.length / 3;
+      for (const c of v) p.pos.push(c / 10);
+      for (const c of uv) p.uv.push(c / 10000);
+      for (const i of tri) p.idx.push(base + i);
+    }
+    const textured = [];
+    for (const p of parts.values()) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(p.pos, 3));
+      if (p.img >= 0) g.setAttribute("uv", new THREE.Float32BufferAttribute(p.uv, 2));
+      g.setIndex(p.idx);
+      g.computeVertexNormals();
+      const mesh = new THREE.Mesh(g, plain[p.kind]);
+      group.add(mesh);
+      if (p.img >= 0) textured.push([mesh, data.kuvat[p.img]]);
+    }
+    group.userData.loadTextures = () => {
+      group.userData.loadTextures = null;
+      const loader = new THREE.TextureLoader();
+      for (const [mesh, url] of textured) {
+        loader.load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          mesh.material = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }); // valaistus on kuvassa
+        });
+      }
+    };
+  }).catch((err) => console.warn("Maamerkin mallia ei saatu ladattua", entry.id, err));
+  return group;
+}

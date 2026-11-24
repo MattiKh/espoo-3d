@@ -293,6 +293,18 @@ piilotetaan 3D-rakennuksista:
   kierreportaan lieriö, viuhkamainen kattokerros, antennimittaustorni (huippu 52 m) ja piippu.
   Piipun paikka ja alaosan muoto on arvioitu valokuvista.
 
+Neljä tunnettua rakennusta piirretään kokonaan Espoon 3D-kaupunkimallin (LOD2) pinnoista
+valokuvatekstuureineen: Dipoli (Raili ja Reima Pietilä, 1966; 661 pintaa ja 192 tekstuuria),
+Suomen luontokeskus Haltia (Lahdelma & Mahlamäki, 2013), Keilaniemen torni eli Accountor Tower
+(1976) ja Tapiolan kirkko (Aarno Ruusuvuori, 1965). `build_data.py maamerkit` poimii
+rakennukset välimuistissa olevasta 3D-mallista (`LANDMARK_BUILDINGS`) tiedostoiksi
+`public/data/maamerkit/<id>.json`: pinnat kolmioina, tekstuurikoordinaatit ja kuvien osoitteet.
+Selain lataa geometrian heti ja tekstuurit (pieniä JPEG-kuvia Espoon karttapalvelusta, CORS
+sallittu) vasta, kun maamerkki on enintään 4 km:n päässä näkymän keskeltä zoomaustasolla 14
+tai lähempää. Valaistus on kuvissa, joten teksturoidut pinnat piirretään ilman varjostusta.
+Lisää maamerkkejä saa lisäämällä rakennustunnukset `LANDMARK_BUILDINGS`-luetteloon ja
+määrittelyn `layers.js`:n `LANDMARKS`-luetteloon.
+
 ## Sillat
 
 Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten ilmakuvan tie notkahti sillan

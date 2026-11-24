@@ -181,6 +181,27 @@ export const LANDMARKS = [
     id: "otaniemen_vesitorni", name: "Otaniemen vesitorni", lon: 24.819906, lat: 60.181197, building: "101572394U",
     rows: [["Valmistunut", "1972"], ["Arkkitehti", "Alvar Aalto"], ["Korkeus", "52 m"], ["Vesisäiliöt", "6 000 m³"]],
   },
+  // Espoon 3D-kaupunkimallin (LOD2) pinnoista valokuvatekstuureineen piirrettävät maamerkit
+  // (lod2: scripts/build_data.py, LANDMARK_BUILDINGS). building voi olla luettelo rakennuksista.
+  {
+    id: "dipoli", name: "Dipoli", lon: 24.8325532, lat: 60.1850541, building: "101562558J", lod2: "data/maamerkit/dipoli.json",
+    rows: [["Valmistunut", "1966"], ["Arkkitehdit", "Raili ja Reima Pietilä"], ["Nykyään", "Aalto-yliopiston päärakennus"]],
+  },
+  {
+    id: "haltia", name: "Suomen luontokeskus Haltia", lon: 24.5571574, lat: 60.2938653, building: ["1013191301", "1035754429"],
+    lod2: "data/maamerkit/haltia.json",
+    rows: [["Avattu", "2013"], ["Arkkitehdit", "Lahdelma & Mahlamäki"], ["Rakenne", "Puu (CLT-elementit)"]],
+  },
+  {
+    id: "keilaniemen_torni", name: "Keilaniemen torni (Accountor Tower)", lon: 24.8308043, lat: 60.1749368,
+    building: ["101572454S", "101572455T"], lod2: "data/maamerkit/keilaniemen_torni.json",
+    rows: [["Valmistunut", "1976"], ["Tunnetaan myös", "Neste-torni, Raaden hammas, Fortum-torni"], ["Huipulla", "Ravintola Lucy in the Sky"]],
+  },
+  {
+    id: "tapiolan_kirkko", name: "Tapiolan kirkko", lon: 24.8091153, lat: 60.1776209, building: "1008940880",
+    lod2: "data/maamerkit/tapiolan_kirkko.json",
+    rows: [["Valmistunut", "1965"], ["Arkkitehti", "Aarno Ruusuvuori"]],
+  },
 ];
 
 // Ponnahdusikkunan otsikot ja kenttien nimet tutuimmille tasoille.

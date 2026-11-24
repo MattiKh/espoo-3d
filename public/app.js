@@ -366,7 +366,8 @@ function setOrthoYear(index) {
 function buildingFilter() {
   const year = ORTHO_YEARS[state.orthoIndex][0];
   const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
-  const filter = ["all", ...LANDMARKS.map((l) => ["!=", ["get", "tunnus"], l.building])];
+  // Tunnus on tiilissä numero tai merkkijono, joten verrataan merkkijonoina.
+  const filter = ["all", ...LANDMARKS.flatMap((l) => [l.building].flat().map((id) => ["!=", ["to-string", ["get", "tunnus"]], String(id)]))];
   if (state.ortho && year < latest) filter.push(["has", "vuosi"], ["<=", ["get", "vuosi"], year]);
   if (detail) filter.push(["<", ["distance", { type: "Point", coordinates: [detail.lon, detail.lat] }], detail.radius]);
   return filter;
@@ -562,7 +563,7 @@ function interpolateColor(stops, v) {
 
 // Sama ehto kuin buildingFilter: maamerkit piiloon, vanhoilla ilmakuvilla vain silloin valmiit.
 function buildingShown(b) {
-  if (LANDMARKS.some((l) => String(l.building) === b.tunnus)) return false;
+  if (LANDMARKS.some((l) => [l.building].flat().map(String).includes(b.tunnus))) return false;
   const year = ORTHO_YEARS[state.orthoIndex][0], latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
   return !(state.ortho && year < latest) || (b.vuosi != null && b.vuosi <= year);
 }

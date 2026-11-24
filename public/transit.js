@@ -8,7 +8,7 @@ import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
-import { LANDMARK_MODELS } from "./landmarks.js";
+import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
 const RAIL_MQTT_URL = "wss://rata.digitraffic.fi:443/mqtt";
@@ -1788,14 +1788,20 @@ function chargeContent(car) {
 
 // ------------------------------------------------------------ maamerkit
 
+// Maamerkin malli on joko käsin tehty (landmarks.js) tai Espoon 3D-kaupunkimallista (lod2), jolloin
+// malli voi päivittää maamerkin paikan ladattuaan.
 const landmarks = LANDMARKS.map((l) => {
-  const build = LANDMARK_MODELS[l.id];
+  const build = LANDMARK_MODELS[l.id] ?? (l.lod2 ? lod2Landmark : null);
   if (!build) return null;
-  const obj = build();
-  obj.matrixAutoUpdate = false;
-  scene.add(obj);
-  return { ...l, isLandmark: true, obj, screen: null };
+  const entry = { ...l, isLandmark: true, obj: null, screen: null };
+  entry.obj = build(entry);
+  entry.obj.matrixAutoUpdate = false;
+  scene.add(entry.obj);
+  return entry;
 }).filter(Boolean);
+
+const LANDMARK_TEXTURE_ZOOM = 14; // 3D-kaupunkimallin tekstuurit ladataan tätä lähempää
+const LANDMARK_TEXTURE_DIST = 4000; // m näkymän keskipisteestä
 
 // Maamerkit näkyvät samalta etäisyydeltä kuin 3D-rakennukset.
 function drawLandmarks(map, ctx) {
@@ -1809,7 +1815,9 @@ function drawLandmarks(map, ctx) {
     const wz = (map.queryTerrainElevation([l.lon, l.lat]) ?? 0) * k;
     l.obj.matrix.makeScale(k, k, k).setPosition(wx, wy, wz);
     l.obj.matrixWorldNeedsUpdate = true;
-    l.screen = toScreen(e, wx, wy, wz + 40 * k, W, H);
+    l.screen = toScreen(e, wx, wy, wz + (l.obj.userData.anchor ?? 40) * k, W, H);
+    const loadTextures = l.obj.userData.loadTextures;
+    if (loadTextures && zoom >= LANDMARK_TEXTURE_ZOOM && Math.hypot(wx, wy) < LANDMARK_TEXTURE_DIST) loadTextures();
   }
 }
 
