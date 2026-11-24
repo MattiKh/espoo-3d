@@ -1881,22 +1881,22 @@ function anchorOf(sel, now) {
 
 const pts = new Float64Array(64), ptsZ = new Float64Array(32);
 
-// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla on
-// lähikuvassa 3D-laatta (decks.js) ja kauempana kannen tasolle nostettu korkeusmalli (bridges.js);
-// kannen korkeus otetaan laatan pinnasta tai lähimmästä siltaviivasta. Ajoneuvo pysyy kannella,
-// jos se tuli sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva
-// ajoneuvo pysyy alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
+// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla on joko
+// kannen tasolle täytetty korkeusmalli (bridges.js), jonka alla on alkuperäinen maanpinta, tai
+// lähikuvassa korkea jänne 3D-laattana (decks.js). Ajoneuvo pysyy kannella, jos se tuli sillalle
+// kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo pysyy alla olevan
+// tien tasolla. prev on saman kohdan edellinen korkeus.
 function groundAt(v, x, y, prev, centerElev, exag) {
   const lon = lonOf(x), lat = latOf(y);
   const dem = (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
   if (KINDS[v.kind].underground) return dem;
-  const deck = deckSurfaceAt(lon, lat) ?? deckHeightAt(lon, lat);
-  if (deck == null) return dem;
-  const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag, top = deck * exag;
-  if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
+  const slab = deckSurfaceAt(lon, lat), rawM = rawElevationAt(lon, lat);
+  if (slab == null && rawM == null) return dem;
+  const top = slab == null ? dem : Math.max(dem, slab * exag); // täytetyssä kohdassa maasto on kannen pinta
+  const raw = rawM == null ? dem : rawM * exag;
+  if (top < raw + 0.5) return dem;
   const from = prev ?? approachElevation(v, centerElev);
-  if (Math.abs(from - top) >= Math.abs(from - raw)) return raw; // sillan alla
-  return Math.max(dem, top); // kannella (laatan pinta tai kannen tasolle nostettu maasto)
+  return Math.abs(from - top) >= Math.abs(from - raw) ? raw : top; // sillan alla tai kannella
 }
 
 // Maanpinnan korkeus siinä reitin kohdassa, josta ajoneuvo tuli sillalle.

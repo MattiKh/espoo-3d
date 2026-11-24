@@ -93,10 +93,16 @@ STRIP_REACH = 40  # m: kaistaleen leveys enintään
 # m: kaistaleen reunojen korkeusero enintään. Siltaviiva on usein reunapalkin päällä metrin tai
 # puolitoista ajoradan reunaa ylempänä; sillan alittava tie on yleensä vähintään neljä metriä alempana.
 STRIP_DZ = 2.0
-STRIP_DECK = 20  # m: kaistale otetaan mukaan, jos näin lähellä on siltaviiva samalla korkeudella (STRIP_DZ)
+STRIP_DECK = 30  # m: kaistale otetaan mukaan, jos näin lähellä on siltaviiva samalla korkeudella (STRIP_DZ)
 # Siltaviivan ja ajoradan reunan väli (reunapalkki, kaide, jalkakäytävä) on kantta, vaikka siinä ei
 # kulje tietä, kun se on enintään näin leveä (m).
 STRIP_EDGE = 8
+# Raiteiden keskilinjat korkeuksineen (kantakartta) täyttävät korkeusmallin kuopat raiteilla (esim.
+# siltojen päissä, joista korkeusmallissa on poistettu penkereen pää). Raiteelle tehdään kaistale.
+RAIL_TYPE = "kanta:Raide"
+RAIL_HALF = 7.0  # m: kaistaleen puolileveys: raide (selain: 1,6 m) ja sen penkereen luiskat
+RAIL_STEP = 5.0  # m: kaistaleen pisteväli
+RAIL_SMOOTH = 10.0  # m: korkeus mediaanina näin pitkältä kummaltakin puolelta (mittausten hajonta)
 # 3D-malli kattomuotoineen. Raskas, joten sitä haetaan vain rakennuksille, joiden korkeus
 # LOD0-mallissa on epäilyttävä (ks. fix_heights).
 LOD2_TYPE = "bldg:building_lod2"
@@ -1241,12 +1247,13 @@ def build_bridges():
         line[:] = [round(v, 6) for v in line]
     kannet = bridge_decks(viivat)
     kaistat = bridge_strips(viivat, bridge_road_edges(viivat), bridge_osm_roads(viivat))
+    raiteet = rail_strips()
     path = os.path.join(PUBLIC_DATA, "sillat.json")
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla), tiet © OpenStreetMap",
-                   "viivat": viivat, "kannet": kannet, "kaistat": kaistat}, fh, separators=(",", ":"))
+        json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla, Raide), tiet © OpenStreetMap",
+                   "viivat": viivat, "kannet": kannet, "kaistat": kaistat, "raiteet": raiteet}, fh, separators=(",", ":"))
     log(f"  → sillat.json: {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, "
-        f"{os.path.getsize(path) / 1e6:.2f} Mt")
+        f"{len(raiteet)} raidetta, {os.path.getsize(path) / 1e6:.2f} Mt")
 
 
 def bridge_decks(viivat):
@@ -1463,6 +1470,52 @@ def bridge_strips(viivat, edges, osm):
                     keep = sorted(set(simplify_indices([p[:2] for p in a], 0.3)) | set(simplify_indices([p[:2] for p in b], 0.3)))
                     strips.append([[v for k in keep for v in to_ll(a[k])], [v for k in keep for v in to_ll(b[k])]])
                 run = [(s, m[side])] if s and side in m else []
+    return strips
+
+
+def rail_strips():
+    """Raiteiden kaistaleet kuten bridge_strips: keskilinjan molemmin puolin RAIL_HALF metriä,
+    pisteet RAIL_STEP metrin välein ja korkeus mediaanina (RAIL_SMOOTH). Maan alla kulkevat
+    raiteet (metro) eivät muuta mitään, sillä selain nostaa maastoa vain kaistaleen alapuolelta."""
+    lines, seen = [], set()
+    for path in fetch_tiled(RAIL_TYPE, "kanta_raiteet"):
+        for _, el in ET.iterparse(path):
+            if local(el.tag) != "Raide":
+                continue
+            if el.get(GML + "id") not in seen:  # sama raide voi tulla useasta ruudusta
+                seen.add(el.get(GML + "id"))
+                for ls in el.iter(GML + "LineString"):
+                    pts = [(*stream_xy(*merc_to_lonlat(x, y)), z) for x, y, z in read_positions_3d(ls) if z]
+                    if len(pts) >= 2:
+                        lines.append(pts)
+            el.clear()
+    to_ll = lambda x, y, z: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6), round(z, 1)]
+    strips = []
+    for pts in lines:
+        s = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        if s[-1] < RAIL_STEP:
+            continue
+        a, b = [], []
+        n = int(s[-1] // RAIL_STEP) + 1
+        for k in range(n + 1):
+            t, i = min(k * RAIL_STEP, s[-1]), 0
+            i = max(0, min(len(pts) - 2, next((j for j in range(len(s) - 1) if s[j + 1] >= t), len(pts) - 2)))
+            f = (t - s[i]) / (s[i + 1] - s[i]) if s[i + 1] > s[i] else 0.0
+            x = pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f
+            y = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f
+            z = sorted(p[2] for p, sp in zip(pts, s) if abs(sp - t) <= RAIL_SMOOTH)
+            z = z[len(z) // 2] if z else pts[i][2]
+            ux, uy = pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]
+            ln = math.hypot(ux, uy) or 1.0
+            a.append((x - uy / ln * RAIL_HALF, y + ux / ln * RAIL_HALF, z, t))
+            b.append((x + uy / ln * RAIL_HALF, y - ux / ln * RAIL_HALF, z, t))
+        # Suorilta ja tasaisilta osuuksilta pisteet pois (sijainti 0,3 m ja korkeus 0,1 m tarkkuudella).
+        keep = sorted(set(simplify_indices([p[:2] for p in a], 0.3)) | set(simplify_indices([p[:2] for p in b], 0.3))
+                      | set(simplify_indices([(p[3], p[2]) for p in a], 0.1)))
+        strips.append([[v for k in keep for v in to_ll(*a[k][:3])], [v for k in keep for v in to_ll(*b[k][:3])]])
+    log(f"  raiteet: {len(lines)} keskilinjaa, {sum(len(x[0]) // 3 for x in strips)} pistettä")
     return strips
 
 
