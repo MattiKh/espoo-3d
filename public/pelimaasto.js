@@ -2,6 +2,8 @@
 // korkeusluokittain, pellot, tiet, vesi, ...) ovat valmiina rasteriruutuina (scripts/build_data.py,
 // public/tiles/maanpeite). Selain maalaa niistä työsäikeessä (pelimaasto_worker.js) tekstuurit, ja
 // MapLibre levittää ne maaston päälle kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
+// Päällä ovat kantakartan teiden ja polkujen reunaviivat sekä kadunnimet kantakartan sijainnein
+// ja suunnin (public/data/pelimaasto_kanta.geojson).
 // Metsiin sijoitellaan kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
 // (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
@@ -13,6 +15,7 @@ const TREE_MOVE = 150; // m: puut sijoitellaan uudelleen, kun keskipiste siirtyy
 const TREE_MAX = 40000;
 const HEIGHT_BUDGET = 2500; // maaston korkeuskyselyä piirtokertaa kohden
 const HEIGHT_RECHECK = 5000; // ms: korkeudet tarkistetaan kerran uudelleen (korkeusmalli tarkentuu)
+const LAYER_IDS = ["pelimaasto", "pelimaasto-varjostus", "pelimaasto-reunat", "pelimaasto-polut", "pelimaasto-nimet"];
 
 const mercX = (lon) => (lon + 180) / 360;
 const mercY = (lat) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2)) / Math.PI) / 2;
@@ -73,6 +76,32 @@ export async function createGameTerrain(map, { base, version }) {
       "hillshade-exaggeration": 0.45, "hillshade-shadow-color": "#1d2b1c", "hillshade-highlight-color": "#fff6d8",
       "hillshade-accent-color": "#263524",
     },
+  }, before);
+  map.addSource("pelimaasto-kanta", { type: "geojson", data: `${base}data/pelimaasto_kanta.geojson?v=${version}`, attribution: "Kantakartta © Espoon kaupunki" });
+  const edgeWidth = ["interpolate", ["exponential", 2], ["zoom"], 15, 0.5, 18, 2, 20, 5];
+  map.addLayer({
+    id: "pelimaasto-reunat", type: "line", source: "pelimaasto-kanta", minzoom: 15,
+    filter: ["all", ["==", ["geometry-type"], "LineString"], ["!=", ["get", "k"], "polku"]],
+    layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": ["match", ["get", "k"], "ajorata", "#f3f0e4", "#e2d9c0"], "line-width": edgeWidth, "line-opacity": 0.9 },
+  }, before);
+  map.addLayer({
+    id: "pelimaasto-polut", type: "line", source: "pelimaasto-kanta", minzoom: 15,
+    filter: ["all", ["==", ["geometry-type"], "LineString"], ["==", ["get", "k"], "polku"]],
+    layout: { visibility: "none", "line-cap": "round" },
+    paint: { "line-color": "#d9c9a0", "line-width": edgeWidth, "line-dasharray": [2, 2], "line-opacity": 0.9 },
+  }, before);
+  // Nimet maaston pintaan kuten kantakartassa; rakennukset peittävät ne, joten ne ovat rakennusten alla.
+  const size = (small, medium, large) => ["match", ["get", "koko"], "suuri", large, "keskikokoinen", medium, small];
+  map.addLayer({
+    id: "pelimaasto-nimet", type: "symbol", source: "pelimaasto-kanta", minzoom: 15.5,
+    filter: ["==", ["geometry-type"], "Point"],
+    layout: {
+      visibility: "none", "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"], "text-letter-spacing": 0.04,
+      "text-size": ["interpolate", ["exponential", 2], ["zoom"], 16, size(9, 11, 13), 19, size(24, 30, 36)],
+      "text-rotate": ["get", "kulma"], "text-rotation-alignment": "map", "text-pitch-alignment": "map",
+    },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(28, 38, 28, 0.85)", "text-halo-width": 1.4 },
   }, before);
 
   const group = new THREE.Group();
@@ -167,7 +196,7 @@ export async function createGameTerrain(map, { base, version }) {
 
   function setVisible(on) {
     visible = on;
-    for (const id of ["pelimaasto", "pelimaasto-varjostus"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+    for (const id of LAYER_IDS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
     // Lähemmäs, jotta tekstuurit ja puut (TREE_MINZOOM) näkyvät heti.
     const here = map.getCenter().toArray(), inside = inArea(here);
     if (on && (!inside || map.getZoom() < TREE_MINZOOM + 0.5)) {

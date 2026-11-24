@@ -44,7 +44,8 @@ sähköautot näkyvät latauspaikoillaan.
   kuvan sijaan tai hylkää yhteydet hetkeksi. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin
   päästä; muuten ruutu jäisi virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva
   tarkentuisi.
-- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (Otaniemi–Laajalahti, ks. alla).
+- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (Otaniemi–Laajalahti, ks. alla). Pohjana on
+  joko ilmakuva tai pelillinen maasto: pelillisen maaston alle ei ladata ilmakuvaa.
 - Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
   ruutujen välissä vaaleana rakona. Ilmakuvan alla tausta on siksi ilmakuvan keskisävyinen
   harmaa, joten raot ja kuvauksen reunat eivät erotu. (Ruutujen haku suurempana ja reunojen
@@ -114,6 +115,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Espoonjoen virtaama (päiväarvot 1995 alkaen) | Syke, hydrologiarajapinta (CC BY 4.0) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
 | Maanpeiteluokat (pelillinen maasto) | HSY:n maanpeiteaineisto 2024, WMS |
+| Teiden reunaviivat ja kadunnimet (pelillinen maasto) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`, `kanta:Polku`, `kanta:Paikannimi` |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
@@ -487,6 +489,12 @@ koordinaateista, joten ne jatkuvat ruudusta toiseen, ja luokkarajat ovat hieman 
 lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle kuten ilmakuvan
 (tasot 14–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
 Ruudun maalaus vie työsäikeessä 13–50 ms.
+
+Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja polkujen reunaviivat
+(myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
+(`public/data/pelimaasto_kanta.geojson`, 11 540 viivaa ja 455 nimeä, 3 Mt). Nimet ovat maaston
+pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
+luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja alueen ulkopuoli on vihertävän harmaa.
 
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti

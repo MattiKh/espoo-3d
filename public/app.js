@@ -66,6 +66,7 @@ const ORTHO_RETRY = [1000, 3000, 8000]; // ms
 // Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin. Ilmakuvan alla tausta on
 // siksi ilmakuvan keskisävyinen harmaa, jottei rako näy vaaleana (myös kuvauksen ulkopuoliset alueet).
 const ORTHO_BACKGROUND = "#868b84";
+const GAME_BACKGROUND = "#a9b995"; // pelillisen maaston ulkopuoli
 const orthoInflight = new Map();
 const orthoPrefetched = new Set();
 let orthoQueue = [], orthoActive = 0;
@@ -229,7 +230,10 @@ async function refreshRadar() {
 let detail = null; // { lon, lat, radius }: 3D-rakennusten ja kattojen alue lähikuvassa (updateDetail)
 
 const state = {
-  ortho: true, // ilmakuva on oletuspohja, mutta sen voi ottaa pois
+  // Ilmakuva on oletuspohja, mutta sen voi ottaa pois. Osoite ?peli avaa pelillisen maaston
+  // (kokeilu) ilmakuvan sijaan, joten ilmakuvaa ei silloin ladata alussakaan.
+  ortho: !new URLSearchParams(location.search).has("peli"),
+  game: false,
   orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
@@ -451,17 +455,27 @@ function setVisible(def, on) {
 
 function setOrtho(on) {
   state.ortho = on;
+  document.getElementById("ortho").checked = on;
   map.setLayoutProperty("ortho", "visibility", on ? "visible" : "none");
-  map.setPaintProperty("tausta", "background-color", on ? ORTHO_BACKGROUND : "#dfe6e9");
+  updateBackground();
   prefetchOrtho();
   document.getElementById("ortho-options").hidden = !on;
   applyTimeFilter();
 }
 
-// Pelillinen maasto (kokeilu, pelimaasto.js) ladataan vasta, kun se valitaan.
+function updateBackground() {
+  map.setPaintProperty("tausta", "background-color", state.ortho ? ORTHO_BACKGROUND : state.game ? GAME_BACKGROUND : "#dfe6e9");
+}
+
+// Pelillinen maasto (kokeilu, pelimaasto.js) ladataan vasta, kun se valitaan. Pohjana on joko
+// ilmakuva tai pelillinen maasto, joten pelillisen maaston alle ei ladata ilmakuvaa.
 let gameTerrain = null;
 
 async function setGameTerrain(on) {
+  state.game = on;
+  document.getElementById("pelimaasto").checked = on;
+  if (on && state.ortho) setOrtho(false);
+  updateBackground();
   if (on && !gameTerrain) {
     try {
       const [{ createGameTerrain }, { addExtra }] = await Promise.all([import("./pelimaasto.js"), import("./transit.js")]);
@@ -473,6 +487,7 @@ async function setGameTerrain(on) {
     }
   }
   gameTerrain?.setVisible(on);
+  if (!on && !state.ortho) setOrtho(true);
 }
 
 function setOrthoYear(index) {
@@ -577,7 +592,7 @@ function buildPanel() {
 
   const ortho = document.getElementById("ortho");
   ortho.checked = state.ortho;
-  ortho.addEventListener("change", () => setOrtho(ortho.checked));
+  ortho.addEventListener("change", () => (ortho.checked && state.game ? setGameTerrain(false) : setOrtho(ortho.checked)));
   document.getElementById("ortho-options").hidden = !state.ortho;
   const game = document.getElementById("pelimaasto");
   game.addEventListener("change", () => setGameTerrain(game.checked));

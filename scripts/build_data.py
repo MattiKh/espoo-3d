@@ -2021,6 +2021,66 @@ def build_landcover():
         json.dump({"lahde": "HSY, Helsingin seudun maanpeiteaineisto 2024", "luokat": LANDCOVER_CLASSES,
                    "taso": LANDCOVER_ZOOM, "alue": [lon0, lat0, lon1, lat1]}, fh, ensure_ascii=False)
     log(f"  → tiles/maanpeite: {len(tiles)} ruutua, {total / 1e6:.1f} Mt")
+    build_landcover_lines(lonlat_to_merc(lon0, lat0) + lonlat_to_merc(lon1, lat1))
+
+
+# Pelillisen maaston päälle kantakartan teiden reunaviivat ja kadunnimet (sama alue).
+LANDCOVER_LINE_TYPES = {"kanta:Liikennevayla": "ajorata", "kanta:Kevyenliikenteenvayla": "kevyt", "kanta:Polku": "polku"}
+LANDCOVER_CELL = 2000  # Web Mercator -yksikköä: haku ruuduittain
+
+
+def build_landcover_lines(bbox):
+    """Kantakartan ajoratojen, kevyen liikenteen väylien ja polkujen reunaviivat sekä kadunnimet
+    (Paikannimi, luokka väylännimi: kartan tekstin sijainti, suunta ja koko) pelillisen maaston
+    alueelta tiedostoon public/data/pelimaasto_kanta.geojson. Viivat yksinkertaistetaan 0,15 metrin
+    tarkkuuteen. Nimen suunta on kantakartassa suuntakulma pohjoisesta myötäpäivään; MapLibren
+    kierto on myötäpäivään vaakatasosta, ja nimi käännetään aina luettavaksi (enintään 90°)."""
+    x0, y0, x1, y1 = bbox
+    cells = [(x, y, min(x + LANDCOVER_CELL, x1), min(y + LANDCOVER_CELL, y1))
+             for x in range(int(x0), int(x1), LANDCOVER_CELL) for y in range(int(y0), int(y1), LANDCOVER_CELL)]
+    to_ll = lambda x, y: [round(v, 6) for v in merc_to_lonlat(x, y)]
+    features, seen = [], set()
+    for type_name in [*LANDCOVER_LINE_TYPES, "kanta:Paikannimi"]:
+        os.makedirs(os.path.join(CACHE, "pelimaasto"), exist_ok=True)
+        fetch = lambda c: http_get(ESPOO_WFS, espoo_params(type_name, bbox_filter(*c)),
+                                   os.path.join(CACHE, "pelimaasto", f"{type_name.split(':')[1]}_{c[0]}_{c[1]}.xml"), timeout=600)
+        with cf.ThreadPoolExecutor(max_workers=2) as ex:
+            paths = list(ex.map(fetch, cells))
+        for path in paths:
+            for _, el in ET.iterparse(path):
+                if local(el.tag) != type_name.split(":")[1]:
+                    continue
+                fid = el.get(GML + "id")
+                if fid in seen:  # sama kohde voi tulla useasta ruudusta
+                    el.clear()
+                    continue
+                seen.add(fid)
+                if type_name == "kanta:Paikannimi":
+                    if el.findtext(f"{{*}}luokka") == "väylännimi" and el.findtext("{*}nimi"):
+                        label = el.find(".//{*}siirtymasijainti//" + GML + "Point")
+                        if label is None:
+                            label = el.find(".//{*}referenssipiste//" + GML + "Point")
+                        pos = read_positions(label) if label is not None else []
+                        if pos:
+                            angle = math.degrees(float(el.findtext(".//{*}suunta") or 0)) - 90
+                            angle = (angle + 90) % 180 - 90  # luettavaksi
+                            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": to_ll(*pos[0])},
+                                             "properties": {"nimi": el.findtext("{*}nimi"), "kulma": round(angle, 1),
+                                                            "koko": el.findtext("{*}kokoluokka") or "pieni"}})
+                else:
+                    for ls in el.iter(GML + "LineString"):
+                        pts = read_positions(ls)
+                        if len(pts) < 2:
+                            continue
+                        keep = simplify_indices([(x * 0.497, y * 0.497) for x, y in pts], 0.15)  # Web Mercator → noin metrit
+                        features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
+                                         "geometry": {"type": "LineString", "coordinates": [to_ll(*pts[k]) for k in keep]}})
+                el.clear()
+    path = os.path.join(PUBLIC_DATA, "pelimaasto_kanta.geojson")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"type": "FeatureCollection", "features": features}, fh, ensure_ascii=False, separators=(",", ":"))
+    names = sum(f["geometry"]["type"] == "Point" for f in features)
+    log(f"  → pelimaasto_kanta.geojson: {len(features) - names} viivaa, {names} kadunnimeä, {os.path.getsize(path) / 1e6:.1f} Mt")
 
 
 def build_district_labels():
