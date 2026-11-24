@@ -1341,13 +1341,15 @@ def bridge_road_edges(viivat):
 
 
 def bridge_osm_roads(viivat):
-    """OpenStreetMapin tiet ja väylät siltojen ympäriltä janoina paikallisina metreinä."""
+    """OpenStreetMapin tiet, väylät ja raiteet (esim. raitiotiesillat) siltojen ympäriltä janoina
+    paikallisina metreinä."""
     boxes = []
     for x0, y0, x1, y1 in bridge_cells(viivat).values():
         (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
-        boxes.append(f'way["highway"]({s:.5f},{w:.5f},{n:.5f},{e:.5f});')
+        bbox = f"({s:.5f},{w:.5f},{n:.5f},{e:.5f});"
+        boxes.append('way["highway"]' + bbox + 'way["railway"~"^(rail|tram|light_rail|subway|narrow_gauge)$"]' + bbox)
     query = "[out:json][timeout:300];(" + "".join(boxes) + ");out geom;"
-    with open(overpass_post(query, os.path.join(CACHE, "sillat_osm.json")), encoding="utf-8") as fh:
+    with open(overpass_post(query, os.path.join(CACHE, "sillat_vaylat.json")), encoding="utf-8") as fh:
         ways = [el for el in json.load(fh)["elements"] if el["type"] == "way"]
     return [(stream_xy(a["lon"], a["lat"]), stream_xy(b["lon"], b["lat"])) for w in ways
             for a, b in zip(w["geometry"], w["geometry"][1:])]
@@ -1358,7 +1360,7 @@ def bridge_strips(viivat, edges, osm):
     näytteelle haetaan lähin samansuuntainen viiva kummaltakin puolelta (3–STRIP_REACH m). Jos se
     on samalla korkeudella (STRIP_DZ), niiden väli on ajoratapintaa; muuten (esim. alla kulkevan
     tien reuna) kaistaletta ei tule. Kaistaleen keskellä tai reunalla on oltava samansuuntainen
-    OSM:n tie, jottei kahden eri tien välistä luiskaa tai rinnakkaisten siltojen väliä täytetä;
+    OSM:n tie tai raide, jottei kahden eri tien välistä luiskaa tai rinnakkaisten siltojen väliä täytetä;
     siltaviivan ja ajoradan reunan välinen kapea kaista (STRIP_EDGE) kelpaa ilmankin.
     Mukaan otetaan vain kannen tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään
     STRIP_DECK metrin päässä); muut, kuten sillan alittavat tiet, eivät nostaisi mitään. Tasaisella

@@ -354,8 +354,9 @@ myös kantakartan ajoväylien ja kevyen liikenteen väylien reunaviivat (`kanta:
 lähin samansuuntainen viiva kummaltakin puolelta: jos se on samalla korkeudella (enintään kahden
 metrin ero, sillä siltaviiva on usein reunapalkin päällä ajorataa ylempänä), väli on kantta ja
 siitä tulee kaistale. Alla kulkevan tien reuna on metrejä alempana, joten kaistale ei peitä sitä.
-Kaistaleen kohdalla on lisäksi oltava samansuuntainen OpenStreetMapin tie, jottei kahden tien
-välistä luiskaa tai rinnakkaisten siltojen väliä täytetä; siltaviivan ja ajoradan reunan välinen
+Kaistaleen kohdalla on lisäksi oltava samansuuntainen OpenStreetMapin tie tai raide (esim.
+Raide-Jokerin kaareva silta Kehä I:n yli Laajalahdessa), jottei kahden tien välistä luiskaa tai
+rinnakkaisten siltojen väliä täytetä; siltaviivan ja ajoradan reunan välinen
 enintään 8 metrin kaista (reunapalkki, jalkakäytävä) kelpaa ilmankin. Mukaan otetaan vain kannen
 tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään 20 metrin päässä).
 
