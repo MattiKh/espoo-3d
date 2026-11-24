@@ -1205,6 +1205,28 @@ def build_boundary():
     write_geojson("espoo_raja", feats, PUBLIC_DATA)
 
 
+def build_kauniainen():
+    """Kauniaisen raja ja nimen paikka kartalle. Tilastokeskuksen 1:1 000 000 -raja on karkea
+    (11 pistettä), joten raja otetaan HSY:n seutukartasta, joka osuu Espoon kaupunginosarajoihin
+    muutaman metrin tarkkuudella. Nimi sijoitetaan alueen sisälle kauimmaksi reunoista."""
+    log("Kauniainen (HSY:n seutukartan kuntaraja)")
+    params = {
+        "service": "WFS", "version": "2.0.0", "request": "GetFeature", "outputFormat": "application/json",
+        "typeNames": "taustakartat_ja_aluejaot:seutukartta_kunta_2021", "srsName": "EPSG:4326",
+    }
+    raw = http_get(HSY_WFS, params, os.path.join(CACHE, "hsy_kunnat.json"))
+    with open(raw, encoding="utf-8") as fh:
+        f = next(f for f in json.load(fh)["features"] if f["properties"].get("nimi") == "Kauniainen")
+    polys = geom_polygons(f["geometry"])
+    coords = [[[[round(x, 6), round(y, 6)] for x, y in ring] for ring in poly] for poly in polys]
+    poly = max(coords, key=lambda p: abs(signed_area(p[0])))
+    feats = [
+        {"type": "Feature", "properties": {"nimi": "Kauniainen"}, "geometry": {"type": "MultiPolygon", "coordinates": coords}},
+        {"type": "Feature", "properties": {"nimi": "KAUNIAINEN"}, "geometry": {"type": "Point", "coordinates": label_point(poly)}},
+    ]
+    write_geojson("kauniainen", feats, PUBLIC_DATA)
+
+
 def build_bridges():
     """Siltojen reunaviivat korkeuksineen. Korkeusmallista sillat puuttuvat, joten selain
     nostaa niiden avulla silloilla kulkevat ajoneuvot kannen tasolle."""
@@ -2424,6 +2446,8 @@ def main():
         build_population()
     if want("raja"):
         build_boundary()
+    if want("raja") or want("kauniainen"):
+        build_kauniainen()
     if want("sillat"):
         build_bridges()
     if want("raiteet"):

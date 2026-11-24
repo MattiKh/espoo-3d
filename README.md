@@ -9,14 +9,19 @@ sähköautot näkyvät latauspaikoillaan.
 ## Paneeli
 
 - Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
-- Aineistoja on neljätoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
-  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, purot ja joet, asukkaat
-  250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat,
-  kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet,
-  vesialueet, purot ja joet sekä sadetutka.
+- Aineistoja on viisitoista: kaupunginosien nimet, Kauniaisen raja, asemakaavan
+  käyttötarkoitukset, vireillä olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet,
+  purot ja joet, asukkaat 250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu,
+  kiinteistörajat, kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat
+  kaupunginosien nimet, Kauniaisen raja, vesialueet, purot ja joet sekä sadetutka.
   Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
 - Kaupunginosan nimi on alueen rakennusten keskellä, koska kaupunginosien rajat ulottuvat
   usein merelle (`kaupunginosat_nimet.geojson`, `build_data.py kaupunginosat`).
+- Kauniainen on oma kaupunkinsa Espoon sisällä: raja näkyy katkoviivana, alue on hieman
+  tummennettu ja nimi KAUNIAINEN näkyy alueen keskellä (`kauniainen.geojson`,
+  `build_data.py kauniainen`). Raja on HSY:n seutukartasta, koska Tilastokeskuksen
+  1:1 000 000 -raja on karkea; Kauniaisesta ei ole 3D-rakennuksia, koska ne tulevat Espoon
+  aineistoista.
 - Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
   (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
 - Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,
@@ -86,6 +91,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
+| Kauniaisen raja kartalla | HSY:n seutukartta, kunnat 2021 (WFS) |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
 | Alusten sijainnit, nimet, tyypit, mitat ja määränpäät | Fintraffic / Digitraffic AIS (REST, CC BY 4.0) |
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |

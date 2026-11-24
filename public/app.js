@@ -222,6 +222,7 @@ function buildStyle() {
   for (const def of LAYERS) {
     if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
     if (def.labels) continue; // nimet lisätään kaiken päälle (alla)
+    if (def.area) continue; // alue 3D-rakennusten alle ja nimi kaiken päälle (alla)
     if (def.streams) continue; // lisätään, kun uomat on ladattu (initStreams)
     if (def.wms) {
       sources[def.id] = {
@@ -241,6 +242,18 @@ function buildStyle() {
   }
   overlay.sort((a, b) => order[a.type] - order[b.type]);
   layers.push(...overlay.filter((l) => order[l.type] < 4));
+  for (const def of LAYERS.filter((d) => d.area)) {
+    sources[def.id] = { type: "geojson", data: def.area, attribution: ATTR_HSY };
+    const area = ["==", ["get", "nimi"], "Kauniainen"], layout = { visibility: visibility(def.on), "line-join": "round" };
+    layers.push(
+      { id: `${def.id}-tausta`, type: "fill", source: def.id, filter: area, layout: { visibility: visibility(def.on) },
+        paint: { "fill-color": "#0b1a2a", "fill-opacity": 0.2 } },
+      { id: `${def.id}-reuna-varjo`, type: "line", source: def.id, filter: area, layout,
+        paint: { "line-color": "#0b1a2a", "line-opacity": 0.55, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 3, 16, 6] } },
+      { id: `${def.id}-reuna`, type: "line", source: def.id, filter: area, layout,
+        paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.3, 16, 2.6], "line-dasharray": [3, 2] } },
+    );
+  }
   layers.push({
     id: "rakennukset", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
     filter: buildingFilter(),
@@ -264,6 +277,17 @@ function buildStyle() {
         "text-max-width": 8, visibility: visibility(def.on),
       },
       paint: { "text-color": "#1d2a35", "text-halo-color": "rgba(255,255,255,0.92)", "text-halo-width": 1.6 },
+    });
+  }
+  for (const def of LAYERS.filter((d) => d.area)) {
+    layers.push({
+      id: `${def.id}-nimi`, type: "symbol", source: def.id, filter: ["==", ["get", "nimi"], "KAUNIAINEN"], minzoom: 9,
+      layout: {
+        "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"], "text-letter-spacing": 0.3,
+        "text-size": ["interpolate", ["linear"], ["zoom"], 9, 12, 15, 22], "text-allow-overlap": true,
+        visibility: visibility(def.on),
+      },
+      paint: { "text-color": "#ffffff", "text-halo-color": "rgba(11,26,42,0.85)", "text-halo-width": 2 },
     });
   }
 
@@ -333,6 +357,10 @@ function setVisible(def, on) {
     streams?.setVisible(on);
   } else if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
+  } else if (def.area) {
+    for (const l of map.getStyle().layers) {
+      if (l.id.startsWith(def.id + "-")) map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
+    }
   } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else {
