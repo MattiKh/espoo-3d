@@ -178,6 +178,12 @@ räystään korkeuteen MapLibren feature-state-tilalla (`katto`), joten rakennus
 piirretä, näkyy LOD0-korkeudessaan. Katon väri seuraa rakennusten väritystä hieman tummempana,
 ilmakuvavuoden suodatus koskee myös kattoja, ja kattoa klikkaamalla saa rakennuksen tiedot.
 
+Tiedostossa pinnan kolmiot jakavat kärkipisteitä, ja noin 6 000 rakennuksen kattopinnoissa on
+pieniä vinoja tai alaspäin osoittavia kolmioita. Selain antaa siksi jokaiselle kolmiolle omat
+kärkipisteet ja kolmion oman normaalin. Yhteinen kärkipiste sai aiemmin viimeksi käsitellyn
+kolmion normaalin, jolloin koko lappeen varjostus vääristyi liukuvaksi ja harjakatto näytti
+kourulta (esim. rivitalo 1016018534 Kauniaisten rajalla).
+
 ## Lähialue ja sujuvuus
 
 Lähikuvassa (zoom ≥ 14) 3D-rakennukset piirretään vain näkymän keskipisteen ympäriltä: säde

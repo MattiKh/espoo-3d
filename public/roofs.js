@@ -94,7 +94,10 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
   }
 
   // Tiilen kolmioverkko: kärkipisteet metreinä tiilen keskipisteestä (x itään, y pohjoiseen) ja
-  // korkeus absoluuttisena. Kullakin pinnalla on omat kärkipisteensä, joten normaali on pinnan normaali.
+  // korkeus absoluuttisena. Jokaisella kolmiolla on omat kärkipisteensä ja normaalinaan kolmion
+  // normaali. Tiedostossa pinnan kolmiot jakavat kärkipisteitä, ja pinnoissa on paikoin pieniä
+  // vinoja kolmioita: yhteisen kärkipisteen normaali vääristäisi koko lappeen varjostuksen niin,
+  // että harjakatto näyttäisi kuopalta.
   function buildMesh(t) {
     const shownB = [];
     for (const b of t.buildings) {
@@ -103,47 +106,43 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
       b.range = null;
       if (on) shownB.push(b);
     }
-    let nv = 0, ni = 0;
-    for (const b of shownB) { nv += b.verts.length / 3; ni += b.tris.length; }
+    let nv = 0;
+    for (const b of shownB) nv += b.tris.length;
     if (t.mesh) { group.remove(t.mesh); t.mesh.geometry.dispose(); t.mesh = null; }
-    if (!ni) return;
+    if (!nv) return;
     const pos = new Float32Array(3 * nv), nor = new Float32Array(3 * nv), col = new Float32Array(3 * nv);
-    const idx = nv > 65535 ? new Uint32Array(ni) : new Uint16Array(ni);
     const refX = mercX(t.lon), refY = mercY(t.lat), m = EARTH_CIRC * Math.cos(t.lat * D2R);
     const c = new THREE.Color();
-    let v0 = 0, i0 = 0;
+    let v0 = 0;
     for (const b of shownB) {
       const dx = (mercX(b.lon) - refX) * m, dy = -(mercY(b.lat) - refY) * m;
-      const n = b.verts.length / 3;
-      for (let i = 0; i < n; i++) {
-        pos[3 * (v0 + i)] = b.verts[3 * i] + dx;
-        pos[3 * (v0 + i) + 1] = b.verts[3 * i + 1] + dy;
-        pos[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base + ROOF_LIFT;
-      }
-      b.range = [v0, n];
+      b.range = [v0, b.tris.length];
       c.set(colorOf(b)); // sRGB → lineaarinen
+      for (let j = 0; j < b.tris.length; j++) {
+        const q = 3 * (v0 + j), i = 3 * b.tris[j];
+        pos[q] = b.verts[i] + dx;
+        pos[q + 1] = b.verts[i + 1] + dy;
+        pos[q + 2] = b.verts[i + 2] + b.base + ROOF_LIFT;
+      }
       for (let j = 0; j < b.tris.length; j += 3) {
-        const a = v0 + b.tris[j], bb = v0 + b.tris[j + 1], cc = v0 + b.tris[j + 2];
-        idx[i0 + j] = a; idx[i0 + j + 1] = bb; idx[i0 + j + 2] = cc;
-        const ux = pos[3 * bb] - pos[3 * a], uy = pos[3 * bb + 1] - pos[3 * a + 1], uz = pos[3 * bb + 2] - pos[3 * a + 2];
-        const wx = pos[3 * cc] - pos[3 * a], wy = pos[3 * cc + 1] - pos[3 * a + 1], wz = pos[3 * cc + 2] - pos[3 * a + 2];
+        const a = 3 * (v0 + j);
+        const ux = pos[a + 3] - pos[a], uy = pos[a + 4] - pos[a + 1], uz = pos[a + 5] - pos[a + 2];
+        const wx = pos[a + 6] - pos[a], wy = pos[a + 7] - pos[a + 1], wz = pos[a + 8] - pos[a + 2];
         let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
         const len = Math.hypot(nx, ny, nz) || 1;
         nx /= len; ny /= len; nz /= len;
         const shade = j < 3 * b.nRoof ? ROOF_SHADE : 1;
-        for (const q of [a, bb, cc]) {
-          nor[3 * q] = nx; nor[3 * q + 1] = ny; nor[3 * q + 2] = nz;
-          col[3 * q] = c.r * shade; col[3 * q + 1] = c.g * shade; col[3 * q + 2] = c.b * shade;
+        for (let q = a; q < a + 9; q += 3) {
+          nor[q] = nx; nor[q + 1] = ny; nor[q + 2] = nz;
+          col[q] = c.r * shade; col[q + 1] = c.g * shade; col[q + 2] = c.b * shade;
         }
       }
-      v0 += n;
-      i0 += b.tris.length;
+      v0 += b.tris.length;
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     g.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
     g.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
     t.mesh = new THREE.Mesh(g, material);
     t.mesh.matrixAutoUpdate = false;
     t.mesh.frustumCulled = false;
@@ -154,7 +153,7 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
   function moveBuilding(t, b) {
     if (!t.mesh || !b.range) return;
     const pos = t.mesh.geometry.attributes.position, [v0, n] = b.range;
-    for (let i = 0; i < n; i++) pos.array[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base + ROOF_LIFT;
+    for (let j = 0; j < n; j++) pos.array[3 * (v0 + j) + 2] = b.verts[3 * b.tris[j] + 2] + b.base + ROOF_LIFT;
     pos.needsUpdate = true;
   }
 
