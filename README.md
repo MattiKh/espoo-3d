@@ -141,19 +141,32 @@ jonka kattopinta-alasta vähintään 15 % on yli 10° kalteva, lasketaan
   (`raystas`), ja rakennuksen tiedoissa näkyy "Räystäs (m)".
 - kolmioverkko kattopinnoista ja räystään yläpuolisista seinänosista (päätykolmiot, korkeampien
   osien seinät). Pintojen kiertosuunta säilytetään CityGML:n mukaisena (ulospäin), ja katot
-  käännetään aina ylöspäin.
+  käännetään aina ylöspäin. Seinät jatkuvat 2 m räystään alle ja ovat 3 cm sisempänä kuin
+  3D-rakennuksen seinät: selain nostaa katon maastoon hieman eri tavalla kuin MapLibre
+  3D-rakennuksen (keskipiste ja korkeusmallin tarkkuus), joten muuten katon ja seinien väliin
+  jäisi rinteissä rako.
 
 Kaltevia kattoja on 41 768; 18 425 rakennusta on tasakattoisia tai niiltä puuttuvat kattopinnat,
 ja ne näkyvät ennallaan. Verkot ovat tiilinä `public/tiles/katot/14/x/y.bin` (278 tiiltä,
 13 Mt, gzip-pakattu binääri; muoto on kuvattu `write_roof_tiles`-funktiossa).
 
-Selain (`public/roofs.js`) lataa lähikuvassa (zoom ≥ 13,5) näkymän keskipisteen ympäriltä
-tiilet enintään 2,5 km:n päästä ja piirtää katot joukkoliikenteen 3D-tasolla. Katto nostetaan
-rakennuksen keskipisteen maastokorkeudelle samoin kuin MapLibre nostaa 3D-rakennuksen.
-Ladattujen rakennusten seinät lasketaan räystään korkeuteen MapLibren feature-state-tilalla
-(`katto`), joten rakennus, jonka kattoa ei ole ladattu, näkyy LOD0-korkeudessaan. Katon väri
-seuraa rakennusten väritystä hieman tummempana, ilmakuvavuoden suodatus koskee myös kattoja,
-ja kattoa klikkaamalla saa rakennuksen tiedot.
+Selain (`public/roofs.js`) lataa lähikuvassa katot lähialueelta (ks. alla) ja piirtää ne
+joukkoliikenteen 3D-tasolla. Katto nostetaan rakennuksen keskipisteen maastokorkeudelle samoin
+kuin MapLibre nostaa 3D-rakennuksen, ja vielä 25 cm, jottei 3D-rakennuksen tasainen yläpinta
+pistä räystäiden kohdalla katon läpi. Piirrettyjen kattojen rakennusten seinät lasketaan
+räystään korkeuteen MapLibren feature-state-tilalla (`katto`), joten rakennus, jonka kattoa ei
+piirretä, näkyy LOD0-korkeudessaan. Katon väri seuraa rakennusten väritystä hieman tummempana,
+ilmakuvavuoden suodatus koskee myös kattoja, ja kattoa klikkaamalla saa rakennuksen tiedot.
+
+## Lähialue ja sujuvuus
+
+Lähikuvassa (zoom ≥ 14) 3D-rakennukset ja katot piirretään vain näkymän keskipisteen
+ympäriltä: säde on 2,5 km zoomaustasolla 14, 1,25 km tasolla 15 ja 700 m lähempää
+(`layers.js`, `detailRadius`). Kauempana näkyy ilmakuva. Rakennusten suodatin
+(MapLibren `distance`-lauseke) vaihdetaan vasta, kun näkymä on siirtynyt neljänneksen säteestä,
+koska MapLibre käsittelee rakennustiilet silloin uudelleen. Liikkuvat ajoneuvot ja virtaus
+piirretään noin 30 kertaa sekunnissa; karttaa liikutettaessa MapLibre piirtää täydellä
+nopeudella.
 
 ## Joukkoliikenne reaaliajassa
 
@@ -227,6 +240,8 @@ Latauspisteiden tila tulee Fintrafficin AFIR-rajapinnasta (Digitraffic), joka ko
 latausoperaattorien tiedot ja päivittää koosteen minuutin välein. Selain hakee koosteen minuutin
 välein, ja jokainen latauksessa (CHARGING) oleva latauspiste näytetään henkilöautona latauspaikan
 vieressä. Lähikuvassa auton yllä välkkyy salama, ja kaukaa autot näkyvät keltaisina pisteinä.
+Salama piirretään 3D-tasolla, joten rakennukset ja maasto peittävät sen, ja se näkyy vain
+enintään 1,5 km:n päässä näkymän keskipisteestä (lähikuvassa lähialueen säteellä).
 Klikkaamalla näkee latauspaikan, operaattorin, liittimen ja tehon, latauksen alkamisajan sekä
 paikan muiden pisteiden tilanteen. Espoossa ja Kauniaisissa on 139 latauspaikkaa ja noin 1 200
 latauspistettä.

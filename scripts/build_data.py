@@ -726,6 +726,11 @@ ROOF_TILE_ZOOM = 14  # selaimen kattotiedostojen ruutujako (Web Mercator -tiilet
 ROOF_FLAT_NZ = math.cos(math.radians(10))  # tätä loivempi kattopinta on tasainen
 ROOF_MIN_PITCHED = 0.15  # katto piirretään, jos vähintään tämä osuus sen alasta on kaltevaa
 ROOF_MIN_AREA = 0.05  # m²: pienemmät kolmiot jätetään pois
+# Selain nostaa katon maastoon hieman eri tavalla kuin MapLibre 3D-rakennuksen (keskipiste ja
+# korkeusmallin tarkkuus), joten seinät jatkuvat räystään alle, jottei väliin jää rakoa. Jatke on
+# hieman sisempänä, jottei se välky 3D-rakennuksen seinän kanssa.
+ROOF_SKIRT = 2.0  # m
+ROOF_INSET = 0.03  # m
 
 
 def build_roofs():
@@ -844,7 +849,8 @@ def roof_mesh(el, t):
     if eave - ground > t["korkeus"] - 0.3:
         return None  # LOD0-mallin mukaan räystään yläpuolella ei ole mitään
     verts, tris = [], ([], [])
-    for kind, rings in ((0, roofs), (1, [clip_above(r, eave + 0.05) for r in walls])):
+    skirt = max(ground, eave - ROOF_SKIRT)
+    for kind, rings in ((0, roofs), (1, [clip_above(inset(r, ROOF_INSET), skirt) for r in walls])):
         for ring in rings:
             index = {}
             for tri in triangulate(ring):
@@ -871,6 +877,13 @@ def newell(pts):
         ny += (z1 - z2) * (x1 + x2)
         nz += (x1 - x2) * (y1 + y2)
     return nx, ny, nz
+
+
+def inset(poly, d):
+    """Monikulmio siirrettynä matkan d normaalinsa vastaiseen suuntaan (ulospäin kierretty pinta: sisään)."""
+    nx, ny, nz = newell(poly)
+    n = math.sqrt(nx * nx + ny * ny + nz * nz) or 1
+    return [(x - nx / n * d, y - ny / n * d, z - nz / n * d) for x, y, z in poly]
 
 
 def triangle_area(a, b, c):

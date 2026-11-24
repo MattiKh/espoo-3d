@@ -7,7 +7,7 @@ import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.j
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
-import { LANDMARKS } from "./layers.js";
+import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS } from "./landmarks.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
@@ -36,6 +36,9 @@ const METRO_TUNNEL_Z = -15; // m (N2000)
 const METRO_DELAY = 7000; // metron sijainti päivittyy noin 50 metrin askelin 2,5–3 s välein
 const DOT_MAXZOOM = 14.8; // tätä lähempää ajoneuvot näytetään vain malleina
 const ELEV_SMOOTH_MS = 250; // korkeuden muutosten pehmennys
+// Jatkuvan piirron tahti: noin 30 kertaa sekunnissa riittää tasaiseen liikkeeseen ja puolittaa
+// näytönohjaimen kuorman. Karttaa liikutettaessa MapLibre piirtää silti täydellä nopeudella.
+const FRAME_INTERVAL = 28; // ms (ajastin ja näytön virkistys venyttävät välin noin 33 ms:iin)
 
 export const TRANSIT_GROUPS = [
   ["bussit", "Bussit", "#007ac9"],
@@ -1581,6 +1584,8 @@ const CHARGE_API = "https://afir.digitraffic.fi/api/charging-network/v1/location
 const CHARGE_POLL = 60000; // ms
 const CHARGE_COLOR = "#f5b700";
 const CHARGE_LABEL_MINZOOM = 14; // salama näkyy tätä lähempää
+const BOLT_MAX_DIST = 1500; // m näkymän keskipisteestä (lähempää layers.js:n detailRadius)
+const BOLT_SIZE = 22; // px
 const CHARGE_CAP = 600;
 const CAR_COLORS = ["#f2f3f1", "#1f2326", "#b9bec3", "#6e757b", "#2f5d8a", "#a8302c", "#1f3550", "#4d6b57", "#d9d4c7"].map(col);
 const chargePoints = new Map(); // latauspisteen tunnus → { site, ref, kw, plug, pool, status, since }
@@ -1622,6 +1627,44 @@ for (const mesh of [carBody, carTrim]) {
   scene.add(mesh);
 }
 carBody.setColorAt(0, CAR_COLORS[0]); // luo instanssien värit
+
+// Salama on 3D-tason piste, jonka rakennukset ja maasto peittävät (syvyystesti). Se näkyy vain
+// näkymän keskipisteen lähellä ja himmenee reunaa kohti; välkkyminen tulee materiaalin läpinäkyvyydestä.
+function boltTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d"), h = 54, w = (h * 13) / 19, x0 = (64 - w) / 2, y0 = 5;
+  g.beginPath();
+  for (const [i, [px, py]] of [[62, 0], [6, 58], [44, 58], [30, 100], [96, 38], [57, 38], [78, 0]].entries()) {
+    g[i ? "lineTo" : "moveTo"](x0 + (px / 100) * w, y0 + (py / 100) * h);
+  }
+  g.closePath();
+  g.shadowColor = "rgba(255, 200, 0, 0.9)";
+  g.shadowBlur = 8;
+  g.fillStyle = "#ffd21f";
+  g.fill();
+  g.shadowBlur = 0;
+  g.lineWidth = 2.5;
+  g.strokeStyle = "rgba(0, 0, 0, 0.6)";
+  g.stroke();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+const boltPos = new Float32Array(CHARGE_CAP * 3), boltCol = new Float32Array(CHARGE_CAP * 4).fill(1);
+const bolts = (() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(boltPos, 3).setUsage(THREE.DynamicDrawUsage));
+  g.setAttribute("color", new THREE.BufferAttribute(boltCol, 4).setUsage(THREE.DynamicDrawUsage));
+  const points = new THREE.Points(g, new THREE.PointsMaterial({
+    map: boltTexture(), size: BOLT_SIZE, sizeAttenuation: false, vertexColors: true,
+    transparent: true, depthWrite: false, alphaTest: 0.02,
+  }));
+  points.frustumCulled = false;
+  scene.add(points);
+  return points;
+})();
 
 const hashOf = (s) => [...s].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) | 0, 7) >>> 0;
 
@@ -1683,6 +1726,8 @@ function syncChargeCars() {
 function drawCharging(map, ctx) {
   const { zoom, cmx, cmy, sc, cosC, centerElev, e, W, H, now } = ctx;
   carBody.count = carTrim.count = 0;
+  const c = map.getCenter(), boltR = zoom >= CHARGE_LABEL_MINZOOM ? Math.min(detailRadius(zoom) ?? 0, BOLT_MAX_DIST) : 0;
+  let nBolts = 0;
   if (groupOn.lataus && zoom >= MODEL_MINZOOM) {
     for (const car of chargeCars.values()) {
       if (carBody.count >= CHARGE_CAP) break;
@@ -1697,15 +1742,20 @@ function drawCharging(map, ctx) {
       putInstance(carTrim, wx, wy, wz, car.yaw, 0, k);
       car.screen = toScreen(e, wx, wy, wz + 0.8 * k, W, H);
       car.screenAt = now;
-      if (zoom < CHARGE_LABEL_MINZOOM) continue;
-      const top = toScreen(e, wx, wy, wz + 2.6 * k, W, H);
-      if (top && top[0] > -30 && top[0] < W + 30 && top[1] > -30 && top[1] < H + 40) {
-        placeLabel(car.id, "", "transparent", "vlabel charge", top[0], top[1]);
-      }
+      const dist = Math.hypot((car.lon - c.lng) * 111320 * Math.cos(c.lat * D2R), (car.lat - c.lat) * 111320);
+      if (dist >= boltR) continue;
+      boltPos[3 * nBolts] = wx; boltPos[3 * nBolts + 1] = wy; boltPos[3 * nBolts + 2] = wz + 2.6 * k;
+      boltCol[4 * nBolts + 3] = Math.min(1, (boltR - dist) / (0.25 * boltR)); // himmenee reunaa kohti
+      nBolts++;
     }
   }
   carBody.instanceMatrix.needsUpdate = carTrim.instanceMatrix.needsUpdate = true;
   carBody.instanceColor.needsUpdate = true;
+  const g = bolts.geometry;
+  g.setDrawRange(0, nBolts);
+  g.attributes.position.needsUpdate = g.attributes.color.needsUpdate = true;
+  bolts.material.size = BOLT_SIZE * (renderer ? renderer.getContext().drawingBufferWidth / W : 1);
+  bolts.material.opacity = 0.3 + 0.7 * (0.5 + 0.5 * Math.cos((2 * Math.PI * now) / 1400));
 }
 
 const timeText = (t) => new Date(t).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" });
@@ -1878,7 +1928,7 @@ function placeLabel(id, text, color, className, sx, sy) {
 function hideStaleLabels() {
   for (const [id, el] of labels) {
     if (el.frame === frameNo) continue;
-    if (vehicles.has(id) || planes.has(id) || ships.has(id) || chargeCars.has(id)) el.hidden = true;
+    if (vehicles.has(id) || planes.has(id) || ships.has(id)) el.hidden = true;
     else { el.remove(); labels.delete(id); }
   }
 }
@@ -2173,11 +2223,12 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
     render(gl) {
       renderScene(gl, scene);
       renderScene(gl, overlayScene, flatCamera);
-      // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti. Kaukaa katsottaessa
-      // liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
+      // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti (FRAME_INTERVAL). Kaukaa
+      // katsottaessa liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
       if (!Object.values(groupOn).some(Boolean) && !extrasAnimating()) return;
-      if (map.getZoom() >= 11) map.triggerRepaint();
-      else repaintTimer ??= setTimeout(() => { repaintTimer = null; map.triggerRepaint(); }, 50);
+      const interval = map.getZoom() >= 11 ? FRAME_INTERVAL : 50;
+      repaintTimer ??= setTimeout(() => { repaintTimer = null; map.triggerRepaint(); },
+        Math.max(0, interval - (performance.now() - lastRender)));
     },
   }, beforeLayer);
 

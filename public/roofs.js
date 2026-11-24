@@ -5,18 +5,17 @@
 // piirretään niiden päälle three.js:llä joukkoliikenteen 3D-tasolla (transit.js).
 //
 // Katot ovat tiilinä public/tiles/katot/14/x/y.bin (scripts/build_data.py, build_roofs). Ne
-// ladataan lähikuvassa näkymän ympäriltä, ja vain ladattujen rakennusten seinät lasketaan
-// räystääseen; muut näkyvät LOD0-korkeudessaan.
+// ladataan lähikuvassa vain näkymän ympäriltä (setArea, säde layers.js:n detailRadius), ja vain
+// piirrettyjen kattojen rakennusten seinät lasketaan räystääseen; muut näkyvät LOD0-korkeudessaan.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 
-export const ROOF_MINZOOM = 13.5; // tätä kauempaa katsottaessa uusia kattoja ei ladata
-const LOAD_RADIUS = 2500; // m näkymän keskipisteestä zoomaustasolla 14 (lähempää pienempi)
-const MAX_TILES = 40; // muistissa pidettävät tiilet; kaukaisimmat poistetaan
 const PARALLEL = 4;
-const ELEV_BUDGET = 300; // rakennusta piirtokertaa kohden: korkeus tarkistetaan maastosta
+const ELEV_BUDGET = 150; // rakennusta piirtokertaa kohden: korkeus tarkistetaan maastosta
 const ELEV_MAX_AGE = 4000; // ms: korkeusmalli tarkentuu, kun karttaa lähennetään
-const MIN_ZOOM_DRAWN = 11.5; // kauempaa 3D-rakennukset ovat lähes näkymättömiä (app.js)
 const ROOF_SHADE = 0.78; // katto hieman seiniä tummempi
+// Katto nostetaan hieman, jottei 3D-rakennuksen tasainen yläpinta pistä räystäiden kohdalla katon
+// läpi; seinien jatke räystään alla (build_data.py, ROOF_SKIRT) peittää raon.
+const ROOF_LIFT = 0.25; // m
 const PICK_RADIUS = 14; // px katon keskikohdasta
 
 const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
@@ -24,6 +23,7 @@ const mercX = (lon) => (lon + 180) / 360;
 const mercY = (lat) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2)) / Math.PI) / 2;
 const tileLon = (x, z) => (x / 2 ** z) * 360 - 180;
 const tileLat = (y, z) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / 2 ** z))) / D2R;
+const metersBetween = (lon, lat, a) => Math.hypot((lon - a.lon) * 111320 * Math.cos(a.lat * D2R), (lat - a.lat) * 111320);
 
 // Tiilen rakennukset (muoto: build_data.py, write_roof_tiles).
 function parseTile(buf, classes) {
@@ -44,7 +44,7 @@ function parseTile(buf, classes) {
     for (let i = 0; i < verts.length; i++, o += 2) verts[i] = dv.getInt16(o, true) / 10;
     const tris = new Uint16Array(3 * (nRoof + nWall));
     for (let i = 0; i < tris.length; i++, o += 2) tris[i] = dv.getUint16(o, true);
-    out.push({ tunnus, luokka, vuosi, lon, lat, korkeus, raystas, verts, tris, nRoof, base: null, baseAt: 0 });
+    out.push({ tunnus, luokka, vuosi, lon, lat, korkeus, raystas, verts, tris, nRoof, base: null, baseAt: 0, range: null, state: false });
   }
   return out;
 }
@@ -66,31 +66,40 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
   const group = new THREE.Group();
   const material = new THREE.MeshLambertMaterial({ vertexColors: true });
   const tiles = new Map(); // "x/y" → { x, y, lon, lat, buildings, mesh }
-  const queue = [];
-  let active = 0, shown = visible, lastCtx = null;
+  let queue = [], active = 0, shown = visible, area = null, lastCtx = null;
 
-  const featureState = (b, on) =>
+  // Rakennuksen tila "katto" laskee sen seinät räystääseen (app.js), joten se on päällä vain,
+  // kun katto todella piirretään.
+  function featureState(b, on) {
+    if (b.state === on) return;
+    b.state = on;
     map.setFeatureState({ source: "rakennukset", sourceLayer: "rakennukset", id: b.tunnus }, { katto: on });
+  }
 
   // Rakennuksen pohjan korkeus: maaston korkeus keskipisteessä (absoluuttinen, korostettu), kuten
-  // MapLibre nostaa 3D-rakennuksen katon keskipisteen maastokorkeudelle.
+  // MapLibre nostaa 3D-rakennuksen katon keskipisteen maastokorkeudelle. Palauttaa "uusi", "muuttui"
+  // tai null.
   function sampleBase(b, centerElev, now) {
     const e = map.queryTerrainElevation([b.lon, b.lat]);
     b.baseAt = now;
-    if (e == null) return false;
+    if (e == null) return null;
     const abs = e + centerElev;
-    if (b.base != null && Math.abs(abs - b.base) < 0.1) return false;
+    if (b.base != null && Math.abs(abs - b.base) < 0.1) return null;
     const first = b.base == null;
     b.base = abs;
-    if (first) featureState(b, true);
-    return true;
+    return first ? "uusi" : "muuttui";
   }
 
   // Tiilen kolmioverkko: kärkipisteet metreinä tiilen keskipisteestä (x itään, y pohjoiseen) ja
   // korkeus absoluuttisena. Kullakin pinnalla on omat kärkipisteensä, joten normaali on pinnan normaali.
   function buildMesh(t) {
-    for (const b of t.buildings) b.range = null;
-    const shownB = t.buildings.filter((b) => b.base != null && isVisible(b));
+    const shownB = [];
+    for (const b of t.buildings) {
+      const on = shown && area != null && b.base != null && isVisible(b) && metersBetween(b.lon, b.lat, area) < area.radius;
+      featureState(b, on);
+      b.range = null;
+      if (on) shownB.push(b);
+    }
     let nv = 0, ni = 0;
     for (const b of shownB) { nv += b.verts.length / 3; ni += b.tris.length; }
     if (t.mesh) { group.remove(t.mesh); t.mesh.geometry.dispose(); t.mesh = null; }
@@ -106,7 +115,7 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
       for (let i = 0; i < n; i++) {
         pos[3 * (v0 + i)] = b.verts[3 * i] + dx;
         pos[3 * (v0 + i) + 1] = b.verts[3 * i + 1] + dy;
-        pos[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base;
+        pos[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base + ROOF_LIFT;
       }
       b.range = [v0, n];
       c.set(colorOf(b)); // sRGB → lineaarinen
@@ -142,36 +151,43 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
   function moveBuilding(t, b) {
     if (!t.mesh || !b.range) return;
     const pos = t.mesh.geometry.attributes.position, [v0, n] = b.range;
-    for (let i = 0; i < n; i++) pos.array[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base;
+    for (let i = 0; i < n; i++) pos.array[3 * (v0 + i) + 2] = b.verts[3 * i + 2] + b.base + ROOF_LIFT;
     pos.needsUpdate = true;
   }
 
+  function dropTile(key, t) {
+    for (const b of t.buildings) featureState(b, false);
+    if (t.mesh) { group.remove(t.mesh); t.mesh.geometry.dispose(); }
+    tiles.delete(key);
+  }
+
+  // Tiilet, jotka leikkaavat alueen ympyrää, lähimmät ensin.
   function wantedTiles() {
-    const zoom = map.getZoom();
-    if (zoom < ROOF_MINZOOM || !shown) return [];
-    const c = map.getCenter(), n = 2 ** Z;
-    const R = Math.max(600, Math.min(LOAD_RADIUS, LOAD_RADIUS * 2 ** (14 - zoom)));
-    const dLat = R / 111415, dLon = R / (111320 * Math.cos(c.lat * D2R));
-    const x0 = Math.floor(mercX(c.lng - dLon) * n), x1 = Math.floor(mercX(c.lng + dLon) * n);
-    const y0 = Math.floor(mercY(c.lat + dLat) * n), y1 = Math.floor(mercY(c.lat - dLat) * n);
-    const cx = mercX(c.lng) * n, cy = mercY(c.lat) * n, out = [];
+    if (!area || !shown) return [];
+    const n = 2 ** Z, dLat = area.radius / 111320, dLon = area.radius / (111320 * Math.cos(area.lat * D2R));
+    const x0 = Math.floor(mercX(area.lon - dLon) * n), x1 = Math.floor(mercX(area.lon + dLon) * n);
+    const y0 = Math.floor(mercY(area.lat + dLat) * n), y1 = Math.floor(mercY(area.lat - dLat) * n);
+    const cx = mercX(area.lon) * n, cy = mercY(area.lat) * n, out = [];
     for (let x = x0; x <= x1; x++) {
       for (let y = y0; y <= y1; y++) {
-        if (available.has(`${x}/${y}`)) out.push([Math.hypot(x + 0.5 - cx, y + 0.5 - cy), x, y]);
+        if (available.has(`${x}/${y}`)) out.push([Math.hypot(x + 0.5 - cx, y + 0.5 - cy), `${x}/${y}`, x, y]);
       }
     }
-    return out.sort((a, b) => a[0] - b[0]).map(([, x, y]) => [x, y]);
+    return out.sort((a, b) => a[0] - b[0]);
   }
 
   function update() {
-    for (const [x, y] of wantedTiles()) {
-      const key = `${x}/${y}`;
-      if (tiles.has(key)) continue;
+    const wanted = wantedTiles(), keys = new Set(wanted.map(([, key]) => key));
+    for (const [key, t] of tiles) if (!keys.has(key)) dropTile(key, t);
+    queue = [];
+    for (const [, key, x, y] of wanted) {
+      const t = tiles.get(key);
+      if (t) { if (t.buildings.length) buildMesh(t); continue; }
       tiles.set(key, { x, y, lon: tileLon(x + 0.5, Z), lat: tileLat(y + 0.5, Z), buildings: [], mesh: null });
       queue.push(key);
     }
     pump();
-    evict();
+    map.triggerRepaint();
   }
 
   function pump() {
@@ -193,39 +209,26 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
     }
   }
 
-  function evict() {
-    if (tiles.size <= MAX_TILES) return;
-    const c = map.getCenter(), n = 2 ** Z, cx = mercX(c.lng) * n, cy = mercY(c.lat) * n;
-    const far = [...tiles.entries()].sort((a, b) => Math.hypot(b[1].x - cx, b[1].y - cy) - Math.hypot(a[1].x - cx, a[1].y - cy));
-    for (const [key, t] of far.slice(0, tiles.size - MAX_TILES)) {
-      for (const b of t.buildings) if (b.base != null) featureState(b, false);
-      if (t.mesh) { group.remove(t.mesh); t.mesh.geometry.dispose(); }
-      tiles.delete(key);
-    }
-  }
-
-  // Muutama sata rakennusta piirtokertaa kohden: korkeus tarkistetaan maastosta uudelleen, koska
-  // korkeusmallin tarkemmat tiilet latautuvat vasta lähennettäessä.
+  // Rajallinen määrä rakennuksia piirtokertaa kohden: korkeus tarkistetaan maastosta uudelleen,
+  // koska korkeusmallin tarkemmat tiilet latautuvat vasta lähennettäessä.
   function refreshElevations(ctx) {
     let budget = ELEV_BUDGET;
     for (const t of tiles.values()) {
-      let fresh = 0;
+      let fresh = false;
       for (const b of t.buildings) {
         if (ctx.now - b.baseAt < ELEV_MAX_AGE || budget-- <= 0) continue;
-        const first = b.base == null;
-        if (sampleBase(b, ctx.centerElev, ctx.now)) {
-          if (first) fresh++;
-          else moveBuilding(t, b);
-        }
+        const change = sampleBase(b, ctx.centerElev, ctx.now);
+        if (change === "uusi") fresh = true;
+        else if (change === "muuttui") moveBuilding(t, b);
       }
       if (fresh) buildMesh(t); // pohja selvisi vasta nyt
       if (budget <= 0) return;
     }
   }
 
-  function draw(map, ctx) {
+  function draw(_, ctx) {
     lastCtx = ctx;
-    group.visible = shown && ctx.zoom >= MIN_ZOOM_DRAWN;
+    group.visible = shown && area != null;
     if (!group.visible) return;
     for (const t of tiles.values()) {
       if (!t.mesh) continue;
@@ -237,19 +240,20 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
     refreshElevations(ctx);
   }
 
-  map.on("moveend", update);
-  update();
-
   return {
     drawable: { object: group, draw, animating: () => false },
+    // Alue, jolta katot piirretään: { lon, lat, radius (m) } tai null (ei kattoja).
+    setArea(a) {
+      area = a;
+      update();
+    },
     setVisible(on) {
       shown = on;
       update();
-      map.triggerRepaint();
     },
     // Väritys tai suodatus (ilmakuvan vuosi) muuttui: verkot tehdään uudelleen.
     refresh() {
-      for (const t of tiles.values()) buildMesh(t);
+      for (const t of tiles.values()) if (t.buildings.length) buildMesh(t);
       map.triggerRepaint();
     },
     // Rakennus, jonka katon keskikohta on lähimpänä klikkausta (näytön pikseleissä), tai null.
@@ -258,9 +262,8 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
       const { e, W, H, cmx, cmy, sc, cosC, centerElev } = lastCtx;
       let best = null, bestD = PICK_RADIUS ** 2;
       for (const t of tiles.values()) {
-        if (!t.mesh) continue;
         for (const b of t.buildings) {
-          if (b.base == null || !isVisible(b)) continue;
+          if (!b.range) continue;
           const k = cosC / Math.cos(b.lat * D2R);
           const wx = (mercX(b.lon) - cmx) / sc, wy = -(mercY(b.lat) - cmy) / sc;
           const wz = (b.base - centerElev + (b.raystas + b.korkeus) / 2) * k;

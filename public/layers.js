@@ -22,6 +22,12 @@ export const ORTHO_YEARS = [
 // Maaston korostus; korkeusmalli on aina käytössä ilman rinnevarjostusta.
 export const TERRAIN_EXAGGERATION = 1.5;
 
+// Lähikuvassa 3D-rakennukset, katot ja latausten salamat piirretään vain näkymän keskipisteen
+// ympäriltä, jotta kartta pysyy sujuvana; kauempana näkyy ilmakuva. Säde (m) zoomaustason
+// mukaan; null = ei rajausta.
+export const DETAIL_MINZOOM = 14;
+export const detailRadius = (zoom) => (zoom < DETAIL_MINZOOM ? null : Math.max(700, 2500 * 2 ** (DETAIL_MINZOOM - zoom)));
+
 export const PLACES = [
   ["Koko Espoo", null],
   ["Tapiola", [24.8055, 60.1757, 15.2]],

@@ -1,6 +1,7 @@
 import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
   LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION, WMS_SERVICES,
+  detailRadius,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
 
@@ -145,6 +146,8 @@ async function refreshRadar() {
     console.warn("Sadetutkan kuva-aikaa ei saatu", err);
   }
 }
+
+let detail = null; // { lon, lat, radius }: 3D-rakennusten ja kattojen alue lähikuvassa (updateDetail)
 
 const state = {
   ortho: true, // ilmakuva on oletuspohja, mutta sen voi ottaa pois
@@ -296,12 +299,16 @@ const map = new maplibregl.Map({
       + ' · Raiteet ja pysäköintialueet © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
   },
   antialias: true, // 3D-ajoneuvojen reunat
+  // Nimet ilman häivytystä: koska ajoneuvojen vuoksi karttaa piirretään jatkuvasti, nimien
+  // sijoittelu tehdään uudelleen ja häivytys pitäisi kartan piirtymässä täydellä nopeudella.
+  fadeDuration: 0,
 });
 window.espooMap = map; // selaimen konsolia varten
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
 map.on("load", () => {
+  updateDetail();
   initTransit();
   initStreams();
   initRoofs();
@@ -310,6 +317,7 @@ map.on("load", () => {
   prefetchOrtho();
 });
 map.on("moveend", () => setTimeout(prefetchOrtho, 400));
+map.on("moveend", updateDetail);
 
 const busy = document.getElementById("busy");
 // Ajoneuvojen vuoksi kartta piirtyy jatkuvasti, eikä idle-tapahtuma tule, joten latauksen
@@ -360,12 +368,30 @@ function buildingFilter() {
   const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
   const filter = ["all", ...LANDMARKS.map((l) => ["!=", ["get", "tunnus"], l.building])];
   if (state.ortho && year < latest) filter.push(["has", "vuosi"], ["<=", ["get", "vuosi"], year]);
+  if (detail) filter.push(["<", ["distance", { type: "Point", coordinates: [detail.lon, detail.lat] }], detail.radius]);
   return filter;
 }
 
 function applyTimeFilter() {
   map.setFilter("rakennukset", buildingFilter());
   roofs?.refresh();
+}
+
+// Lähikuvassa 3D-rakennukset ja katot vain näkymän keskipisteen ympäriltä (layers.js, detailRadius).
+// Suodatin vaihdetaan vasta, kun näkymä on siirtynyt selvästi, koska MapLibre käsittelee
+// rakennustiilet silloin uudelleen.
+function updateDetail() {
+  const radius = detailRadius(map.getZoom()), c = map.getCenter();
+  let next = null;
+  if (radius != null) {
+    const moved = detail ? Math.hypot((c.lng - detail.lon) * 111320 * Math.cos((c.lat * Math.PI) / 180), (c.lat - detail.lat) * 111320) : Infinity;
+    next = detail && moved < detail.radius / 4 && Math.abs(radius / detail.radius - 1) < 0.2
+      ? detail : { lon: c.lng, lat: c.lat, radius: Math.round(radius) };
+  }
+  if (next === detail) return;
+  detail = next;
+  map.setFilter("rakennukset", buildingFilter());
+  roofs?.setArea(detail);
 }
 
 function setOverlayOpacity(v) {
@@ -550,6 +576,7 @@ async function initRoofs() {
       visible: document.getElementById("buildings").checked,
     });
     addExtra(roofs.drawable);
+    roofs.setArea(detail);
   } catch (err) {
     console.warn("Kattoja ei saatu ladattua", err);
   }
