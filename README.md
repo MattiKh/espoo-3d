@@ -160,9 +160,11 @@ ilmakuvavuoden suodatus koskee myös kattoja, ja kattoa klikkaamalla saa rakennu
 
 ## Lähialue ja sujuvuus
 
-Lähikuvassa (zoom ≥ 14) 3D-rakennukset ja katot piirretään vain näkymän keskipisteen
-ympäriltä: säde on 2,5 km zoomaustasolla 14, 1,25 km tasolla 15 ja 700 m lähempää
-(`layers.js`, `detailRadius`). Kauempana näkyy ilmakuva. Rakennusten suodatin
+Lähikuvassa (zoom ≥ 14) 3D-rakennukset piirretään vain näkymän keskipisteen ympäriltä: säde
+pienenee liukuvasti 4 km:stä zoomaustasolla 14 (2,8 km tasolla 15) 2 km:iin tasolla 16 ja
+lähempänä (`layers.js`, `detailRadius`). Katot piirretään enintään 2,5 km:n päähän, koska
+kauempana ne eivät juuri erotu; kauempana rakennukset näkyvät LOD0-korkeudessaan, ja säteen
+ulkopuolella näkyy ilmakuva. Rakennusten suodatin
 (MapLibren `distance`-lauseke) vaihdetaan vasta, kun näkymä on siirtynyt neljänneksen säteestä,
 koska MapLibre käsittelee rakennustiilet silloin uudelleen. Liikkuvat ajoneuvot ja virtaus
 piirretään noin 30 kertaa sekunnissa; karttaa liikutettaessa MapLibre piirtää täydellä

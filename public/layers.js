@@ -24,9 +24,9 @@ export const TERRAIN_EXAGGERATION = 1.5;
 
 // Lähikuvassa 3D-rakennukset, katot ja latausten salamat piirretään vain näkymän keskipisteen
 // ympäriltä, jotta kartta pysyy sujuvana; kauempana näkyy ilmakuva. Säde (m) zoomaustason
-// mukaan; null = ei rajausta.
+// mukaan: 4 km tasolla 14, 2,8 km tasolla 15 ja 2 km lähempää; null = ei rajausta.
 export const DETAIL_MINZOOM = 14;
-export const detailRadius = (zoom) => (zoom < DETAIL_MINZOOM ? null : Math.max(700, 2500 * 2 ** (DETAIL_MINZOOM - zoom)));
+export const detailRadius = (zoom) => (zoom < DETAIL_MINZOOM ? null : Math.max(2000, 4000 * 2 ** ((DETAIL_MINZOOM - zoom) / 2)));
 
 export const PLACES = [
   ["Koko Espoo", null],

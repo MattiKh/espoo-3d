@@ -17,6 +17,9 @@ const ROOF_SHADE = 0.78; // katto hieman seiniä tummempi
 // läpi; seinien jatke räystään alla (build_data.py, ROOF_SKIRT) peittää raon.
 const ROOF_LIFT = 0.25; // m
 const PICK_RADIUS = 14; // px katon keskikohdasta
+// Kauempana katot eivät juuri erotu, joten niitä piirretään enintään tämän säteen päähän
+// (rakennukset näkyvät kauempanakin LOD0-korkeudessaan).
+const MAX_RADIUS = 2500; // m
 
 const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
 const mercX = (lon) => (lon + 180) / 360;
@@ -244,7 +247,7 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
     drawable: { object: group, draw, animating: () => false },
     // Alue, jolta katot piirretään: { lon, lat, radius (m) } tai null (ei kattoja).
     setArea(a) {
-      area = a;
+      area = a && { ...a, radius: Math.min(a.radius, MAX_RADIUS) };
       update();
     },
     setVisible(on) {
