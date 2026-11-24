@@ -14,6 +14,7 @@ import collections
 import concurrent.futures as cf
 import gzip
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -1452,6 +1453,19 @@ STREAM_OSM_BBOX = (60.0, 24.30, 60.50, 25.0)
 STREAM_SYKE_BBOX = (60.0, 24.25, 60.55, 25.1)
 STREAM_MARGIN = 500  # m: näin kaukana Espoon rajan takana olevat uomat ovat mukana
 STREAM_SIMPLIFY = 0.7  # m
+# Kartan vesialueet (HSY:n maanpeiteaineisto, layers.js: wms_vesialueet) osuvat uomaan ilmakuvassa ja
+# korkeusmallissa, mutta OSM:n uoma on paikoin piirretty mutkia oikaisten tai sivuun. Uoma ohjataan
+# vesialueen keskelle, kun se lähtee vesialueelta ja palaa sinne (stream_fit_water).
+STREAM_WATER = "asuminen_ja_maankaytto:maanpeite_vesi_2024"
+STREAM_WATER_BBOX = (60.08, 24.40, 60.43, 24.96)  # lat, lon, lat, lon
+STREAM_FIT_STEP = 1.5  # m: uoman näytteiden väli
+STREAM_FIT_GAP = 1000  # m: pisin vesialueen ulkopuolinen pätkä, joka ohjataan vesialueelle
+STREAM_FIT_DIST = 100  # m: ... kun pätkä on enintään näin kaukana vesialueesta
+STREAM_FIT_MIN = 3  # m: tätä pienemmät poikkeamat eivät yksin riitä korjaukseen
+STREAM_FIT_MARGIN = 25  # m: korjattu pätkä alkaa ja päättyy näin pitkältä vesialueen sisältä
+STREAM_FIT_CELL = 1.0  # m: ruudukko, jossa keskilinja haetaan
+STREAM_FIT_HALF = 12  # m: leveämmät vedet (järvet, lammet) jätetään ennalleen (puolileveyden mediaani)
+WATER_CELL = 20  # m: vesialueiden reunat vaakakaistoittain ja ruuduittain
 
 
 def stream_xy(lon, lat):
@@ -1466,7 +1480,8 @@ def build_streams():
 
     Uomat ovat OpenStreetMapista (waterway=river/stream/canal). Viivat on piirretty
     virtaussuuntaan (Espoossa Syken uomaverkoston kanssa päällekkäisistä uomista 99,9 %
-    samaan suuntaan), ja rummut on merkitty. Yläpuolinen valuma-ala kertyy alavirtaan Syken
+    samaan suuntaan), ja rummut on merkitty. Vesialueen viereen piirretyt pätkät ohjataan
+    HSY:n vesialueiden keskelle (stream_fit_water). Yläpuolinen valuma-ala kertyy alavirtaan Syken
     valuma-aluejaon pienimmistä alueista: kunkin alueen oma pinta-ala jaetaan sen sisällä
     kulkeville uomille pituuksien suhteessa. Järvien kohdalla OSM:n uomat katkeavat, joten
     alueiden purkupisteissä kertymä nostetaan vähintään Syken laskemaan yläpuoliseen valuma-alaan.
@@ -1501,15 +1516,24 @@ def build_streams():
         acc = stream_accumulate(pieces, stream_outlet_anchors(pieces, areas, outlets, acc))
 
     keep = stream_region_filter(pieces)
-    uomat = []
+    chains = []
     for chain in stream_chains(pieces, acc, keep):
-        verts, osat = [], []
+        pts, osat = [], []
         for i in chain:
             p = pieces[i]
-            ll = [p["ll"][k] for k in simplify_indices(p["xy"], STREAM_SIMPLIFY)]
-            start = max(len(verts) - 1, 0)  # osuus alkaa edellisen osuuden loppupisteestä
-            verts += ll if not verts else ll[1:]
+            start = max(len(pts) - 1, 0)  # osuus alkaa edellisen osuuden loppupisteestä
+            pts += p["ll"] if not pts else p["ll"][1:]
             osat.append([start, round(acc[i], 3), int(p["culvert"]), p["name"]])
+        chains.append((pts, osat))
+    fitted = stream_fit_water(chains, stream_water())
+    uomat = []
+    for pts, osat in chains:
+        verts = []
+        for k, o in enumerate(osat):  # osuudet yksinkertaistetaan erikseen, jotta rajat säilyvät
+            seg = pts[o[0]:(osat[k + 1][0] if k + 1 < len(osat) else len(pts) - 1) + 1]
+            ll = [seg[j] for j in simplify_indices([stream_xy(*q) for q in seg], STREAM_SIMPLIFY)]
+            o[0] = max(len(verts) - 1, 0)
+            verts += ll if not verts else ll[1:]
         uomat.append({"p": [round(v, 6) for q in verts for v in q], "o": osat})
 
     station = dict(STREAM_STATION)
@@ -1523,7 +1547,8 @@ def build_streams():
                    "asema": station, "uomat": uomat}, fh, ensure_ascii=False, separators=(",", ":"))
     kept = [p for p, k in zip(pieces, keep) if k]
     log(f"  → purot.json: {len(uomat)} ketjua, {len(kept)} osuutta, {sum(p['len'] for p in kept) / 1000:.0f} km "
-        f"(rumpuja {sum(p['len'] for p in kept if p['culvert']) / 1000:.0f} km), Espoonjoen valuma-ala asemalla "
+        f"(rumpuja {sum(p['len'] for p in kept if p['culvert']) / 1000:.0f} km), vesialueen keskelle ohjattu "
+        f"{fitted[0]} pätkää ({fitted[1] / 1000:.1f} km), Espoonjoen valuma-ala asemalla "
         f"{station['ala']} km², {os.path.getsize(path) / 1e3:.0f} kt")
 
 
@@ -1713,6 +1738,216 @@ def stream_chains(pieces, acc, keep):
             i = nxt.get(i)
         chains.append(chain)
     return chains
+
+
+def stream_water():
+    """HSY:n vesialueet paikallisissa metreissä: kunkin monikulmion reunat vaakakaistoittain
+    (pisteen sisältyvyys ja rasterointi), monikulmiot 100 metrin ruuduittain ja kaikki reunat
+    WATER_CELL-ruuduittain (etäisyys vesialueeseen)."""
+    s, w, n, e = STREAM_WATER_BBOX
+    params = {"service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeNames": STREAM_WATER,
+              "outputFormat": "application/json", "srsName": "EPSG:4326",
+              "bbox": f"{s},{w},{n},{e},urn:ogc:def:crs:EPSG::4326"}
+    with open(http_get(HSY_WFS, params, os.path.join(CACHE, "hsy_vesi.json")), encoding="utf-8") as fh:
+        features = json.load(fh)["features"]
+    water = {"stripes": [], "polys": collections.defaultdict(list), "edges": collections.defaultdict(list)}
+    for f in features:
+        for poly in geom_polygons(f["geometry"]):
+            stripes, k = collections.defaultdict(list), len(water["stripes"])
+            rings = [[stream_xy(x, y) for x, y, *_ in ring] for ring in poly]
+            for a, b in (edge for ring in rings for edge in zip(ring, ring[1:])):
+                for sy in range(int(min(a[1], b[1]) // WATER_CELL), int(max(a[1], b[1]) // WATER_CELL) + 1):
+                    stripes[sy].append((a, b))
+                    for sx in range(int(min(a[0], b[0]) // WATER_CELL), int(max(a[0], b[0]) // WATER_CELL) + 1):
+                        water["edges"][(sx, sy)].append((a, b))
+            water["stripes"].append(stripes)
+            xs, ys = [x for x, _ in rings[0]], [y for _, y in rings[0]]
+            for cx in range(int(min(xs) // 100), int(max(xs) // 100) + 1):
+                for cy in range(int(min(ys) // 100), int(max(ys) // 100) + 1):
+                    water["polys"][(cx, cy)].append(k)
+    return water
+
+
+def water_crossings(stripes, y):
+    """Vaakasuoran y-suoran ja monikulmion reunojen leikkauskohdat (x) järjestyksessä."""
+    return sorted(x1 + (y - y1) * (x2 - x1) / (y2 - y1) for (x1, y1), (x2, y2) in stripes.get(int(y // WATER_CELL), ())
+                  if (y1 > y) != (y2 > y))
+
+
+def water_at(water, x, y):
+    for k in water["polys"].get((int(x // 100), int(y // 100)), ()):
+        inside = False
+        for (x1, y1), (x2, y2) in water["stripes"][k].get(int(y // WATER_CELL), ()):
+            if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+                inside = not inside
+        if inside:
+            return True
+    return False
+
+
+def water_distance(water, x, y, limit):
+    """Etäisyys lähimpään vesialueen reunaan; yli limit metrin etäisyys voi olla epätarkka."""
+    cx, cy, best = int(x // WATER_CELL), int(y // WATER_CELL), math.inf
+    for r in range(int(limit // WATER_CELL) + 2):
+        if best <= (r - 1) * WATER_CELL:
+            break
+        for i in range(cx - r, cx + r + 1):
+            for j in (range(cy - r, cy + r + 1) if abs(i - cx) == r else (cy - r, cy + r)):
+                for a, b in water["edges"].get((i, j), ()):
+                    best = min(best, point_line_distance(x, y, [a, b]))
+    return best
+
+
+def water_path(water, a, b, line, cell=STREAM_FIT_CELL):
+    """Reitti vesialueita pitkin pisteestä a pisteeseen b: ruudukon lyhin reitti, jossa askel
+    maksaa sitä vähemmän, mitä kauempana rannoista se on, joten reitti kulkee uoman keskellä.
+    Ruudukko rajataan korvattavan pätkän (line) ympäriltä. Palauttaa reitin ja sen
+    puolileveyden (etäisyys rantaan) mediaanin tai None, jos reittiä ei ole."""
+    pad = 60
+    x0, y0 = min(p[0] for p in line) - pad, min(p[1] for p in line) - pad
+    nx = int((max(p[0] for p in line) + pad - x0) / cell) + 1
+    ny = int((max(p[1] for p in line) + pad - y0) / cell) + 1
+    polys = {k for cx in range(int(x0 // 100), int((x0 + nx * cell) // 100) + 1)
+             for cy in range(int(y0 // 100), int((y0 + ny * cell) // 100) + 1) for k in water["polys"].get((cx, cy), ())}
+    inside = set()
+    for iy in range(ny):
+        y = y0 + (iy + 0.5) * cell
+        for k in polys:
+            xs = water_crossings(water["stripes"][k], y)
+            for xa, xb in zip(xs[::2], xs[1::2]):
+                lo, hi = max(0, math.ceil((xa - x0) / cell - 0.5)), min(nx - 1, math.floor((xb - x0) / cell - 0.5))
+                inside.update(range(iy * nx + lo, iy * nx + hi + 1))
+        if len(inside) > 400_000:  # iso järvi: OSM:n viiva saa jäädä
+            return None
+    # Etäisyys rantaan ruutuina (leveyshaku rantaruuduista; ruudukon reuna lasketaan rannaksi).
+    dist = {c: 1 for c in inside if c % nx in (0, nx - 1) or not {c - 1, c + 1, c - nx, c + nx} <= inside}
+    frontier, d = list(dist), 1
+    while frontier:
+        d += 1
+        frontier = list(dict.fromkeys(n for c in frontier for n in (c - 1, c + 1, c - nx, c + nx) if n in inside and n not in dist))
+        dist.update(dict.fromkeys(frontier, d))
+
+    def snap(p):
+        ix, iy = int((p[0] - x0) / cell), int((p[1] - y0) / cell)
+        near = [(abs(i) + abs(j), (iy + j) * nx + ix + i) for i in range(-3, 4) for j in range(-3, 4)
+                if 0 <= ix + i < nx and (iy + j) * nx + ix + i in inside]
+        return min(near)[1] if near else None
+
+    start, goal = snap(a), snap(b)
+    if start is None or goal is None:
+        return None
+    cost = lambda c: 1 / min(dist[c] * cell, 6.0) ** 2
+    best, prev, heap = {start: 0.0}, {}, [(0.0, start)]
+    while heap:
+        g, c = heapq.heappop(heap)
+        if c == goal:
+            break
+        if g > best[c]:
+            continue
+        ix = c % nx
+        for dx, dy, step in ((1, 0, 1), (-1, 0, 1), (0, 1, 1), (0, -1, 1), (1, 1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (-1, -1, 1.414)):
+            n = c + dy * nx + dx
+            if not 0 <= ix + dx < nx or n not in inside:
+                continue
+            ng = g + step * cell * cost(n)
+            if ng < best.get(n, math.inf):
+                best[n], prev[n] = ng, c
+                heapq.heappush(heap, (ng, n))
+    if goal not in best:
+        return None
+    cells = [goal]
+    while cells[-1] != start:
+        cells.append(prev[cells[-1]])
+    cells.reverse()
+    half = sorted(dist[c] for c in cells)[len(cells) // 2] * cell
+    pts = [(x0 + (c % nx + 0.5) * cell, y0 + (c // nx + 0.5) * cell) for c in cells]
+    # Porrastus pois liukuvalla keskiarvolla; päätepisteet ovat a ja b.
+    smooth = [a] + [(sum(p[0] for p in pts[max(0, i - 3):i + 4]) / len(pts[max(0, i - 3):i + 4]),
+                     sum(p[1] for p in pts[max(0, i - 3):i + 4]) / len(pts[max(0, i - 3):i + 4])) for i in range(1, len(pts) - 1)] + [b]
+    return smooth, half
+
+
+def stream_fit_water(chains, water):
+    """Ohjaa uomat vesialueiden keskelle, kun OSM:n viiva lähtee vesialueelta ja palaa sinne
+    (pätkä enintään STREAM_FIT_GAP metriä ja STREAM_FIT_DIST metrin päässä vesialueesta).
+    Korjattu pätkä alkaa ja päättyy vesialueen sisältä. Järvet ja rummut jätetään ennalleen, samoin
+    pätkät, joiden uusi reitti olisi kaukana OSM:n viivasta tai eripituinen. Pätkän sisään jääneet
+    yhtymäkohdat siirtyvät uudelle viivalle, ja niihin päättyvät sivu-uomat jatkuvat sinne.
+    chains = [(pisteet [(lon, lat), ...], osat)] muutetaan paikallaan. Palauttaa (pätkiä, metriä)."""
+    ends = {q for pts, _ in chains for q in (pts[0], pts[-1])}
+    margin = int(STREAM_FIT_MARGIN / STREAM_FIT_STEP)
+    moved, count, total = {}, 0, 0.0
+    to_ll = lambda p: (p[0] / 55462.0 + 24.7, p[1] / 111415.0 + 60.2)  # stream_xy käänteisenä
+    for pts, osat in chains:
+        xy = [stream_xy(*q) for q in pts]
+        samples = []  # (x, y, osa-viivan indeksi): näytteet viivalla STREAM_FIT_STEP metrin välein
+        for j in range(len(xy) - 1):
+            (ax, ay), (bx, by) = xy[j], xy[j + 1]
+            n = max(1, math.ceil(math.hypot(bx - ax, by - ay) / STREAM_FIT_STEP))
+            samples += [(ax + (bx - ax) * t / n, ay + (by - ay) * t / n, j) for t in range(n)]
+        runs = []  # vesialueella olon jaksot [ensimmäinen, viimeinen näyte]
+        for k, (x, y, _) in enumerate(samples):
+            if water_at(water, x, y):
+                if runs and runs[-1][1] == k - 1:
+                    runs[-1][1] = k
+                else:
+                    runs.append([k, k])
+        # Poikkeamat: vesialueelta lähtevät ja sinne palaavat pätkät marginaaleineen. Lyhyen
+        # vesialueella olon erottamat peräkkäiset poikkeamat (esim. mutkat) korjataan yhdessä.
+        stretches = []
+        for a, b in zip(runs, runs[1:]):
+            gap = samples[a[1] + 1:b[0]]
+            far = (max(water_distance(water, x, y, STREAM_FIT_DIST) for x, y, _ in gap[::3])
+                   if len(gap) * STREAM_FIT_STEP <= STREAM_FIT_GAP else math.inf)
+            if not STREAM_FIT_MIN <= far <= STREAM_FIT_DIST:
+                continue
+            r0, r1 = max(a[0], a[1] - margin), min(b[1], b[0] + margin)
+            if stretches and stretches[-1][1] >= r0:
+                if (r1 - stretches[-1][0]) * STREAM_FIT_STEP <= 2 * STREAM_FIT_GAP:
+                    stretches[-1][1] = r1
+                    continue
+                r0 = stretches[-1][1]  # liian pitkä: uusi pätkä alkaa edellisen lopusta
+            stretches.append([r0, r1])
+        reps = []
+        for r0, r1 in stretches:
+            j0, j1 = samples[r0][2], samples[r1][2]
+            if any(o[2] and o[0] <= j1 and (k + 1 == len(osat) or osat[k + 1][0] > j0) for k, o in enumerate(osat)):
+                continue
+            line = [s[:2] for s in samples[r0:r1 + 1]]
+            found = water_path(water, line[0], line[-1], line)
+            if not found or found[1] > STREAM_FIT_HALF:
+                continue
+            path = found[0]
+            length = lambda q: sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(q, q[1:]))
+            ratio = length(path) / max(length(line), 1)
+            if not 1 / 3 < ratio < 3 or max(point_line_distance(x, y, line[::3] + line[-1:]) for x, y in path[::5]) > STREAM_FIT_DIST:
+                continue
+            reps.append((j0, path if line[0] != xy[j0] else path[1:], j1))
+            count, total = count + 1, total + length(line)
+        for j0, mid, j1 in reversed(reps):  # näytteet ovat viivan väleillä, joten päätepisteet säilyvät
+            def nearest(q):
+                return j0 + 1 + min(range(len(mid)), key=lambda m: (mid[m][0] - q[0]) ** 2 + (mid[m][1] - q[1]) ** 2)
+            mid_ll = [to_ll(p) for p in mid]
+            for o in osat:
+                if j0 < o[0] <= j1:
+                    o[0] = nearest(xy[o[0]])
+                elif o[0] > j1:
+                    o[0] += len(mid) - (j1 - j0)
+            for s in range(j0 + 1, j1 + 1):
+                if pts[s] in ends:
+                    moved[pts[s]] = mid_ll[nearest(xy[s]) - j0 - 1]
+            pts[j0 + 1:j1 + 1] = mid_ll
+            xy[j0 + 1:j1 + 1] = mid
+        for a, b in zip(osat, osat[1:]):
+            b[0] = max(b[0], a[0] + 1)
+    for pts, osat in chains:  # sivu-uoma jatkuu siirtyneeseen yhtymäkohtaan
+        if pts[-1] in moved:
+            pts.append(moved[pts[-1]])
+        if pts[0] in moved:
+            pts.insert(0, moved[pts[0]])
+            for o in osat[1:]:
+                o[0] += 1
+    return count, total
 
 
 def point_line_distance(x, y, pts):

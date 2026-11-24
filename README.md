@@ -89,6 +89,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
 | Sadetutka, sateen voimakkuus (mm/h) | Ilmatieteen laitos, avoin WMS (CC BY 4.0) |
 | Purot ja joet, virtaussuunnat ja rummut | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Purojen sijainnin tarkistus (vesialueiden keskilinja) | HSY:n maanpeite 2024, WFS |
 | Valuma-alueet ja niiden purkupisteet (yläpuolinen valuma-ala) | Syke, valuma-aluejako (INSPIRE WFS, CC BY 4.0) |
 | Espoonjoen virtaama (päiväarvot 1995 alkaen) | Syke, hydrologiarajapinta (CC BY 4.0) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
@@ -349,6 +350,17 @@ molemmissa. Selain tasoittaa uomat Chaikinin kulmanleikkauksella kahdesti, jotta
 pyöreitä. Yhtymäkohdat ja muut osuuksien rajat pysyvät paikallaan. Uomat piirretään maaston
 pintaan, viivan leveys kasvaa valuma-alan mukaan, ja rummussa viiva on haalea. Aineisto on
 tiedostossa `public/data/purot.json` (`build_data.py purot`).
+
+OSM:n uoma on paikoin piirretty mutkia oikaisten tai 20–30 metriä sivuun (esim. Lepsämänjoki
+Espoon pohjoisrajalla), vaikka kartan vesialueet (HSY:n maanpeite 2024) osuvat uomaan: se näkyy
+Maanmittauslaitoksen korkeusmallin rinnevarjosteessa, ja Syken uomaverkosto kulkee samassa
+kohdassa. Kun OSM:n viiva lähtee vesialueelta ja palaa sinne (enintään kilometrin pätkä, enintään
+100 metrin päässä vesialueesta), pätkä korvataan vesialueen keskilinjalla: metrin ruudukossa
+haetaan lyhin reitti, jossa askel on sitä halvempi, mitä kauempana rannoista se on. Korjaus
+alkaa ja päättyy vesialueen sisältä. Järviä, rumpuja ja pätkiä, joiden uusi reitti olisi kaukana
+OSM:n viivasta tai eripituinen, ei muuteta, joten vesialueen vieressä kulkeva oja ei siirry
+lampeen. Pätkän sisään jääneet yhtymäkohdat siirtyvät uudelle viivalle, ja sivu-uomat jatkuvat
+niihin. Korjattuja pätkiä on 120 (11 km).
 
 Kunkin uoman yläpuolinen valuma-ala lasketaan Syken valuma-aluejaon pienimmistä alueista. Alueen
 oma pinta-ala jaetaan sen uomille pituuksien suhteessa, ja se kertyy alavirtaan. Järvien kohdalla
