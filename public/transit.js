@@ -5,7 +5,7 @@
 // Samalle tasolle piirretään myös maamerkkien 3D-mallit (landmarks.js).
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
-import { deckHeightAt, rawElevationAt } from "./bridges.js";
+import { deckHeightAt, deckSurfaceAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
@@ -1881,21 +1881,22 @@ function anchorOf(sel, now) {
 
 const pts = new Float64Array(64), ptsZ = new Float64Array(32);
 
-// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla
-// korkeusmalli on nostettu kannen tasolle (bridges.js). Ajoneuvo pysyy kannella, jos se tuli
-// sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo pysyy
-// alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
+// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla on
+// lähikuvassa 3D-laatta (decks.js) ja kauempana kannen tasolle nostettu korkeusmalli (bridges.js);
+// kannen korkeus otetaan laatan pinnasta tai lähimmästä siltaviivasta. Ajoneuvo pysyy kannella,
+// jos se tuli sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva
+// ajoneuvo pysyy alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
 function groundAt(v, x, y, prev, centerElev, exag) {
   const lon = lonOf(x), lat = latOf(y);
   const dem = (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
   if (KINDS[v.kind].underground) return dem;
-  const deck = deckHeightAt(lon, lat);
+  const deck = deckSurfaceAt(lon, lat) ?? deckHeightAt(lon, lat);
   if (deck == null) return dem;
   const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag, top = deck * exag;
   if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
   const from = prev ?? approachElevation(v, centerElev);
   if (Math.abs(from - top) >= Math.abs(from - raw)) return raw; // sillan alla
-  return rawM == null ? Math.max(dem, top) : dem; // kannella (nostettu maasto on kannen pinta)
+  return Math.max(dem, top); // kannella (laatan pinta tai kannen tasolle nostettu maasto)
 }
 
 // Maanpinnan korkeus siinä reitin kohdassa, josta ajoneuvo tuli sillalle.

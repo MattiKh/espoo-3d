@@ -342,8 +342,9 @@ Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten ilmakuvan tie no
 kohdalla alla olevan tien tai joen tasolle, ja ajoneuvot sukelsivat mukana. Espoon kantakartan
 siltojen reunaviivoissa on kannen mitattu korkeus. `build_data.py` muodostaa niistä kansialueet:
 kannen reunoiksi tulkitaan samansuuntaiset, samalla korkeudella olevat viivat 3–40 metrin päässä
-toisistaan. Selain nostaa korkeusmallin tiilet kansialueilla kannen tasolle (`public/bridges.js`)
-ja muistaa alkuperäisen maanpinnan korkeuden.
+toisistaan. Kaukaa katsottaessa selain nostaa korkeusmallin tiilet kansialueilla kannen tasolle
+(`public/bridges.js`) ja muistaa alkuperäisen maanpinnan korkeuden; lähikuvassa kannet ovat
+3D-laattoja (alla).
 
 Siltaviivoista puuttuu kuitenkin usein toinen reuna. Esimerkiksi Otasolmun kiertoliittymästä
 (Kehä I kulkee sen alta) on vain sisäkaaret, ja leveiltä tai kaarevilta silloilta pareja ei
@@ -365,6 +366,22 @@ Kaistaleita on myös tasaisella maalla, joten selain nostaa niillä maastoa vain
 tukimuurin tai luiskan yläreunalle osuvat 1–2 pikselin kaistat jäävät pois, jottei niistä tule
 piikkejä, mutta kansi säilyy. Korjauksen jälkeen kantta alempana olevia siltaviivakohtia on 48
 (22 yli 4 metriä), ja osa niistäkin on sillan alla kulkevia rakenteita.
+
+Nostettu korkeusmalli on kuitenkin yhtenäinen pinta: kannen reunalta maasto laskeutuu
+pystysuorana seinämänä alla olevalle tielle, ja koska MapLibren maastoverkko on korkeusmallia
+harvempi (noin 5 m), seinämän yläreuna on sahalaitainen. Lähikuvassa (zoom 14 tai lähempää,
+lähialueella kuten katot) kannet piirretään siksi 3D-laattoina (`public/decks.js`), eikä tarkimpia
+korkeusmallin tiiliä (z15) nosteta, joten sillan alla kulkeva tie näkyy. Laatan pinnassa on uusin
+ilmakuva (siltatiedot ja korkeusmalli ovat nykyhetkestä), reunat ja alapinta ovat betonin harmaita,
+ja paksuus on 1,2 metriä. Laatta tehdään vain sinne, missä kansi on maanpinnan yläpuolella: kansi
+jaetaan noin 4 metrin osiin, ja korkeusmallin tiilistä lasketaan, kuinka suuri osa kunkin osan
+pikseleistä on yli 0,5 metriä kantta alempana (vähintään 40 %). Siltaviiva on usein reunapalkin
+päällä ajorataa ylempänä, joten kantta lasketaan, jos sen pää on penkereellä 0–2,5 metriä
+maanpinnan yläpuolella. Korkeusmallista on usein poistettu myös penkereen pää; silloin laatta
+jatkuu 8 %:n ramppina, kunnes se kohtaa maanpinnan (ei, jos päätä jatkaa toinen kansi).
+Ilmakuvassa silta näkyy myös maassa laatan alla, joten se tummennetaan sillan varjoksi
+(karttataso `sillat-varjo`, vain ilmakuvan kanssa). Ajoneuvo kulkee kannella laatan pinnan
+korkeudella.
 
 Ajoneuvo pysyy kannella, jos se tuli sillalle kannen korkeudelta, esimerkiksi penkereeltä.
 Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
@@ -429,7 +446,8 @@ etäisyydestä tasaisella maalla: utu alkaa kilometrin päässä ja tihenee eksp
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
-- `public/bridges.js`: siltakansien nosto korkeusmalliin ja kannen korkeus ajoneuvoille
+- `public/bridges.js`: siltakansien nosto korkeusmalliin, kansien maanpinnan yläpuoliset osat ja kannen korkeus ajoneuvoille
+- `public/decks.js`: siltojen kannet 3D-laattoina ilmakuvatekstuurilla, rampit ja varjot
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat

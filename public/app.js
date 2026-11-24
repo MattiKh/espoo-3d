@@ -32,8 +32,9 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
   return { data };
 });
 
-// Korkeusmallin tiilet: sillat nostetaan kannen tasolle (bridges.js), koska ne puuttuvat
-// korkeusmallista ja ilmakuvan tie muuten notkahtaisi sillan kohdalla.
+// Korkeusmallin tiilet: sillat puuttuvat korkeusmallista, ja ilmakuvan tie notkahtaisi sillan
+// kohdalla. Lähikuvassa kannet piirretään 3D-laattoina (decks.js); karkeammissa tiilissä sillat
+// nostetaan kannen tasolle (bridges.js).
 maplibregl.addProtocol("dem", async (params, abortController) => {
   const url = "https://" + params.url.slice("dem://".length);
   const res = await fetch(url, { signal: abortController.signal });
@@ -340,6 +341,7 @@ map.on("load", () => {
   initTransit();
   initStreams();
   initRoofs();
+  initDecks();
   refreshRadar();
   setInterval(refreshRadar, 120000);
   prefetchOrtho();
@@ -379,6 +381,7 @@ function setOrtho(on) {
   prefetchOrtho();
   document.getElementById("ortho-options").hidden = !on;
   applyTimeFilter();
+  decks?.setOrtho(state.ortho);
 }
 
 function setOrthoYear(index) {
@@ -423,6 +426,7 @@ function updateDetail() {
   detail = next;
   map.setFilter("rakennukset", buildingFilter());
   roofs?.setArea(detail);
+  decks?.setArea(detail);
 }
 
 function setOverlayOpacity(v) {
@@ -614,6 +618,27 @@ async function initRoofs() {
     roofs.setArea(detail);
   } catch (err) {
     console.warn("Kattoja ei saatu ladattua", err);
+  }
+}
+
+// Siltojen kannet 3D-laattoina lähialueella (decks.js). Siltatiedot ja korkeusmalli ovat nykyhetkestä,
+// joten laatan pinnassa on uusin ilmakuva, vaikka kartalla olisi vanhempi.
+let decks = null;
+
+function orthoImage(z, x, y) {
+  if (!state.ortho) return Promise.resolve(null);
+  return fetchOrtho(orthoUrl(ORTHO_YEARS[0][1], z, x, y), "low")
+    .then((buf) => (buf.byteLength ? createImageBitmap(new Blob([buf])) : null));
+}
+
+async function initDecks() {
+  try {
+    const [{ createDecks }, { addExtra }] = await Promise.all([import("./decks.js"), import("./transit.js")]);
+    decks = createDecks(map, { orthoImage, ortho: state.ortho });
+    addExtra(decks.drawable);
+    decks.setArea(detail);
+  } catch (err) {
+    console.warn("Siltojen kansia ei saatu piirrettyä", err);
   }
 }
 
