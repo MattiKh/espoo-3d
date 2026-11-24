@@ -79,6 +79,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Rakennukset (pohja ja mitattu korkeus, LOD0) | Espoo WFS `bldg:building_lod0` |
 | Kaltevat katot ja epäilyttävien korkeuksien korjaus (kattopinnat, LOD2) | Espoo WFS `bldg:building_lod2` |
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
+| Rakennuksen lisätiedot (kerrosala, tilavuus, lämmitys ym.) klikattaessa | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
 | Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
 | Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
@@ -104,7 +105,8 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
 kaavayksiköt, yleiskaavat, viher- ja katualueet, Espoon oma maaperä-, rakennettavuus-
-ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
+ja savisyvyyskartta, liito-oravat, johtokartat, vääräväri-ilmakuva, rakennusluvat,
+rakennusvalvonnan aineistot sekä rakennusten kattoviivat.
 
 ## Huomioita aineistosta
 
@@ -299,17 +301,28 @@ piilotetaan 3D-rakennuksista:
   kierreportaan lieriö, viuhkamainen kattokerros, antennimittaustorni (huippu 52 m) ja piippu.
   Piipun paikka ja alaosan muoto on arvioitu valokuvista.
 
-Neljä tunnettua rakennusta piirretään kokonaan Espoon 3D-kaupunkimallin (LOD2) pinnoista
-valokuvatekstuureineen: Dipoli (Raili ja Reima Pietilä, 1966; 661 pintaa ja 192 tekstuuria),
-Suomen luontokeskus Haltia (Lahdelma & Mahlamäki, 2013), Keilaniemen torni eli Accountor Tower
-(1976) ja Tapiolan kirkko (Aarno Ruusuvuori, 1965). `build_data.py maamerkit` poimii
-rakennukset välimuistissa olevasta 3D-mallista (`LANDMARK_BUILDINGS`) tiedostoiksi
-`public/data/maamerkit/<id>.json`: pinnat kolmioina, tekstuurikoordinaatit ja kuvien osoitteet.
-Selain lataa geometrian heti ja tekstuurit (pieniä JPEG-kuvia Espoon karttapalvelusta, CORS
-sallittu) vasta, kun maamerkki on enintään 4 km:n päässä näkymän keskeltä zoomaustasolla 14
-tai lähempää. Valaistus on kuvissa, joten teksturoidut pinnat piirretään ilman varjostusta.
-Lisää maamerkkejä saa lisäämällä rakennustunnukset `LANDMARK_BUILDINGS`-luetteloon ja
-määrittelyn `layers.js`:n `LANDMARKS`-luetteloon.
+Neljä tunnettua rakennusta piirretään kokonaan Espoon 3D-kaupunkimallin (LOD2) pinnoista:
+Dipoli (Raili ja Reima Pietilä, 1966; 661 pintaa), Suomen luontokeskus Haltia (Lahdelma &
+Mahlamäki, 2013), Keilaniemen torni eli Accountor Tower (1976) ja Tapiolan kirkko (Aarno
+Ruusuvuori, 1965). `build_data.py maamerkit` poimii rakennukset välimuistissa olevasta
+3D-mallista (`LANDMARK_BUILDINGS`) tiedostoiksi `public/data/maamerkit/<id>.json`. Mallit
+väritetään kuten muut rakennukset (luokka, vuosi tai korkeus; katot hieman tummempina), ne
+noudattavat ilmakuvavuoden suodatusta ja 3D-rakennusten valintaa, ja klikkaus avaa rakennuksen
+tiedot kuten muissakin rakennuksissa, lisänä maamerkin omat tiedot. Espoon 3D-mallissa on
+myös valokuvatekstuurit, mutta niillä rakennukset erottuivat liikaa muista. Lisää maamerkkejä
+saa lisäämällä rakennustunnukset `LANDMARK_BUILDINGS`-luetteloon ja määrittelyn `layers.js`:n
+`LANDMARKS`-luetteloon.
+
+## Rakennuksen tiedot
+
+Rakennusta klikkaamalla näkyvät rakennusaineiston tiedot (korkeus, kerrokset, valmistumisvuosi,
+käyttötarkoitus, osoite, asunnot, kantava rakenne, rakennustunnus ja kaltevakattoisilla
+räystään korkeus). Lisäksi Espoon rakennusrekisteristä (avoin WFS `GIS:Rakennukset`) haetaan
+rakennustunnuksella kerrosala, kokonaisala, tilavuus, kellarin pinta-ala, huoneistojen määrä,
+lämmitystapa, lämmön lähde, käyttötilanne, valmistumispäivä, kiinteistötunnus ja vanhan muodon
+rakennustunnus. Haku tehdään vasta klikattaessa (yleensä alle sekunti, kylmänä muutama sekunti),
+ja vastaukset muistetaan. Rakennusluvat (`GIS:Rakennusluvat`, `GIS:RakennusluvatEspoo`),
+rakennusvalvonnan aineistot (`rakval:*`) ja kattoviivat (`GIS:RakennustenKatot`) vaativat tunnukset.
 
 ## Sillat
 

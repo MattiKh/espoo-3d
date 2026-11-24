@@ -395,6 +395,7 @@ function buildingFilter() {
 function applyTimeFilter() {
   map.setFilter("rakennukset", buildingFilter());
   roofs?.refresh();
+  refreshLandmarks();
 }
 
 // Lähikuvassa 3D-rakennukset ja katot vain näkymän keskipisteen ympäriltä (layers.js, detailRadius).
@@ -481,11 +482,13 @@ function buildPanel() {
   document.getElementById("buildings").addEventListener("change", (e) => {
     map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none");
     roofs?.setVisible(e.target.checked);
+    refreshLandmarks();
   });
   document.getElementById("building-color").addEventListener("change", (e) => {
     state.buildingColor = e.target.value;
     map.setPaintProperty("rakennukset", "fill-extrusion-color", buildingColorExpr(state.buildingColor));
     roofs?.refresh();
+    refreshLandmarks();
     renderLegends();
   });
 
@@ -521,6 +524,8 @@ async function initTransit() {
       chargingUrl: "data/lataus.json",
     });
     window.espooTransit = transit;
+    landmarkModels = await import("./landmarks.js"); // sama moduuli, jonka transit.js on jo ladannut
+    refreshLandmarks();
     // Liikenne näkyy aina; paneelissa vain ajoneuvojen määrät.
     const counts = {};
     box.append(...TRANSIT_GROUPS.map(([id, title, color]) => el("div", { class: "stat" },
@@ -604,12 +609,22 @@ async function initRoofs() {
 
 // Katto ei kuulu MapLibren 3D-rakennuksiin, joten sen rakennus haetaan tunnuksella.
 function pickRoof(point) {
-  const b = roofs?.pick(point);
-  if (!b) return null;
-  const [f] = map.querySourceFeatures("rakennukset", {
-    sourceLayer: "rakennukset", filter: ["==", ["to-string", ["get", "tunnus"]], b.tunnus],
-  });
-  return f ? { properties: f.properties, layer: { id: "rakennukset", type: "fill-extrusion" } } : null;
+  const b = roofs?.pick(point), p = b && buildingProps(b.tunnus);
+  return p ? { properties: p, layer: { id: "rakennukset", type: "fill-extrusion" } } : null;
+}
+
+// Espoon 3D-kaupunkimallista piirretyt maamerkit väritetään ja suodatetaan kuten muut rakennukset
+// (landmarks.js). Ne piilotetaan myös, kun 3D-rakennukset otetaan pois.
+let landmarkModels = null;
+
+function landmarkShown(b) {
+  const year = ORTHO_YEARS[state.orthoIndex][0], latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
+  return document.getElementById("buildings").checked
+    && (!(state.ortho && year < latest) || (b.vuosi != null && b.vuosi <= year));
+}
+
+function refreshLandmarks() {
+  landmarkModels?.setLandmarkStyle({ colorOf: buildingColor, isVisible: landmarkShown });
 }
 
 // Ohut uomaviiva osuu helpommin, kun klikkauksen ympäriltä haetaan muutaman pikselin alue.
@@ -642,8 +657,97 @@ function formatValue(k, v) {
   return String(v);
 }
 
+// Kohteen ominaisuudet ponnahdusikkunan riveiksi: [otsikko, arvo].
+function featureRows(p) {
+  return Object.entries(p)
+    .filter(([k, v]) => !HIDDEN_FIELDS.has(k) && v !== "" && v !== null && !(k.startsWith("Liikennemäärä") && v === 0))
+    .map(([k, v]) => {
+      // Rakennusrekisteristä täydennettyjen rakennusten korkeus on arvioitu kerrosluvusta.
+      const label = k === "korkeus" && p.osa ? "Korkeus (m, rakennuksen osa)"
+        : k === "korkeus" && p.keski ? "Korkeus (m, kattojen keskikorkeus)"
+          : k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
+      return [label, formatValue(k, v)];
+    });
+}
+
+// Lisätiedot Espoon rakennusrekisteristä (avoin WFS GIS:Rakennukset) rakennustunnuksella. Haku
+// tehdään vasta, kun rakennuksen tiedot avataan, ja vastaukset muistetaan.
+const ESPOO_WFS = "https://kartat.espoo.fi/teklaogcweb/wfs.ashx";
+const GIS_NS = "http://www.tekla.com/schemas/GIS";
+const REGISTER_FIELDS = [
+  ["KERROSALA", "Kerrosala (m²)", "ala"], ["KOKONAISALA", "Kokonaisala (m²)", "ala"], ["TILAVUUS", "Tilavuus (m³)", "ala"],
+  ["KELLARINPINTAALA", "Kellarin pinta-ala (m²)", "ala"], ["HUONEISTOT", "Huoneistoja", "ala"],
+  ["LAMMITYSTAPA", "Lämmitystapa"], ["POLTTOAINE", "Lämmön lähde"], ["KAYTOSSAOLOTILANNE", "Käyttötilanne"],
+  ["VALMISTUNUT", "Valmistumispäivä"], ["SIJAINTIKIINTEISTO", "Kiinteistötunnus"], ["RAKENNUSTUNNUS", "Rakennustunnus (vanha)"],
+];
+const registerCache = new Map();
+
+function registerDetails(tunnus) {
+  if (!registerCache.has(tunnus)) {
+    const filter = '<Filter xmlns="http://www.opengis.net/ogc"><PropertyIsEqualTo><PropertyName>PYSYVARAKENNUSTUNNUS</PropertyName>'
+      + `<Literal>${String(tunnus).replace(/[^0-9A-Za-z-]/g, "")}</Literal></PropertyIsEqualTo></Filter>`;
+    const params = new URLSearchParams({ service: "WFS", version: "1.1.0", request: "GetFeature", typeName: "GIS:Rakennukset", maxFeatures: "1", filter });
+    registerCache.set(tunnus, fetch(`${ESPOO_WFS}?${params}`).then((r) => r.text()).then((xml) => {
+      const doc = new DOMParser().parseFromString(xml, "application/xml");
+      return REGISTER_FIELDS.map(([field, label, type]) => {
+        const v = doc.getElementsByTagNameNS(GIS_NS, field)[0]?.textContent?.trim();
+        if (!v || v === "Ei arvoa" || /1\.1\.1900$/.test(v)) return null;
+        if (type !== "ala") return [label, v];
+        const n = Number(v);
+        return n > 0 ? [label, n.toLocaleString("fi-FI", { maximumFractionDigits: 0 })] : null;
+      }).filter(Boolean);
+    }).catch(() => null));
+  }
+  return registerCache.get(tunnus);
+}
+
+const rowsTable = (rows) => el("table", {}, rows.map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", {}, v))));
+
+// Ponnahdusikkuna; rakennukselle (tunnus) haetaan lisäksi rekisterin tiedot.
+function showPopup(lngLat, { kind, title, rows, more, tunnus }) {
+  const register = tunnus ? el("div", { class: "register" }, el("p", { class: "more" }, "Haetaan lisätietoja Espoon rakennusrekisteristä…")) : null;
+  popup.setLngLat(lngLat)
+    .setDOMContent(el("div", { class: "pop" }, el("div", { class: "kind" }, kind), el("h3", {}, String(title)), rowsTable(rows), register, more))
+    .addTo(map);
+  if (!tunnus) return;
+  registerDetails(tunnus).then((extra) => {
+    const known = new Set(rows.map(([k]) => k));
+    const fresh = (extra ?? []).filter(([k]) => !known.has(k));
+    register.replaceChildren(fresh.length
+      ? el("div", {}, el("div", { class: "kind" }, "Espoon rakennusrekisteri"), rowsTable(fresh))
+      : el("p", { class: "more" }, extra ? "Rakennusrekisterissä ei ole lisätietoja." : "Rakennusrekisteriä ei juuri nyt saatu haettua."));
+  });
+}
+
+// Rakennuksen ominaisuudet rakennustiilistä tunnuksella. Osiin jaetun rakennuksen korkeus on osien
+// suurin korkeus.
+function buildingProps(tunnus) {
+  const parts = map.querySourceFeatures("rakennukset", {
+    sourceLayer: "rakennukset", filter: ["==", ["to-string", ["get", "tunnus"]], String(tunnus)],
+  });
+  if (!parts.length) return null;
+  const p = { ...parts[0].properties };
+  if (parts.length > 1 || p.osa) {
+    p.korkeus = Math.max(...parts.map((f) => f.properties.korkeus ?? 0));
+    delete p.osa;
+    delete p.keski;
+  }
+  return p;
+}
+
+// Maamerkki näytetään rakennuksena: rakennuksen tiedot, maamerkin omat tiedot ja rekisterin lisätiedot.
+function showLandmark(lngLat, l) {
+  const tunnus = String([l.building].flat()[0]), p = buildingProps(tunnus);
+  const rows = p ? featureRows(p) : [];
+  const known = new Set(rows.map(([k]) => k));
+  rows.push(...l.rows.filter(([k]) => !known.has(k)));
+  showPopup(lngLat, { kind: "Rakennus", title: l.name, rows, tunnus });
+}
+
 map.on("click", (e) => {
   if (transit?.click(e.point)) { popup.remove(); return; }
+  const landmark = transit?.pickLandmark(e.point);
+  if (landmark) { showLandmark(e.lngLat, landmark); return; }
   const queryable = map.getStyle().layers
     .filter((l) => (l.id === "rakennukset" || l.id.includes("__")) && map.getLayoutProperty(l.id, "visibility") !== "none")
     .map((l) => l.id);
@@ -657,23 +761,10 @@ map.on("click", (e) => {
   const stream = !feats.length || feats[0].layer.type === "fill" ? pickStream(e.point) : null;
   if (stream) { popup.setLngLat(e.lngLat).setDOMContent(stream).addTo(map); return; }
   if (!feats.length) { popup.remove(); return; }
-  const f = feats[0];
-  const key = layerKey(f.layer.id);
-  const p = f.properties;
-  const rows = Object.entries(p)
-    .filter(([k, v]) => !HIDDEN_FIELDS.has(k) && v !== "" && v !== null && !(k.startsWith("Liikennemäärä") && v === 0))
-    .map(([k, v]) => {
-      // Rakennusrekisteristä täydennettyjen rakennusten korkeus on arvioitu kerrosluvusta.
-      const label = k === "korkeus" && p.osa ? "Korkeus (m, rakennuksen osa)"
-        : k === "korkeus" && p.keski ? "Korkeus (m, kattojen keskikorkeus)"
-          : k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
-      return el("tr", {}, el("th", {}, label), el("td", {}, formatValue(k, v)));
-    });
+  const f = feats[0], key = layerKey(f.layer.id), p = f.properties;
   const title = POPUP_TITLES[key]?.(p) ?? p.Nimi ?? p.nimi ?? p.NIMI ?? layerTitle(key);
   const more = feats.length > 1 ? el("p", { class: "more" }, `+ ${feats.length - 1} muuta kohdetta tässä kohdassa`) : null;
-  popup.setLngLat(e.lngLat)
-    .setDOMContent(el("div", { class: "pop" }, el("div", { class: "kind" }, layerTitle(key)), el("h3", {}, String(title)), el("table", {}, rows), more))
-    .addTo(map);
+  showPopup(e.lngLat, { kind: layerTitle(key), title, rows: featureRows(p), more, tunnus: key === "rakennukset" ? p.tunnus : null });
 });
 
 map.on("mousemove", (e) => {

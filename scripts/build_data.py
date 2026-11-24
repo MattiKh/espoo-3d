@@ -1069,25 +1069,24 @@ def write_roof_tiles(roofs, targets):
 
 # ---------------------------------------------------------------- maamerkit
 
-# Tunnetut rakennukset, jotka piirretään kokonaan 3D-mallin (LOD2) pinnoista Espoon
-# valokuvatekstuureineen (public/landmarks.js). Tunnukset vastaavat layers.js:n LANDMARKS-
-# määrittelyjä, joissa rakennukset piilotetaan 3D-rakennuksista; ensimmäisen rakennuksen
-# keskipiste on mallin origo.
+# Tunnetut rakennukset, jotka piirretään kokonaan 3D-mallin (LOD2) pinnoista muiden rakennusten
+# väreillä (public/landmarks.js). Tunnukset vastaavat layers.js:n LANDMARKS-määrittelyjä, joissa
+# rakennukset piilotetaan 3D-rakennuksista; ensimmäisen rakennuksen keskipiste on mallin origo, ja
+# sen luokka, valmistumisvuosi ja korkeus määräävät värin.
 LANDMARK_BUILDINGS = {
     "dipoli": ["101562558J"],
     "haltia": ["1013191301", "1035754429"],
     "keilaniemen_torni": ["101572454S", "101572455T"],
     "tapiolan_kirkko": ["1008940880"],
 }
-APP = "{http://www.opengis.net/citygml/appearance/2.0}"
 
 
 def build_landmarks():
-    """Maamerkkien mallit: public/data/maamerkit/<id>.json = { lon, lat, korkeus, kuvat: [url, ...],
-    pinnat: [[kuva tai -1, laji (0 katto, 1 seinä), [x, y, z, ...] dm, [u, v, ...] × 10 000, [kolmiot]], ...] }.
-    Kärkipisteet ovat desimetreinä origosta (x itään, y pohjoiseen) ja alimmasta maanpinnasta.
-    Tekstuurit haetaan selaimessa suoraan Espoon karttapalvelusta (CORS sallittu)."""
-    log("maamerkit (LOD2-pinnat ja tekstuurit)")
+    """Maamerkkien mallit: public/data/maamerkit/<id>.json = { lon, lat, korkeus (mallin huippu),
+    luokka, vuosi, rakennuskorkeus (LOD0), pinnat: [[laji (0 katto, 1 seinä), [x, y, z, ...] dm,
+    [kolmiot]], ...] }. Kärkipisteet ovat desimetreinä origosta (x itään, y pohjoiseen) ja alimmasta
+    maanpinnasta."""
+    log("maamerkit (LOD2-pinnat)")
     with open(os.path.join(OUT, "rakennukset.geojson"), encoding="utf-8") as fh:
         targets = roof_targets(json.load(fh)["features"])
     folder = os.path.join(PUBLIC_DATA, "maamerkit")
@@ -1104,56 +1103,34 @@ def build_landmarks():
                     found[t] = landmark_surfaces(el, origin)
                 el.clear()
         surfaces = [s for t in ids for s in found.get(t, [])]
-        ground = min(z for kind, pts, _, _ in surfaces if kind == 1 for _, _, z in pts)
-        images, pinnat = [], []
-        for kind, pts, uri, uv in surfaces:
+        ground = min(z for kind, pts in surfaces if kind == 1 for _, _, z in pts)
+        pinnat = []
+        for kind, pts in surfaces:
             tris = triangulate_index(pts)
-            if not tris:
-                continue
-            if uri and uri not in images:
-                images.append(uri)
-            pinnat.append([images.index(uri) if uri else -1, kind,
-                           [v for x, y, z in pts for v in (round(x * 10), round(y * 10), round((z - ground) * 10))],
-                           [round(v * 10000) for v in uv] if uri else [], [i for tri in tris for i in tri]])
-        top = max(z for _, pts, _, _ in surfaces for _, _, z in pts) - ground
+            if tris:
+                pinnat.append([kind, [v for x, y, z in pts for v in (round(x * 10), round(y * 10), round((z - ground) * 10))],
+                               [i for tri in tris for i in tri]])
+        top = max(z for _, pts in surfaces for _, _, z in pts) - ground
         path = os.path.join(folder, lid + ".json")
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"lahde": "Espoon 3D-kaupunkimalli (LOD2) ja sen tekstuurit, Espoon kaupunki",
+            json.dump({"lahde": "Espoon 3D-kaupunkimalli (LOD2), Espoon kaupunki",
                        "lon": round(origin["lon"], 7), "lat": round(origin["lat"], 7), "korkeus": round(top, 1),
-                       "kuvat": images, "pinnat": pinnat}, fh, separators=(",", ":"))
+                       "luokka": origin["luokka"], "vuosi": origin["vuosi"], "rakennuskorkeus": origin["korkeus"],
+                       "pinnat": pinnat}, fh, ensure_ascii=False, separators=(",", ":"))
         log(f"  → maamerkit/{lid}.json: {len(found)}/{len(ids)} rakennusta, {len(pinnat)} pintaa, "
-            f"{len(images)} tekstuuria, korkeus {top:.1f} m, {os.path.getsize(path) / 1e3:.0f} kt")
+            f"korkeus {top:.1f} m, {os.path.getsize(path) / 1e3:.0f} kt")
 
 
 def landmark_surfaces(el, origin):
-    """Rakennuksen katto- ja seinäpinnat tekstuureineen: [(laji, pisteet metreinä origosta, kuvan
-    osoite tai None, [u, v, ...])]. Tekstuurikoordinaatit on liitetty renkaan tunnukseen."""
+    """Rakennuksen katto- ja seinäpinnat: [(laji, pisteet metreinä origosta)]."""
     k = math.cos(math.radians(origin["lat"]))
-    tex = {}
-    for ptex in el.iter(APP + "ParameterizedTexture"):
-        uri = ptex.findtext(APP + "imageURI")
-        for tc in ptex.iter(APP + "textureCoordinates"):
-            tex[(tc.get("ring") or "").lstrip("#")] = (uri, [float(v) for v in (tc.text or "").split()])
     out = []
     for kind, name in ((0, "RoofSurface"), (1, "WallSurface")):
-        for surface in el.iter(BLDG + name):
-            for poly in surface.iter(GML + "Polygon"):
-                ring = poly.find(f"{GML}exterior/{GML}LinearRing")
-                if ring is None:
-                    continue
-                pts = read_positions_3d(ring)
-                uri, uv = tex.get(ring.get(GML + "id"), (None, None))
-                if uv is None or len(uv) != 2 * len(pts):
-                    uri, uv = None, None  # osa kärkipisteistä hylättiin (fix_position): ei tekstuuria
-                if len(pts) > 3 and pts[0] == pts[-1]:
-                    pts, uv = pts[:-1], uv[:-2] if uv else uv
-                if len(pts) < 3:
-                    continue
-                local = [((x - origin["mx"]) * k, (y - origin["my"]) * k, z) for x, y, z in pts]
-                if kind == 0 and newell(local)[2] < 0:  # katto aina ylöspäin
-                    local = local[::-1]
-                    uv = [c for i in range(len(uv) - 2, -1, -2) for c in uv[i:i + 2]] if uv else uv
-                out.append((kind, local, uri, uv or []))
+        for points in surface_rings(el, name, origin):
+            local = [(x, y, z) for x, y, z in points]
+            if kind == 0 and newell(local)[2] < 0:  # katto aina ylöspäin
+                local = local[::-1]
+            out.append((kind, local))
     return out
 
 

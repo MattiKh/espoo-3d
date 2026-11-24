@@ -1793,31 +1793,46 @@ function chargeContent(car) {
 const landmarks = LANDMARKS.map((l) => {
   const build = LANDMARK_MODELS[l.id] ?? (l.lod2 ? lod2Landmark : null);
   if (!build) return null;
-  const entry = { ...l, isLandmark: true, obj: null, screen: null };
+  const entry = { ...l, obj: null, screen: null, rect: null };
   entry.obj = build(entry);
   entry.obj.matrixAutoUpdate = false;
   scene.add(entry.obj);
   return entry;
 }).filter(Boolean);
 
-const LANDMARK_TEXTURE_ZOOM = 14; // 3D-kaupunkimallin tekstuurit ladataan tätä lähempää
-const LANDMARK_TEXTURE_DIST = 4000; // m näkymän keskipisteestä
-
-// Maamerkit näkyvät samalta etäisyydeltä kuin 3D-rakennukset.
+// Maamerkit näkyvät samalta etäisyydeltä kuin 3D-rakennukset. Klikkausta varten lasketaan mallin
+// rajauslaatikon ala näytöllä (rect: [x0, y0, x1, y1]).
 function drawLandmarks(map, ctx) {
   const { zoom, cmx, cmy, sc, cosC, e, W, H } = ctx;
   for (const l of landmarks) {
     l.obj.visible = zoom >= 11;
-    l.screen = null;
+    l.screen = l.rect = null;
     if (!l.obj.visible) continue;
+    if (!l.obj.userData.box && l.obj.children.length) {
+      l.obj.matrix.identity();
+      l.obj.updateMatrixWorld(true);
+      l.obj.userData.box = new THREE.Box3().setFromObject(l.obj);
+    }
     const k = cosC / Math.cos(l.lat * D2R);
     const wx = (mercX(l.lon) - cmx) / sc, wy = -(mercY(l.lat) - cmy) / sc;
     const wz = (map.queryTerrainElevation([l.lon, l.lat]) ?? 0) * k;
     l.obj.matrix.makeScale(k, k, k).setPosition(wx, wy, wz);
     l.obj.matrixWorldNeedsUpdate = true;
     l.screen = toScreen(e, wx, wy, wz + (l.obj.userData.anchor ?? 40) * k, W, H);
-    const loadTextures = l.obj.userData.loadTextures;
-    if (loadTextures && zoom >= LANDMARK_TEXTURE_ZOOM && Math.hypot(wx, wy) < LANDMARK_TEXTURE_DIST) loadTextures();
+    const box = l.obj.userData.box;
+    if (!box) continue;
+    const rect = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const x of [box.min.x, box.max.x]) {
+      for (const y of [box.min.y, box.max.y]) {
+        for (const z of [box.min.z, box.max.z]) {
+          const s = toScreen(e, wx + x * k, wy + y * k, wz + z * k, W, H);
+          if (!s) { rect[0] = NaN; continue; }
+          rect[0] = Math.min(rect[0], s[0]); rect[1] = Math.min(rect[1], s[1]);
+          rect[2] = Math.max(rect[2], s[0]); rect[3] = Math.max(rect[3], s[1]);
+        }
+      }
+    }
+    if (!Number.isNaN(rect[0])) l.rect = rect;
   }
 }
 
@@ -1831,13 +1846,6 @@ export function addExtra(extra) {
   extras.push(extra);
   scene.add(extra.object);
   mapRef?.triggerRepaint();
-}
-
-function landmarkContent(l) {
-  return node("div", { class: "pop" },
-    node("div", { class: "kind" }, "Maamerkki"),
-    node("h3", {}, l.name),
-    node("table", {}, l.rows.map(([k, val]) => node("tr", {}, node("th", {}, k), node("td", {}, val)))));
 }
 
 let lastTick = performance.now();
@@ -1855,17 +1863,16 @@ function tick() {
   if (selected) popup.setLngLat(anchorOf(selected, now));
 }
 
-// Ikkunan kohta kartalla. Maan alla kulkevan metron, ilmassa olevan koneen ja tornin huipun kohdalla
-// ikkuna kiinnitetään maanpinnan kohtaan, jonka edessä kohde näkyy ruudulla.
+// Ikkunan kohta kartalla. Maan alla kulkevan metron ja ilmassa olevan koneen kohdalla ikkuna
+// kiinnitetään maanpinnan kohtaan, jonka edessä kohde näkyy ruudulla.
 function anchorOf(sel, now) {
   let scr = null;
-  if (sel.isLandmark) scr = sel.screen;
-  else if (sel.isPlane) scr = sel.screenAt > now - 500 ? sel.screen : null;
+  if (sel.isPlane) scr = sel.screenAt > now - 500 ? sel.screen : null;
   else if (KINDS[sel.kind]?.underground && sel.drawnAt > now - 500 && sel.screen?.length) {
     const n = sel.screen.length / 2;
     scr = [sel.screen[2 * (n >> 1)], sel.screen[2 * (n >> 1) + 1]];
   }
-  const own = sel.isLandmark ? [sel.lon, sel.lat] : [lonOf(sel.x), latOf(sel.y)];
+  const own = [lonOf(sel.x), latOf(sel.y)];
   if (!scr) return own;
   const ll = mapRef.unproject(scr);
   // Taivasta vasten näkyvän kohdan maanpinta voi olla kaukana; silloin käytetään kohteen omaa paikkaa.
@@ -2125,7 +2132,6 @@ function delayText(dl) {
 function popupContent(v) {
   if (v.isPlane) return planeContent(v);
   if (v.isShip) return shipContent(v);
-  if (v.isLandmark) return landmarkContent(v);
   if (v.isCharge) return chargeContent(v);
   const kind = KINDS[v.kind], i = v.info;
   const rows = [
@@ -2175,11 +2181,6 @@ function pick(point) {
     if (!probe) continue;
     const d = (probe[0] - point.x) ** 2 + (probe[1] - point.y) ** 2;
     if (d < bestD) { bestD = d; best = car; }
-  }
-  for (const l of landmarks) {
-    if (!l.screen) continue;
-    const d = ((l.screen[0] - point.x) ** 2 + (l.screen[1] - point.y) ** 2) / 4; // iso kohde: väljempi osuma
-    if (d < bestD) { bestD = d; best = l; }
   }
   return best;
 }
@@ -2280,7 +2281,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
       map.triggerRepaint();
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },
-    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen, alukseen tai maamerkkiin (ja tiedot avattiin).
+    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai alukseen (ja tiedot avattiin).
     click(point) {
       const v = pick(point);
       if (!v) { popup.remove(); return false; }
@@ -2288,6 +2289,18 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
       popup.setLngLat(anchorOf(v, performance.now())).setDOMContent(popupContent(v)).addTo(map);
       selected = v;
       return true;
+    },
+    // Maamerkki, jonka mallin kohdalle klikattiin, tai null. Tiedot näytetään rakennuksen tietoina
+    // (app.js); päällekkäisistä valitaan näytöllä pienin.
+    pickLandmark(point) {
+      let best = null, bestArea = Infinity;
+      for (const l of landmarks) {
+        const r = l.rect;
+        if (!r || point.x < r[0] || point.x > r[2] || point.y < r[1] || point.y > r[3]) continue;
+        const area = (r[2] - r[0]) * (r[3] - r[1]);
+        if (area < bestArea) { bestArea = area; best = l; }
+      }
+      return best && { id: best.id, name: best.name, building: best.building, rows: best.rows };
     },
   };
 }

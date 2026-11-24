@@ -121,48 +121,56 @@ export const LANDMARK_MODELS = {
   otaniemen_vesitorni: otaniemenVesitorni,
 };
 
-// Maamerkki Espoon 3D-kaupunkimallista (LOD2) valokuvatekstuureineen (scripts/build_data.py,
-// build_landmarks). Geometria ladataan heti, tekstuurit vasta, kun maamerkki tulee lähelle
-// (transit.js kutsuu userData.loadTextures). Siihen asti pinnat ovat vaaleita (seinät) ja
-// tummempia (katot). Mallin origo ja korkeus tulevat tiedostosta.
+// Maamerkki Espoon 3D-kaupunkimallista (LOD2) (scripts/build_data.py, build_landmarks). Malli
+// väritetään kuten muut rakennukset (setLandmarkStyle, app.js): seinät rakennuksen värillä ja
+// katot hieman tummempina kuten roofs.js:n katoissa. Mallin origo ja korkeus tulevat tiedostosta.
+const ROOF_SHADE = 0.78;
+const lod2Landmarks = [];
+let landmarkStyle = { colorOf: () => "#bdbdbd", isVisible: () => true };
+
+// Väritys ja näkyvyys (esim. ilmakuvan vuosi) samoin kuin muissa rakennuksissa.
+export function setLandmarkStyle(style) {
+  landmarkStyle = style;
+  for (const l of lod2Landmarks) paintLandmark(l);
+}
+
+function paintLandmark({ mesh, building, kinds }) {
+  if (!mesh) return;
+  mesh.visible = landmarkStyle.isVisible(building);
+  const c = new THREE.Color(landmarkStyle.colorOf(building)), col = mesh.geometry.attributes.color;
+  for (let i = 0; i < kinds.length; i++) {
+    const s = kinds[i] === 0 ? ROOF_SHADE : 1;
+    col.setXYZ(i, c.r * s, c.g * s, c.b * s);
+  }
+  col.needsUpdate = true;
+}
+
 export function lod2Landmark(entry) {
-  const group = new THREE.Group();
-  const plain = [0x8b8e90, 0xd8d5ce].map((color) => new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  const group = new THREE.Group(), record = { mesh: null, building: null, kinds: null };
+  lod2Landmarks.push(record);
   fetch(entry.lod2).then((r) => r.json()).then((data) => {
     entry.lon = data.lon;
     entry.lat = data.lat;
     group.userData.anchor = data.korkeus * 0.7;
-    // Yksi verkko tekstuuria kohden; tekstuurittomat pinnat lajeittain (katto, seinä).
-    const parts = new Map();
-    for (const [img, kind, v, uv, tri] of data.pinnat) {
-      const key = img >= 0 ? img : `laji${kind}`;
-      if (!parts.has(key)) parts.set(key, { img, kind, pos: [], uv: [], idx: [] });
-      const p = parts.get(key), base = p.pos.length / 3;
-      for (const c of v) p.pos.push(c / 10);
-      for (const c of uv) p.uv.push(c / 10000);
-      for (const i of tri) p.idx.push(base + i);
+    const pos = [], idx = [], kinds = [];
+    for (const [kind, v, tri] of data.pinnat) {
+      const base = pos.length / 3;
+      for (const c of v) pos.push(c / 10);
+      for (let i = 0; i < v.length; i += 3) kinds.push(kind);
+      for (const i of tri) idx.push(base + i);
     }
-    const textured = [];
-    for (const p of parts.values()) {
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.Float32BufferAttribute(p.pos, 3));
-      if (p.img >= 0) g.setAttribute("uv", new THREE.Float32BufferAttribute(p.uv, 2));
-      g.setIndex(p.idx);
-      g.computeVertexNormals();
-      const mesh = new THREE.Mesh(g, plain[p.kind]);
-      group.add(mesh);
-      if (p.img >= 0) textured.push([mesh, data.kuvat[p.img]]);
-    }
-    group.userData.loadTextures = () => {
-      group.userData.loadTextures = null;
-      const loader = new THREE.TextureLoader();
-      for (const [mesh, url] of textured) {
-        loader.load(url, (tex) => {
-          tex.colorSpace = THREE.SRGBColorSpace;
-          mesh.material = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }); // valaistus on kuvassa
-        });
-      }
-    };
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(pos.length), 3));
+    g.setIndex(idx);
+    g.computeVertexNormals(); // kullakin pinnalla omat kärkipisteet: pinnan normaali
+    // Pinnat voivat olla kumpaan suuntaan tahansa kierrettyjä, joten molemmat puolet piirretään.
+    record.mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+    record.building = { tunnus: String([entry.building].flat()[0]), luokka: data.luokka, vuosi: data.vuosi, korkeus: data.rakennuskorkeus };
+    record.kinds = kinds;
+    group.add(record.mesh);
+    group.userData.box = null; // klikkausalue lasketaan uudelleen (transit.js)
+    paintLandmark(record);
   }).catch((err) => console.warn("Maamerkin mallia ei saatu ladattua", entry.id, err));
   return group;
 }
