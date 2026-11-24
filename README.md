@@ -41,8 +41,10 @@ sähköautot näkyvät latauspaikoillaan.
   yksityiskohtia, mutta niitä olisi moninkertaisesti. Vanhemmissa (2015: 0,20 m, 2005: 0,25 m)
   menetetään hieman tarkkuutta.
 - Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (`ServiceException`, HTTP 200)
-  kuvan sijaan. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin päästä; muuten ruutu jäisi
-  virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva tarkentuisi.
+  kuvan sijaan tai hylkää yhteydet hetkeksi. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin
+  päästä; muuten ruutu jäisi virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva
+  tarkentuisi.
+- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (Otaniemi–Laajalahti, ks. alla).
 - Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
   ruutujen välissä vaaleana rakona. Ilmakuvan alla tausta on siksi ilmakuvan keskisävyinen
   harmaa, joten raot ja kuvauksen reunat eivät erotu. (Ruutujen haku suurempana ja reunojen
@@ -74,7 +76,8 @@ tiedostoon `public/data/lataus.json`. Rakennusten kaltevat katot tallentuvat kan
 `public/tiles/katot` (`python3 scripts/build_data.py katot`; ensimmäinen ajo lataa koko
 Espoon 3D-mallin, noin 2,5 Gt). Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`) ja siltojen
-korkeusmallin tiiliin Pythonin numpy ja Pillow (`pip3 install numpy pillow`).
+korkeusmallin tiiliin Pythonin numpy ja Pillow (`pip3 install numpy pillow`). Pelillisen
+maaston maanpeiteluokat haetaan komennolla `python3 scripts/build_data.py maanpeite`.
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
 maankaytto tiilet`. Kansiot `cache/` ja `data/` eivät ole versionhallinnassa;
@@ -110,6 +113,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Valuma-alueet ja niiden purkupisteet (yläpuolinen valuma-ala) | Syke, valuma-aluejako (INSPIRE WFS, CC BY 4.0) |
 | Espoonjoen virtaama (päiväarvot 1995 alkaen) | Syke, hydrologiarajapinta (CC BY 4.0) |
 | Väestöruudukko 250 m (2025) | HSY WFS |
+| Maanpeiteluokat (pelillinen maasto) | HSY:n maanpeiteaineisto 2024, WMS |
 | Korkeusmalli 2 m | Maanmittauslaitos (CC BY 4.0), tiilet: Mapterhorn |
 | Bussien, raitiovaunujen, lähijunien ja metron sijainnit | HSL:n HFP-rajapinta (MQTT, CC BY 4.0) |
 | Kauko- ja tavarajunien sijainnit ja tiedot | Fintraffic / Digitraffic (MQTT ja REST, CC BY 4.0) |
@@ -464,6 +468,32 @@ virtaama, sitä nopeampia ja leveämpiä pulssit ovat. Isossa uomassa pulssin ke
 reunoja edellä kuten virtaus. Sillan kohdalla nauha kulkee kannen alta alkuperäisellä
 maanpinnalla, eikä rummuissa näytetä pulsseja.
 
+## Pelillinen maasto (kokeilu)
+
+Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä Otaniemen ja Laajalahden alueella (noin
+3,6 × 2,4 km). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
+maa, avokalliot, puusto neljässä korkeusluokassa (2–10, 10–15, 15–20 ja yli 20 m), muut päällystetyt
+pinnat, päällystämättömät ja päällystetyt tiet sekä rakennukset. `build_data.py` hakee luokat
+HSY:n karttapalvelusta yhtenä kuvana ruutua kohden ja tunnistaa luokan tyylin täyttöväristä
+(selite JSON-muodossa). Ne tallentuvat harmaasävyruutuina (arvo = luokka) kansioon
+`public/tiles/maanpeite` (taso 16, 1024 px eli noin 0,3 m; 96 ruutua, 3,7 Mt). Koko Espoo veisi
+samalla tarkkuudella arviolta 0,15–0,2 Gt ja 1 metrin tarkkuudella 30–40 Mt.
+
+Selain maalaa luokista tekstuurit työsäikeessä (`public/pelimaasto_worker.js`): metsissä on
+latvuksia (korkeammassa puustossa suurempia ja tummempia), pelloilla vakoja, vedessä aaltoja, kalliossa
+halkeamia, pihoilla laatoitus ja teillä asfaltti tai sora. Kuviot lasketaan maailman
+koordinaateista, joten ne jatkuvat ruudusta toiseen, ja luokkarajat ovat hieman epäsäännöllisiä ja
+lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle kuten ilmakuvan
+(tasot 14–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
+Ruudun maalaus vie työsäikeessä 13–50 ms.
+
+Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
+matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti
+siirrettynä, puun korkeus puustoluokasta, matalammassa puustossa enimmäkseen lehtipuita (pyöreä
+latvus) ja korkeammassa havupuita (kartio). Puita on noin 10 000, ja niiden korkeus haetaan
+maastosta vähitellen. Puut piirretään instansseina joukkoliikenteen 3D-tasolle; piirto vie noin
+4 ms.
+
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
@@ -472,6 +502,7 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
+- `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)

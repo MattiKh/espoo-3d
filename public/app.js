@@ -104,8 +104,8 @@ function orthoRelease() {
 // signal: kartan peruma ruutu (esim. näkymästä jo poistunut) jätetään hakematta, jos se on vielä jonossa.
 async function loadOrtho(url, priority, signal) {
   if (orthoDone.has(url)) {
-    const r = await fetch(url, { priority });
-    if (r.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
+    const r = await fetch(url, { priority }).catch(() => null);
+    if (r?.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
     orthoDone.delete(url);
   }
   for (let i = 0; ; i++) {
@@ -113,8 +113,9 @@ async function loadOrtho(url, priority, signal) {
     let r, data;
     try {
       if (signal?.aborted) throw new DOMException("Ruutua ei enää tarvita", "AbortError");
-      r = await fetch(url, { priority, cache: i ? "no-cache" : "default" });
-      if (r.ok && r.headers.get("content-type")?.startsWith("image/")) data = await r.arrayBuffer();
+      // Verkkovirhe (palvelu hylkää toisinaan yhteydet hetkeksi) yritetään uudelleen kuten virhevastaus.
+      r = await fetch(url, { priority, cache: i ? "no-cache" : "default" }).catch(() => null);
+      if (r?.ok && r.headers.get("content-type")?.startsWith("image/")) data = await r.arrayBuffer();
     } finally {
       orthoRelease();
     }
@@ -123,7 +124,7 @@ async function loadOrtho(url, priority, signal) {
       orthoDone.add(url);
       return data;
     }
-    if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r.status})`);
+    if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r?.status ?? "verkkovirhe"})`);
     await new Promise((resolve) => setTimeout(resolve, ORTHO_RETRY[i]));
   }
 }
@@ -452,6 +453,23 @@ function setOrtho(on) {
   applyTimeFilter();
 }
 
+// Pelillinen maasto (kokeilu, pelimaasto.js) ladataan vasta, kun se valitaan.
+let gameTerrain = null;
+
+async function setGameTerrain(on) {
+  if (on && !gameTerrain) {
+    try {
+      const [{ createGameTerrain }, { addExtra }] = await Promise.all([import("./pelimaasto.js"), import("./transit.js")]);
+      gameTerrain = await createGameTerrain(map, { base: BASE, version: TILE_VERSION });
+      addExtra(gameTerrain.drawable);
+    } catch (err) {
+      console.warn("Pelillistä maastoa ei saatu ladattua", err);
+      return;
+    }
+  }
+  gameTerrain?.setVisible(on);
+}
+
 function setOrthoYear(index) {
   state.orthoIndex = index;
   map.getSource("ortho").setTiles(orthoTiles(ORTHO_YEARS[index][1]));
@@ -556,6 +574,8 @@ function buildPanel() {
   ortho.checked = state.ortho;
   ortho.addEventListener("change", () => setOrtho(ortho.checked));
   document.getElementById("ortho-options").hidden = !state.ortho;
+  const game = document.getElementById("pelimaasto");
+  game.addEventListener("change", () => setGameTerrain(game.checked));
   document.getElementById("ortho-years").append(...ORTHO_YEARS.map(([year], i) => el("label", { class: "seg" },
     el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
     el("span", {}, String(year)))));

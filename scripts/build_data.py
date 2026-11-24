@@ -1954,6 +1954,75 @@ def build_rails():
         f"{os.path.getsize(path) / 1e3:.0f} kt")
 
 
+# Pelillinen maasto (kokeilu): HSY:n maanpeiteaineiston luokat rasteriruutuina pieneltä alueelta.
+# Selain maalaa luokista tekstuurit ja sijoittelee metsiin 3D-puut (public/pelimaasto.js).
+HSY_WMS = "https://kartta.hsy.fi/geoserver/wms"
+# Luokat piirtojärjestyksessä (tiet ja rakennukset päällimmäisinä); ruudun arvo on luokan indeksi + 1.
+# Vesi ja merialue ovat samaa väriä HSY:n tyylissä, joten ne ovat yksi luokka.
+LANDCOVER_CLASSES = ["vesi", "pellot", "muu_avoin_matala_kasvillisuus", "paljas_maa", "avokalliot", "puusto_2_10m",
+                     "puusto_10_15m", "puusto_15_20m", "puusto_yli20m", "muu_vetta_lapaisematon_pinta",
+                     "paallystamaton_tie", "paallystetty_tie", "rakennus"]
+LANDCOVER_LAYERS = ["merialue"] + LANDCOVER_CLASSES
+LANDCOVER_BBOX = (24.80, 60.175, 24.85, 60.195)  # Otaniemi–Laajalahti
+LANDCOVER_AREA_ZOOM = 14  # alue koostuu kokonaisista tämän tason ruuduista (selaimen alin taso)
+LANDCOVER_ZOOM, LANDCOVER_PX = 16, 1024  # luokkaruudut: 1024 px, noin 0,3 m
+
+
+def build_landcover():
+    """Maanpeiteluokat (HSY 2024) pelillistä maastoa varten: LANDCOVER_BBOXin kattavat kokonaiset
+    LANDCOVER_AREA_ZOOM-tason ruudut LANDCOVER_ZOOM-tason harmaasävyruutuina (arvo = luokka + 1)
+    kansioon public/tiles/maanpeite, sekä luettelo public/data/maanpeite.json. Luokan tunnistaa HSY:n
+    tyylin täyttöväristä (selite JSON-muodossa); kaikki luokat haetaan yhdellä kuvalla ruutua kohden."""
+    import numpy as np
+    from PIL import Image
+    log("maanpeite (HSY)")
+    color = {}
+    for k, name in enumerate(LANDCOVER_LAYERS):
+        dest = os.path.join(CACHE, "maanpeite", f"selite_{name}.json")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        params = {"SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetLegendGraphic", "FORMAT": "application/json",
+                  "LAYER": f"asuminen_ja_maankaytto:maanpeite_{name}_2024"}
+        with open(http_get(HSY_WMS, params, dest), encoding="utf-8") as fh:
+            fill = json.load(fh)["Legend"][0]["rules"][0]["symbolizers"][0]["Polygon"]["fill"]
+        color[int(fill[1:], 16)] = LANDCOVER_CLASSES.index(name if name != "merialue" else "vesi") + 1
+    (w, s, e, n), a = LANDCOVER_BBOX, 2 ** LANDCOVER_AREA_ZOOM
+    x0, y1 = (int(v * a) for v in merc_unit(w, s))
+    x1, y0 = (int(v * a) for v in merc_unit(e, n))
+    f = 2 ** (LANDCOVER_ZOOM - LANDCOVER_AREA_ZOOM)
+    tiles = [(x, y) for x in range(x0 * f, (x1 + 1) * f) for y in range(y0 * f, (y1 + 1) * f)]
+    world, size = 2 * math.pi * R, 2 * math.pi * R / 2 ** LANDCOVER_ZOOM
+    layers = ",".join(f"asuminen_ja_maankaytto:maanpeite_{c}_2024" for c in LANDCOVER_LAYERS)
+
+    def fetch(t):
+        bx, by = -world / 2 + t[0] * size, world / 2 - t[1] * size
+        return http_get(HSY_WMS, {"SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetMap", "LAYERS": layers, "STYLES": "",
+                                  "SRS": "EPSG:3857", "WIDTH": LANDCOVER_PX, "HEIGHT": LANDCOVER_PX, "FORMAT": "image/png",
+                                  "TRANSPARENT": "TRUE", "FORMAT_OPTIONS": "antialias:none",
+                                  "BBOX": f"{bx},{by - size},{bx + size},{by}"},
+                        os.path.join(CACHE, "maanpeite", f"{t[0]}_{t[1]}.png"))
+
+    out = os.path.join(TILES, "maanpeite")
+    shutil.rmtree(out, ignore_errors=True)
+    lut = np.zeros(1 << 24, np.uint8)
+    for c, k in color.items():
+        lut[c] = k
+    total = 0
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        for (tx, ty), path in zip(tiles, ex.map(fetch, tiles)):
+            rgba = np.asarray(Image.open(path).convert("RGBA")).astype(np.uint32)
+            cls = np.where(rgba[..., 3] > 127, lut[(rgba[..., 0] << 16) | (rgba[..., 1] << 8) | rgba[..., 2]], 0)
+            dest = os.path.join(out, str(LANDCOVER_ZOOM), str(tx), f"{ty}.png")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            Image.fromarray(cls.astype(np.uint8)).save(dest, optimize=True)
+            total += os.path.getsize(dest)
+    lon0, lat1 = merc_to_lonlat(-world / 2 + x0 * world / a, world / 2 - y0 * world / a)
+    lon1, lat0 = merc_to_lonlat(-world / 2 + (x1 + 1) * world / a, world / 2 - (y1 + 1) * world / a)
+    with open(os.path.join(PUBLIC_DATA, "maanpeite.json"), "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "HSY, Helsingin seudun maanpeiteaineisto 2024", "luokat": LANDCOVER_CLASSES,
+                   "taso": LANDCOVER_ZOOM, "alue": [lon0, lat0, lon1, lat1]}, fh, ensure_ascii=False)
+    log(f"  → tiles/maanpeite: {len(tiles)} ruutua, {total / 1e6:.1f} Mt")
+
+
 def build_district_labels():
     """Kaupunginosien nimille yksi piste kunkin alueen sisältä. Rajat ulottuvat usein
     merelle, joten nimi sijoitetaan alueen rakennusten keskelle, kun rakennukset on ladattu."""
@@ -3295,6 +3364,8 @@ def main():
         build_roofs()  # lisää rakennuksiin räystään korkeuden ja tekee rakennustiilet uudelleen
     if want("rakennukset") or want("katot") or want("maamerkit"):
         build_landmarks()  # 3D-malli on välimuistissa kattojen jäljiltä
+    if want("maanpeite"):
+        build_landcover()
     if want("kaupunginosat"):
         build_district_labels()  # rakennusten jälkeen: nimi sijoitetaan rakennusten keskelle
     if want("lataus"):
