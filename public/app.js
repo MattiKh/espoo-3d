@@ -4,6 +4,9 @@ import {
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
+import { addHaze } from "./haze.js";
+
+const FOG_COLOR = "#e8f0f7"; // utu ja taivaan alaosa
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -295,9 +298,11 @@ function buildStyle() {
     sources,
     layers,
     terrain: { source: "dem", exaggeration: TERRAIN_EXAGGERATION },
+    // MapLibren sumu koskisi vain maastoa (fog-ground-blend 1: ei sumua), joten utu on kaiken päällä
+    // oma liukuvärinsä (haze.js). Taivaan väri vaihtuu horisontissa udun väriin.
     sky: {
-      "sky-color": "#7fb6ea", "horizon-color": "#dcecfa", "fog-color": "#e8f0f7",
-      "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.7, "fog-ground-blend": 0.35, "atmosphere-blend": 0.6,
+      "sky-color": "#7fb6ea", "horizon-color": "#dcecfa", "fog-color": FOG_COLOR,
+      "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.7, "fog-ground-blend": 1, "atmosphere-blend": 0.6,
     },
   };
 }
@@ -326,6 +331,7 @@ const map = new maplibregl.Map({
   fadeDuration: 0,
 });
 window.espooMap = map; // selaimen konsolia varten
+addHaze(map, FOG_COLOR);
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
