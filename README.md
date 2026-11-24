@@ -9,15 +9,15 @@ sähköautot näkyvät latauspaikoillaan.
 ## Paneeli
 
 - Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
-- Aineistoja on viisitoista: kaupunginosien nimet, Kauniaisen raja, asemakaavan
-  käyttötarkoitukset, vireillä olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet,
-  purot ja joet, asukkaat 250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu,
-  kiinteistörajat, kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat
-  kaupunginosien nimet, Kauniaisen raja, vesialueet, purot ja joet sekä sadetutka.
+- Aineistoja on neljätoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
+  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, purot ja joet, asukkaat
+  250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat,
+  kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet,
+  vesialueet, purot ja joet sekä sadetutka.
   Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
 - Kaupunginosan nimi on alueen rakennusten keskellä, koska kaupunginosien rajat ulottuvat
   usein merelle (`kaupunginosat_nimet.geojson`, `build_data.py kaupunginosat`).
-- Kauniainen on oma kaupunkinsa Espoon sisällä: raja näkyy katkoviivana, alue on hieman
+- Kauniainen on oma kaupunkinsa Espoon sisällä: raja näkyy aina katkoviivana, alue on hieman
   tummennettu ja nimi KAUNIAINEN näkyy alueen keskellä (`kauniainen.geojson`,
   `build_data.py kauniainen`). Raja on HSY:n seutukartasta, koska Tilastokeskuksen
   1:1 000 000 -raja on karkea; Kauniaisesta ei ole 3D-rakennuksia, koska ne tulevat Espoon

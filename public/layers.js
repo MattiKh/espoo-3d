@@ -100,14 +100,10 @@ const trafficVolume = ["max",
 //   parametreja, ja paint täydentää karttakuvan tyyliä.
 // Nimitaso:   { id, title, labels: "data/TIEDOSTO.geojson" }
 //   pisteiden nimi (kenttä nimi) näytetään tekstinä kaiken muun päällä.
-// Aluetaso:   { id, title, area: "data/TIEDOSTO.geojson" }
-//   alue (nimi pienin kirjaimin) rajattuna ja tummennettuna sekä nimipiste (nimi isoin kirjaimin).
 
 export const LAYERS = [
   // Nimi on kaupunginosan rakennusten keskellä, koska rajat ulottuvat usein merelle (build_data.py).
   { id: "kaupunginosat_nimet", title: "Kaupunginosien nimet", on: true, labels: "data/kaupunginosat_nimet.geojson" },
-  // Kauniainen on oma kaupunkinsa Espoon sisällä: raja HSY:n seutukartasta (build_data.py).
-  { id: "kauniainen", title: "Kauniaisen raja", on: true, area: "data/kauniainen.geojson" },
   {
     id: "maankaytto", title: "Asemakaavan käyttötarkoitukset", legend: "landuse",
     vector: [
@@ -167,6 +163,10 @@ export const LAYERS = [
   // Ilmatieteen laitoksen sadetutka: sateen voimakkuus (mm/h), päivittyy viiden minuutin välein.
   { id: "sadetutka", title: "Sadetutka", radar: "suomi_rr_eureffin", on: true, legend: "radar" },
 ];
+
+// Kauniainen on oma kaupunkinsa Espoon sisällä. Sen raja (HSY:n seutukartta), läpikuultava
+// tummennus ja nimi näkyvät aina (build_data.py, build_kauniainen).
+export const KAUNIAINEN = "data/kauniainen.geojson";
 
 // Sadetutkan selite: Ilmatieteen laitoksen värit sateen voimakkuuden (mm/h) mukaan.
 export const RADAR_STOPS = [

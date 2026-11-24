@@ -1,7 +1,7 @@
 import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
-  LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION, WMS_SERVICES,
-  detailRadius,
+  KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
+  WMS_SERVICES, detailRadius,
 } from "./layers.js";
 import { patchDemTile } from "./bridges.js";
 
@@ -222,7 +222,6 @@ function buildStyle() {
   for (const def of LAYERS) {
     if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
     if (def.labels) continue; // nimet lisätään kaiken päälle (alla)
-    if (def.area) continue; // alue 3D-rakennusten alle ja nimi kaiken päälle (alla)
     if (def.streams) continue; // lisätään, kun uomat on ladattu (initStreams)
     if (def.wms) {
       sources[def.id] = {
@@ -242,18 +241,17 @@ function buildStyle() {
   }
   overlay.sort((a, b) => order[a.type] - order[b.type]);
   layers.push(...overlay.filter((l) => order[l.type] < 4));
-  for (const def of LAYERS.filter((d) => d.area)) {
-    sources[def.id] = { type: "geojson", data: def.area, attribution: ATTR_HSY };
-    const area = ["==", ["get", "nimi"], "Kauniainen"], layout = { visibility: visibility(def.on), "line-join": "round" };
-    layers.push(
-      { id: `${def.id}-tausta`, type: "fill", source: def.id, filter: area, layout: { visibility: visibility(def.on) },
-        paint: { "fill-color": "#0b1a2a", "fill-opacity": 0.2 } },
-      { id: `${def.id}-reuna-varjo`, type: "line", source: def.id, filter: area, layout,
-        paint: { "line-color": "#0b1a2a", "line-opacity": 0.55, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 3, 16, 6] } },
-      { id: `${def.id}-reuna`, type: "line", source: def.id, filter: area, layout,
-        paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.3, 16, 2.6], "line-dasharray": [3, 2] } },
-    );
-  }
+  // Kauniainen erottuu aina: läpikuultava tummennus ja katkoviivaraja 3D-rakennusten alla, nimi ylimpänä.
+  sources.kauniainen = { type: "geojson", data: KAUNIAINEN, attribution: ATTR_HSY };
+  const kauniainen = ["==", ["get", "nimi"], "Kauniainen"];
+  layers.push(
+    { id: "kauniainen-tausta", type: "fill", source: "kauniainen", filter: kauniainen,
+      paint: { "fill-color": "#0b1a2a", "fill-opacity": 0.2 } },
+    { id: "kauniainen-reuna-varjo", type: "line", source: "kauniainen", filter: kauniainen, layout: { "line-join": "round" },
+      paint: { "line-color": "#0b1a2a", "line-opacity": 0.55, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 3, 16, 6] } },
+    { id: "kauniainen-reuna", type: "line", source: "kauniainen", filter: kauniainen, layout: { "line-join": "round" },
+      paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.3, 16, 2.6], "line-dasharray": [3, 2] } },
+  );
   layers.push({
     id: "rakennukset", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
     filter: buildingFilter(),
@@ -279,17 +277,14 @@ function buildStyle() {
       paint: { "text-color": "#1d2a35", "text-halo-color": "rgba(255,255,255,0.92)", "text-halo-width": 1.6 },
     });
   }
-  for (const def of LAYERS.filter((d) => d.area)) {
-    layers.push({
-      id: `${def.id}-nimi`, type: "symbol", source: def.id, filter: ["==", ["get", "nimi"], "KAUNIAINEN"], minzoom: 9,
-      layout: {
-        "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"], "text-letter-spacing": 0.3,
-        "text-size": ["interpolate", ["linear"], ["zoom"], 9, 12, 15, 22], "text-allow-overlap": true,
-        visibility: visibility(def.on),
-      },
-      paint: { "text-color": "#ffffff", "text-halo-color": "rgba(11,26,42,0.85)", "text-halo-width": 2 },
-    });
-  }
+  layers.push({
+    id: "kauniainen-nimi", type: "symbol", source: "kauniainen", filter: ["==", ["get", "nimi"], "KAUNIAINEN"], minzoom: 9,
+    layout: {
+      "text-field": ["get", "nimi"], "text-font": ["Noto Sans Bold"], "text-letter-spacing": 0.3,
+      "text-size": ["interpolate", ["linear"], ["zoom"], 9, 12, 15, 22], "text-allow-overlap": true,
+    },
+    paint: { "text-color": "#ffffff", "text-halo-color": "rgba(11,26,42,0.85)", "text-halo-width": 2 },
+  });
 
   return {
     version: 8,
@@ -357,10 +352,6 @@ function setVisible(def, on) {
     streams?.setVisible(on);
   } else if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
-  } else if (def.area) {
-    for (const l of map.getStyle().layers) {
-      if (l.id.startsWith(def.id + "-")) map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
-    }
   } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else {
