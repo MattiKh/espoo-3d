@@ -2,8 +2,8 @@
 // korkeusluokittain, pellot, tiet, vesi, ...) ovat valmiina rasteriruutuina (scripts/build_data.py,
 // public/tiles/maanpeite). Selain maalaa niistä työsäikeessä (pelimaasto_worker.js) tekstuurit, ja
 // MapLibre levittää ne maaston päälle kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
-// Päällä ovat kantakartan teiden ja polkujen reunaviivat sekä kadunnimet kantakartan sijainnein
-// ja suunnin (public/data/pelimaasto_kanta.geojson).
+// Päällä ovat kantakartan teiden ja polkujen reunaviivat, kadunnimet kantakartan sijainnein ja
+// suunnin sekä OpenStreetMapista kaistaviivat ja raitiotiet (public/data/pelimaasto_kanta.geojson).
 // Metsiin sijoitellaan kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
 // (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
@@ -15,7 +15,12 @@ const TREE_MOVE = 150; // m: puut sijoitellaan uudelleen, kun keskipiste siirtyy
 const TREE_MAX = 40000;
 const HEIGHT_BUDGET = 2500; // maaston korkeuskyselyä piirtokertaa kohden
 const HEIGHT_RECHECK = 5000; // ms: korkeudet tarkistetaan kerran uudelleen (korkeusmalli tarkentuu)
-const LAYER_IDS = ["pelimaasto", "pelimaasto-varjostus", "pelimaasto-reunat", "pelimaasto-polut", "pelimaasto-nimet"];
+const LAYER_IDS = ["pelimaasto", "pelimaasto-varjostus", "pelimaasto-reunat", "pelimaasto-polut", "pelimaasto-keskiviivat",
+  "pelimaasto-kaistaviivat", "pelimaasto-raidepohja", "pelimaasto-ratapolkyt", "pelimaasto-kisko-v", "pelimaasto-kisko-o",
+  "pelimaasto-nimet"];
+// Leveys metreinä karttapikseleiksi zoomaustason mukaan (512 px:n ruudut, Espoon leveysaste).
+const M_PER_PX0 = 78271.517 * Math.cos(60.185 * D2R);
+const meters = (m) => ["interpolate", ["exponential", 2], ["zoom"], 12, (m * 2 ** 12) / M_PER_PX0, 22, (m * 2 ** 22) / M_PER_PX0];
 
 const mercX = (lon) => (lon + 180) / 360;
 const mercY = (lat) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * D2R) / 2)) / Math.PI) / 2;
@@ -81,7 +86,7 @@ export async function createGameTerrain(map, { base, version }) {
   const edgeWidth = ["interpolate", ["exponential", 2], ["zoom"], 15, 0.5, 18, 2, 20, 5];
   map.addLayer({
     id: "pelimaasto-reunat", type: "line", source: "pelimaasto-kanta", minzoom: 15,
-    filter: ["all", ["==", ["geometry-type"], "LineString"], ["!=", ["get", "k"], "polku"]],
+    filter: ["in", ["get", "k"], ["literal", ["ajorata", "kevyt"]]],
     layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
     paint: { "line-color": ["match", ["get", "k"], "ajorata", "#f3f0e4", "#e2d9c0"], "line-width": edgeWidth, "line-opacity": 0.9 },
   }, before);
@@ -91,6 +96,34 @@ export async function createGameTerrain(map, { base, version }) {
     layout: { visibility: "none", "line-cap": "round" },
     paint: { "line-color": "#d9c9a0", "line-width": edgeWidth, "line-dasharray": [2, 2], "line-opacity": 0.9 },
   }, before);
+  // Kaistaviivat: keltainen keskiviiva vastakkaisten suuntien välissä, valkoiset kaistaviivat
+  // (3 m viiva, 9 m väli; katkoviivan mitat ovat viivan leveyden kerrannaisia).
+  for (const [id, k, color] of [["pelimaasto-keskiviivat", "keski", "#f1c232"], ["pelimaasto-kaistaviivat", "kaista", "#f6f5ef"]]) {
+    map.addLayer({
+      id, type: "line", source: "pelimaasto-kanta", minzoom: 16, filter: ["==", ["get", "k"], k],
+      layout: { visibility: "none", "line-join": "round" },
+      paint: { "line-color": color, "line-width": meters(0.35), "line-dasharray": [3 / 0.35, 9 / 0.35] },
+    }, before);
+  }
+  // Raiteet: sepelipohja, ratapölkyt ja kaksi kiskoa (raideleveys noin 1,5 m).
+  const rails = ["in", ["get", "k"], ["literal", ["rata", "ratikka"]]];
+  map.addLayer({
+    id: "pelimaasto-raidepohja", type: "line", source: "pelimaasto-kanta", minzoom: 14, filter: rails,
+    layout: { visibility: "none", "line-join": "round" },
+    paint: { "line-color": ["match", ["get", "k"], "rata", "#8a7f71", "#76716a"], "line-width": meters(3.2) },
+  }, before);
+  map.addLayer({
+    id: "pelimaasto-ratapolkyt", type: "line", source: "pelimaasto-kanta", minzoom: 16.5, filter: rails,
+    layout: { visibility: "none" },
+    paint: { "line-color": "#4e3b2a", "line-width": meters(2.5), "line-dasharray": [0.22 / 2.5, 0.38 / 2.5] },
+  }, before);
+  for (const [id, side] of [["pelimaasto-kisko-v", -1], ["pelimaasto-kisko-o", 1]]) {
+    map.addLayer({
+      id, type: "line", source: "pelimaasto-kanta", minzoom: 15.5, filter: rails,
+      layout: { visibility: "none", "line-join": "round" },
+      paint: { "line-color": "#dfe3e6", "line-width": meters(0.18), "line-offset": meters(side * 0.75) },
+    }, before);
+  }
   // Nimet maaston pintaan kuten kantakartassa; rakennukset peittävät ne, joten ne ovat rakennusten alla.
   const size = (small, medium, large) => ["match", ["get", "koko"], "suuri", large, "keskikokoinen", medium, small];
   map.addLayer({

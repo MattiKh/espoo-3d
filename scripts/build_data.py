@@ -2027,6 +2027,57 @@ def build_landcover():
 # Pelillisen maaston päälle kantakartan teiden reunaviivat ja kadunnimet (sama alue).
 LANDCOVER_LINE_TYPES = {"kanta:Liikennevayla": "ajorata", "kanta:Kevyenliikenteenvayla": "kevyt", "kanta:Polku": "polku"}
 LANDCOVER_CELL = 2000  # Web Mercator -yksikköä: haku ruuduittain
+# Kaistaviivat OpenStreetMapin teistä (kaistan leveys m tien tyypin mukaan) ja raiteet.
+LANE_ROADS = {"motorway": 3.75, "trunk": 3.75, "primary": 3.5, "secondary": 3.5, "tertiary": 3.25}
+RAIL_KINDS = {"rail": "rata", "tram": "ratikka", "light_rail": "ratikka"}
+
+
+def osm_covered(tags):
+    """Kulkeeko OSM:n väylä tunnelissa tai katoksen alla (ei maaston pinnassa)?"""
+    return (tags.get("tunnel") not in (None, "no") or tags.get("covered") not in (None, "no")
+            or tags.get("layer", "0").startswith("-"))
+
+
+def offset_line(pts, d):
+    """Murtoviiva [(x, y), ...] siirrettynä d metriä oikealle (kulkusuuntaan nähden); kulmissa
+    viisteen pituus rajataan."""
+    normals = []
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        ln = math.hypot(bx - ax, by - ay) or 1.0
+        normals.append(((by - ay) / ln, -(bx - ax) / ln))
+    out = []
+    for i, (x, y) in enumerate(pts):
+        n1, n2 = normals[max(0, i - 1)], normals[min(len(normals) - 1, i)]
+        nx, ny = n1[0] + n2[0], n1[1] + n2[1]
+        ln = math.hypot(nx, ny) or 1.0
+        nx, ny = nx / ln, ny / ln
+        k = d / max(0.5, nx * n2[0] + ny * n2[1])
+        out.append((x + nx * k, y + ny * k))
+    return out
+
+
+def lane_lines(ways):
+    """Kaistaviivat OSM:n teistä [(tagit, [(x, y), ...])]: kaksisuuntaisella tiellä keltainen
+    keskiviiva vastakkaisten suuntien välissä ja valkoiset kaistaviivat saman suunnan kaistojen
+    välissä (kaistamäärä lanes, oletuksena yksi kumpaankin suuntaan; menosuunnan kaistat ovat
+    oikealla), yksisuuntaisella vain kaistaviivat. Palauttaa [(laji, [(x, y), ...])]."""
+    out = []
+    for tags, pts in ways:
+        kind = tags.get("highway", "")
+        base = kind.replace("_link", "")
+        if base not in LANE_ROADS or len(pts) < 2 or osm_covered(tags):
+            continue
+        w = LANE_ROADS[base]
+        oneway = tags.get("oneway") in ("yes", "1", "true") or base == "motorway" or tags.get("junction") == "roundabout"
+        lanes = int(tags["lanes"]) if tags.get("lanes", "").isdigit() else (1 if oneway and kind.endswith("_link") else 2)
+        if oneway:
+            offsets = [((i - lanes / 2) * w, "kaista") for i in range(1, lanes)]
+        else:
+            fwd = int(tags["lanes:forward"]) if tags.get("lanes:forward", "").isdigit() else (lanes + 1) // 2
+            bwd = max(1, lanes - fwd)
+            offsets = [(0.0, "keski")] + [(i * w, "kaista") for i in range(1, fwd)] + [(-i * w, "kaista") for i in range(1, bwd)]
+        out += [(k, offset_line(pts, d) if d else pts) for d, k in offsets]
+    return out
 
 
 def build_landcover_lines(bbox):
@@ -2076,11 +2127,25 @@ def build_landcover_lines(bbox):
                         features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
                                          "geometry": {"type": "LineString", "coordinates": [to_ll(*pts[k]) for k in keep]}})
                 el.clear()
+    # OpenStreetMapista kaistaviivat ja raiteet (junat, raitiovaunut) samalta alueelta.
+    (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
+    box = f"({s:.5f},{w:.5f},{n:.5f},{e:.5f})"
+    query = (f'[out:json][timeout:180];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary)(_link)?$"]{box};'
+             f'way["railway"~"^(rail|tram|light_rail)$"]{box};);out geom;')
+    with open(overpass_post(query, os.path.join(CACHE, "pelimaasto", "osm.json")), encoding="utf-8") as fh:
+        ways = [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]])
+                for el in json.load(fh)["elements"] if el["type"] == "way"]
+    local_ll = lambda x, y: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6)]
+    for k, pts in lane_lines(ways) + [(RAIL_KINDS[t["railway"]], p) for t, p in ways
+                                      if t.get("railway") in RAIL_KINDS and not osm_covered(t)]:
+        keep = simplify_indices(pts, 0.15)
+        features.append({"type": "Feature", "properties": {"k": k},
+                         "geometry": {"type": "LineString", "coordinates": [local_ll(*pts[i]) for i in keep]}})
     path = os.path.join(PUBLIC_DATA, "pelimaasto_kanta.geojson")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"type": "FeatureCollection", "features": features}, fh, ensure_ascii=False, separators=(",", ":"))
-    names = sum(f["geometry"]["type"] == "Point" for f in features)
-    log(f"  → pelimaasto_kanta.geojson: {len(features) - names} viivaa, {names} kadunnimeä, {os.path.getsize(path) / 1e6:.1f} Mt")
+    count = collections.Counter(f["properties"].get("k", "nimi") for f in features)
+    log(f"  → pelimaasto_kanta.geojson: {dict(count)}, {os.path.getsize(path) / 1e6:.1f} Mt")
 
 
 def build_district_labels():

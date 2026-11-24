@@ -492,9 +492,17 @@ Ruudun maalaus vie työsäikeessä 13–50 ms.
 
 Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja polkujen reunaviivat
 (myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
-(`public/data/pelimaasto_kanta.geojson`, 11 540 viivaa ja 455 nimeä, 3 Mt). Nimet ovat maaston
+(`public/data/pelimaasto_kanta.geojson`, 3 Mt). Nimet ovat maaston
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
 luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja alueen ulkopuoli on vihertävän harmaa.
+
+Lisäksi OpenStreetMapista ovat kaistaviivat ja raiteet. Pääteille (moottori-, valta-, kanta-, seutu-
+ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan) mukaan
+kaksisuuntaisille keltainen keskiviiva ja saman suunnan kaistojen väliin valkoiset kaistaviivat
+(kaista 3,25–3,75 m, 3 m viiva ja 9 m väli); asuntokaduilla ei ole viivoja. Raiteet (juna ja
+raitiovaunu, ei tunneleissa) piirretään sepelipohjana, ratapölkkyinä ja kahtena kiskona noin
+1,5 metrin päässä toisistaan. Leveydet ovat metreinä, joten ne skaalautuvat zoomauksen mukana.
+Kokeilualueella kulkee Raide-Jokeri; rantarata on alueen pohjoispuolella ja metro tunnelissa.
 
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti
