@@ -3,6 +3,7 @@ import {
   KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
+import { liftedTileUrl } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -26,6 +27,17 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
     data = await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   }
   return { data };
+});
+
+// Korkeusmallin tiilet. Sillat puuttuvat korkeusmallista, joten ilmakuvan tie notkahtaisi sillan
+// kohdalla. Siltojen kohdalla haetaan valmiiksi kannen tasolle nostettu tiili (scripts/build_data.py,
+// bridges.js), muut suoraan Mapterhornista.
+maplibregl.addProtocol("dem", async (params, abortController) => {
+  const [z, x, y] = params.url.slice("dem://".length).split("/").map(Number);
+  const url = (await liftedTileUrl(z, x, y, TILE_VERSION)) ?? `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
+  const res = await fetch(url, { signal: abortController.signal });
+  if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
+  return { data: await res.arrayBuffer() };
 });
 
 // Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
@@ -187,7 +199,7 @@ function buildingColorExpr(mode) {
 function buildStyle() {
   const sources = {
     dem: {
-      type: "raster-dem", tiles: ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
+      type: "raster-dem", tiles: ["dem://{z}/{x}/{y}"],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
@@ -325,7 +337,6 @@ map.on("load", () => {
   initTransit();
   initStreams();
   initRoofs();
-  initDecks();
   refreshRadar();
   setInterval(refreshRadar, 120000);
   prefetchOrtho();
@@ -365,7 +376,6 @@ function setOrtho(on) {
   prefetchOrtho();
   document.getElementById("ortho-options").hidden = !on;
   applyTimeFilter();
-  decks?.setOrtho(state.ortho);
 }
 
 function setOrthoYear(index) {
@@ -410,7 +420,6 @@ function updateDetail() {
   detail = next;
   map.setFilter("rakennukset", buildingFilter());
   roofs?.setArea(detail);
-  decks?.setArea(detail);
 }
 
 function setOverlayOpacity(v) {
@@ -602,27 +611,6 @@ async function initRoofs() {
     roofs.setArea(detail);
   } catch (err) {
     console.warn("Kattoja ei saatu ladattua", err);
-  }
-}
-
-// Siltojen kannet 3D-laattoina lähialueella (decks.js); sillat puuttuvat korkeusmallista. Siltatiedot ja
-// korkeusmalli ovat nykyhetkestä, joten laatan pinnassa on uusin ilmakuva, vaikka kartalla olisi vanhempi.
-let decks = null;
-
-function orthoImage(z, x, y) {
-  if (!state.ortho) return Promise.resolve(null);
-  return fetchOrtho(orthoUrl(ORTHO_YEARS[0][1], z, x, y), "low")
-    .then((buf) => (buf.byteLength ? createImageBitmap(new Blob([buf])) : null));
-}
-
-async function initDecks() {
-  try {
-    const [{ createDecks }, { addExtra }] = await Promise.all([import("./decks.js"), import("./transit.js")]);
-    decks = createDecks(map, { orthoImage, ortho: state.ortho });
-    addExtra(decks.drawable);
-    decks.setArea(detail);
-  } catch (err) {
-    console.warn("Siltojen kansia ei saatu piirrettyä", err);
   }
 }
 

@@ -12,6 +12,7 @@
 // mitoitettu näytön pikseleissä: mitä enemmän uomassa virtaa vettä, sitä nopeampia ja leveämpiä
 // pulssit ovat, ja isossa uomassa pulssin keskikohta kulkee reunoja edellä kuten virtaus.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
+import { rawElevationAt } from "./bridges.js";
 
 const HYDRO_API = "https://rajapinnat.ymparisto.fi/api/Hydrologiarajapinta/1.1/odata";
 const DISCHARGE_POLL = 3600000; // ms: asemalta tulee päiväarvo, joten tunnin välein riittää
@@ -254,9 +255,11 @@ function ribbonMesh(chains) {
   return mesh;
 }
 
-// Absoluuttinen maanpinnan korkeus (maaston korostus mukana). Sillat puuttuvat korkeusmallista,
-// joten uoma kulkee sillan alla maanpinnalla.
-function groundAbs(map, lon, lat, centerElev) {
+// Absoluuttinen maanpinnan korkeus (maaston korostus mukana). Sillan kohdalla korkeusmalli on
+// nostettu kannen tasolle (bridges.js), mutta uoma kulkee sillan alla alkuperäisellä pinnalla.
+function groundAbs(map, lon, lat, centerElev, exag) {
+  const raw = rawElevationAt(lon, lat);
+  if (raw != null) return raw * exag;
   const q = map.queryTerrainElevation([lon, lat]);
   return q == null ? UNKNOWN : q + centerElev;
 }
@@ -356,7 +359,7 @@ export async function createStreams(map, { url, visible = true, beforeLayer }) {
 
   // Korkeudet haetaan näkyvän alueen pisteille vähitellen ja tallennetaan absoluuttisina.
   function updateElevations(x0, y0, x1, y1, ctx, now) {
-    const { centerElev } = ctx, attr = geom.getAttribute("aElev"), arr = attr.array;
+    const { centerElev, exag } = ctx, attr = geom.getAttribute("aElev"), arr = attr.array;
     let budget = ELEV_BUDGET, dirty = false;
     attr.clearUpdateRanges();
     for (const ch of chains) {
@@ -366,7 +369,7 @@ export async function createStreams(map, { url, visible = true, beforeLayer }) {
       for (let i = 0; i < ch.s.length && budget > 0; i++) {
         if (ch.lx[i] < x0 || ch.lx[i] > x1 || ch.ly[i] < y0 || ch.ly[i] > y1) continue;
         if (ch.elev[i] !== UNKNOWN && now - ch.elevAt[i] < ELEV_MAX_AGE) continue;
-        const e = groundAbs(map, ch.lonlat[2 * i], ch.lonlat[2 * i + 1], centerElev);
+        const e = groundAbs(map, ch.lonlat[2 * i], ch.lonlat[2 * i + 1], centerElev, exag);
         ch.elev[i] = e;
         ch.elevAt[i] = now + Math.random() * 500;
         arr[2 * (ch.v0 + i)] = arr[2 * (ch.v0 + i) + 1] = e;

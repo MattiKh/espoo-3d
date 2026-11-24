@@ -1,44 +1,33 @@
 // Sillat. Maaston korkeusmallista (Maanmittauslaitos 2 m) sillat on poistettu, joten ilmakuvan
-// tie notkahtaa sillan kohdalla alla olevan tien tai joen tasolle. Kukin silta on kansinauha
-// (scripts/build_data.py): OpenStreetMapin tien tai raiteen keskilinja kannen korkeuksineen
-// (Espoon kantakartan siltojen, ajoväylien ja raiteiden mitatuista korkeuksista) ja puolileveys.
-// decks.js piirtää nauhasta yksinkertaisen laatan sinne, missä se on maanpinnan yläpuolella, ja
-// jatkaa sitä kummastakin päästä, jolloin laatta peittää sillan päiden kuopat. Korkeusmallia ei
-// muuteta. Ajoneuvot ohjataan laatalle tai sen alle (transit.js).
+// tie notkahtaisi sillan kohdalla alla olevan tien tai joen tasolle. scripts/build_data.py nostaa
+// korkeusmallin tiilet kansien kohdalla valmiiksi kannen tasolle (public/tiles/korkeus), ja selain
+// hakee siltojen kohdalla nämä tiilet (app.js). Tarkimmista tiilistä on tallennettu myös
+// alkuperäinen maanpinta, jotta sillan ali kulkeva ajoneuvo (transit.js) tai uoma (streams.js)
+// voidaan pitää alla olevalla pinnalla. Espoon kantakartan siltojen reunaviivoista saadaan kannen
+// korkeus ajoneuvoille.
 
 const LON0 = 24.7, LAT0 = 60.2, KX = 55462, KY = 111415; // paikalliset metrit, kuten transit.js
 const EDGE_CELL = 50; // m
 const EDGE_REACH = 22; // m: leveälläkin sillalla keskikaista on näin lähellä reunaviivaa
-const SAMPLE_STEP = 3; // m: nauhan näytteiden väli
-const GRID_Z = 15; // nauhojen hakuruudukko (Web Mercator -tiilet, noin 600 m)
-const EARTH_CIRC = 40075016.686;
+const RAW_ZOOM = 15; // tämän tason tiilistä on tallennettu alkuperäinen maanpinta
+const RAW_TILE_LIMIT = 300;
 
 const mercX = (lon) => (lon + 180) / 360;
 const mercY = (lat) => (1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2;
 const cellKey = (cx, cy) => (cx + 10000) * 20000 + (cy + 10000);
 
 let edgeGrid = null;
-let ribbons = [];
-const ribbonGrid = new Map();
+const lifted = new Set(); // nostetut tiilet "z/x/y"
+let version = 0;
 
-export const ready = fetch("data/sillat.json").then((r) => r.json())
-  .then(({ viivat, nauhat = [] }) => {
+const ready = fetch("data/sillat.json").then((r) => r.json())
+  .then(({ viivat, korkeus = {} }) => {
     edgeGrid = buildEdgeGrid(viivat);
-    ribbons = nauhat.map(buildRibbon);
-    const n = 2 ** GRID_Z;
-    for (const r of ribbons) {
-      for (let x = Math.floor(r.minX * n); x <= Math.floor(r.maxX * n); x++) {
-        for (let y = Math.floor(r.minY * n); y <= Math.floor(r.maxY * n); y++) {
-          const key = cellKey(x, y);
-          if (!ribbonGrid.has(key)) ribbonGrid.set(key, []);
-          ribbonGrid.get(key).push(r);
-        }
-      }
+    for (const [z, xy] of Object.entries(korkeus)) {
+      for (let i = 0; i < xy.length; i += 2) lifted.add(`${z}/${xy[i]}/${xy[i + 1]}`);
     }
   })
   .catch((err) => console.warn("Siltoja ei saatu ladattua", err));
-
-export const getRibbons = () => ribbons;
 
 function buildEdgeGrid(viivat) {
   const grid = new Map();
@@ -61,51 +50,63 @@ function buildEdgeGrid(viivat) {
   return grid;
 }
 
-// Nauha Web Mercator -yksiköissä: näytteet tasavälein (x, y, korkeus z, matka s metreinä),
-// puolileveys half ja drawn: mitkä näytteet laatta kattaa (decks.js).
-function buildRibbon({ p, w }, id) {
-  const lat = p[1], unit = EARTH_CIRC * Math.cos((lat * Math.PI) / 180); // m Web Mercator -yksikköä kohden
-  const px = [], py = [], pz = [], ps = [0];
-  for (let i = 0; i < p.length; i += 3) {
-    px.push(mercX(p[i])); py.push(mercY(p[i + 1])); pz.push(p[i + 2]);
-    if (i) ps.push(ps[ps.length - 1] + Math.hypot(px.at(-1) - px.at(-2), py.at(-1) - py.at(-2)) * unit);
-  }
-  const total = ps.at(-1), n = Math.max(2, Math.ceil(total / SAMPLE_STEP) + 1);
-  const x = new Float64Array(n), y = new Float64Array(n), z = new Float32Array(n), s = new Float32Array(n);
-  for (let k = 0, i = 0; k < n; k++) {
-    const t = (total * k) / (n - 1);
-    while (i < ps.length - 2 && ps[i + 1] < t) i++;
-    const f = ps[i + 1] > ps[i] ? Math.min(1, Math.max(0, (t - ps[i]) / (ps[i + 1] - ps[i]))) : 0;
-    x[k] = px[i] + (px[i + 1] - px[i]) * f;
-    y[k] = py[i] + (py[i + 1] - py[i]) * f;
-    z[k] = pz[i] + (pz[i + 1] - pz[i]) * f;
-    s[k] = t;
-  }
-  const half = w / unit;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (let k = 0; k < n; k++) {
-    minX = Math.min(minX, x[k] - half); maxX = Math.max(maxX, x[k] + half);
-    minY = Math.min(minY, y[k] - half); maxY = Math.max(maxY, y[k] + half);
-  }
-  return { id, x, y, z, s, n, w, half, lat, minX, minY, maxX, maxY, drawn: new Uint8Array(n) };
+// Valmiiksi nostetun korkeusmallin tiilen osoite, tai null, jos tiilessä ei ole siltaa (silloin
+// käytetään alkuperäistä). version: aineistoversio, jotta selain ei käytä vanhoja tiiliä.
+export async function liftedTileUrl(z, x, y, v) {
+  await ready;
+  if (!lifted.has(`${z}/${x}/${y}`)) return null;
+  version = v;
+  if (z === RAW_ZOOM) loadRaw(x, y);
+  return `tiles/korkeus/${z}/${x}/${y}.webp?v=${v}`;
 }
 
-// Laattojen pinnan korkeudet (N2000, m) pisteessä: kaikki piirretyt nauhat, joiden kohdalla piste on.
-export function deckLevelsAt(lon, lat) {
-  const X = mercX(lon), Y = mercY(lat), n = 2 ** GRID_Z, out = [];
-  for (const r of ribbonGrid.get(cellKey(Math.floor(X * n), Math.floor(Y * n))) ?? []) {
-    if (X < r.minX || X > r.maxX || Y < r.minY || Y > r.maxY) continue;
-    let best = r.half, z = null;
-    for (let k = 0; k < r.n - 1; k++) {
-      if (!r.drawn[k] || !r.drawn[k + 1]) continue;
-      const dx = r.x[k + 1] - r.x[k], dy = r.y[k + 1] - r.y[k], len2 = dx * dx + dy * dy;
-      const t = len2 ? Math.max(0, Math.min(1, ((X - r.x[k]) * dx + (Y - r.y[k]) * dy) / len2)) : 0;
-      const d = Math.hypot(r.x[k] + t * dx - X, r.y[k] + t * dy - Y);
-      if (d <= best) { best = d; z = r.z[k] + (r.z[k + 1] - r.z[k]) * t; }
-    }
-    if (z != null) out.push(z);
+// Alkuperäinen maanpinta nostetuissa pikseleissä (muualla musta): avain x/y → { W, idx, raw },
+// idx: nostettujen pikselien indeksit järjestyksessä, raw: niiden maanpinnan korkeus.
+const rawTiles = new Map();
+
+function loadRaw(x, y) {
+  const key = `${x}/${y}`;
+  if (rawTiles.has(key)) return;
+  rawTiles.set(key, null);
+  if (rawTiles.size > RAW_TILE_LIMIT) rawTiles.delete(rawTiles.keys().next().value);
+  fetch(`tiles/korkeus/maa/${x}/${y}.webp?v=${version}`)
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(r.status))))
+    .then((blob) => createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" }))
+    .then((bmp) => {
+      const W = bmp.width, H = bmp.height, ctx = new OffscreenCanvas(W, H).getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0);
+      const px = ctx.getImageData(0, 0, W, H).data, idx = [], raw = [];
+      for (let k = 0, o = 0; k < W * H; k++, o += 4) {
+        if (px[o] || px[o + 1] || px[o + 2]) {
+          idx.push(k);
+          raw.push(px[o] * 256 + px[o + 1] + px[o + 2] / 256 - 32768);
+        }
+      }
+      if (rawTiles.has(key)) rawTiles.set(key, { W, H, idx: Int32Array.from(idx), raw: Float32Array.from(raw) });
+    })
+    .catch((err) => {
+      rawTiles.delete(key);
+      console.warn("Sillan alustan korkeuksia ei saatu ladattua", err);
+    });
+}
+
+// Alkuperäinen maanpinnan korkeus (m) pisteessä, jos korkeusmalli on siinä nostettu kannen
+// tasolle; muuten null.
+export function rawElevationAt(lon, lat) {
+  const n = 2 ** RAW_ZOOM, X = mercX(lon) * n, Y = mercY(lat) * n, x = Math.floor(X), y = Math.floor(Y);
+  if (!lifted.has(`${RAW_ZOOM}/${x}/${y}`)) return null;
+  const tile = rawTiles.get(`${x}/${y}`);
+  if (tile === undefined) loadRaw(x, y);
+  if (!tile) return null;
+  const k = Math.floor((Y - y) * tile.H) * tile.W + Math.floor((X - x) * tile.W);
+  let lo = 0, hi = tile.idx.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (tile.idx[mid] === k) return tile.raw[mid];
+    if (tile.idx[mid] < k) lo = mid + 1;
+    else hi = mid - 1;
   }
-  return out;
+  return null;
 }
 
 // Lähimmän sillan reunan korkeus (N2000, m) pisteessä, tai null, jos siltaa ei ole lähellä.
