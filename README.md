@@ -428,16 +428,6 @@ virtaama, sitä nopeampia ja leveämpiä pulssit ovat. Isossa uomassa pulssin ke
 reunoja edellä kuten virtaus. Sillan kohdalla nauha kulkee kannen alta alkuperäisellä
 maanpinnalla, eikä rummuissa näytetä pulsseja.
 
-## Utu
-
-Matalalta sivusta katsottaessa kaukainen maisema hälvenee ilman väriin. MapLibren oma sumu koskee
-vain maastoa (ilmakuvaa ja karttoja), joten kaukaiset rakennukset, kulkuneuvot ja katot näkyivät
-terävinä utuisen maan päällä. Sumu on siksi pois (`fog-ground-blend` 1), ja utu on karttakuvan
-päällä oleva liukuväri (`public/haze.js`), joka koskee kaikkea karttaan piirrettyä. Linjanumerot,
-merkit ja ponnahdusikkunat jäävät sen päälle. Kunkin näytön rivin utu lasketaan sen kohdan
-etäisyydestä tasaisella maalla: utu alkaa kilometrin päässä ja tihenee eksponentiaalisesti
-(6 km:n mittakaava) enintään 80 %:iin horisontissa, ja taivaalla se häviää vähitellen.
-
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
@@ -452,4 +442,3 @@ etäisyydestä tasaisella maalla: utu alkaa kilometrin päässä ja tihenee eksp
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
-- `public/haze.js`: utu kaukaisen maiseman päällä
