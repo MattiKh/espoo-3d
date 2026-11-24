@@ -99,8 +99,9 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Kauniaisen raja kartalla | HSY:n seutukartta, kunnat 2021 (WFS) |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
-| Ajoväylien reunaviivat siltojen kohdalla (kansien täydennys) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`; tiet © OpenStreetMap |
-| Raiteiden keskilinjat korkeuksineen (kuoppien täyttö) | Espoo WFS `kanta:Raide` (kantakartta) |
+| Ajoväylien reunaviivat siltojen kohdalla (kansien täydennys) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla` |
+| Siltojen kansinauhojen keskilinjat (tiet ja raiteet) | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Raiteiden keskilinjat korkeuksineen (raidesiltojen korkeudet) | Espoo WFS `kanta:Raide` (kantakartta) |
 | Alusten sijainnit, nimet, tyypit, mitat ja määränpäät | Fintraffic / Digitraffic AIS (REST, CC BY 4.0) |
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
 | Lentojen reitit ja lentoyhtiöt | adsbdb.com (lentotunnuksen mukaan) |
@@ -340,61 +341,52 @@ rakennusvalvonnan aineistot (`rakval:*`) ja kattoviivat (`GIS:RakennustenKatot`)
 ## Sillat
 
 Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten ilmakuvan tie notkahti sillan
-kohdalla alla olevan tien tai joen tasolle, ja ajoneuvot sukelsivat mukana. Espoon kantakartan
-siltojen reunaviivoissa on kannen mitattu korkeus. `build_data.py` muodostaa niistä kansialueet:
-kannen reunoiksi tulkitaan samansuuntaiset, samalla korkeudella olevat viivat 3–40 metrin päässä
-toisistaan. Kaukaa katsottaessa selain nostaa korkeusmallin tiilet kansialueilla kannen tasolle
-(`public/bridges.js`) ja muistaa alkuperäisen maanpinnan korkeuden; lähikuvassa kannet ovat
-3D-laattoja (alla).
+kohdalla alla olevan tien tai joen tasolle, ja ajoneuvot sukelsivat mukana. Siltojen päistä on
+usein poistettu myös penkereen pää, jolloin tiehen tulee kuoppa juuri ennen siltaa. Sillat
+piirretään siksi yksinkertaisina laattoina tien tai raiteen keskilinjaa pitkin, ja laatta jatkuu
+hieman sillan päiden yli. Korkeusmallia ei muuteta, joten sillat eivät hidasta karttaa.
 
-Siltaviivoista puuttuu kuitenkin usein toinen reuna. Esimerkiksi Otasolmun kiertoliittymästä
-(Kehä I kulkee sen alta) on vain sisäkaaret, ja leveiltä tai kaarevilta silloilta pareja ei
-löytynyt. Korkeusmallin mukaan noin 120 kohdassa maasto oli siltaviivan vieressä vähintään 2 metriä
-kantta alempana ilman kansialuetta (67:ssä yli 4 metriä). Siksi siltojen lähellä (40 m) haetaan
-myös kantakartan ajoväylien ja kevyen liikenteen väylien reunaviivat (`kanta:Liikennevayla`,
-`kanta:Kevyenliikenteenvayla`), joissa on mitattu korkeus. Kunkin reunaviivan vierestä etsitään
-lähin samansuuntainen viiva kummaltakin puolelta: jos se on samalla korkeudella (enintään kahden
-metrin ero, sillä siltaviiva on usein reunapalkin päällä ajorataa ylempänä), väli on kantta ja
-siitä tulee kaistale. Alla kulkevan tien reuna on metrejä alempana, joten kaistale ei peitä sitä.
-Kaistaleen kohdalla on lisäksi oltava samansuuntainen OpenStreetMapin tie tai raide (esim.
-Raide-Jokerin kaareva silta Kehä I:n yli Laajalahdessa), jottei kahden tien välistä luiskaa tai
-rinnakkaisten siltojen väliä täytetä; siltaviivan ja ajoradan reunan välinen
-enintään 8 metrin kaista (reunapalkki, jalkakäytävä) kelpaa ilmankin. Mukaan otetaan vain kannen
-tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään 30 metrin päässä, jotta myös siltojen päät tulevat mukaan).
+**Kansinauhat** (`build_data.py`). Kukin silta on nauha: OpenStreetMapin tien tai raiteen
+keskilinja siltojen lähellä näytteinä 3 metrin välein korkeuksineen ja puolileveys tien tyypistä
+(esim. moottoritie 5,5 m, asuntokatu 3,5 m, kevyen liikenteen väylä 2 m, raide 2,5 m; kaistamäärän
+tai leveystiedon mukaan, jos se on suurempi). Tunnelit jäävät pois. Näytteen korkeus on sen
+kohdalla olevien samansuuntaisten kansien ja kaistaleiden korkeuksien mediaani. Eri suuntaan
+kulkeva kansi on toinen väylä (esim. silta tien yllä), joten sillan alittava tie saa oman, alemman
+korkeutensa. Korkeus tasoitetaan mediaanilla, ja suorilta ja tasaisilta osuuksilta pisteet jätetään
+pois. Kansien ja kaistaleiden korkeudet ovat Espoon kantakartan mitatuista viivoista:
 
-Kaistaleita on myös tasaisella maalla, joten selain nostaa niillä maastoa vain, jos se on yli
-0,5 metriä kaistaletta alempana. Kaistaleiden nostamat pikselit siistitään avauksella (3 × 3):
-tukimuurin tai luiskan yläreunalle osuvat 1–2 pikselin kaistat jäävät pois, jottei niistä tule
-piikkejä, mutta kansi säilyy. Korjauksen jälkeen kantta alempana olevia siltaviivakohtia on 48
-(22 yli 4 metriä), ja osa niistäkin on sillan alla kulkevia rakenteita.
+- Siltojen reunaviivat (`kanta:Silta`): kannen reunoiksi tulkitaan samansuuntaiset, samalla
+  korkeudella olevat viivat 3–40 metrin päässä toisistaan.
+- Siltaviivoista puuttuu usein toinen reuna; esimerkiksi Otasolmun kiertoliittymästä (Kehä I kulkee
+  sen alta) on vain sisäkaaret. Siksi siltojen lähellä (40 m) haetaan myös ajoväylien ja kevyen
+  liikenteen väylien reunaviivat (`kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`). Kunkin
+  reunaviivan vierestä etsitään lähin samansuuntainen viiva kummaltakin puolelta: jos se on samalla
+  korkeudella (enintään kahden metrin ero, sillä siltaviiva on usein reunapalkin päällä ajorataa
+  ylempänä), väli on kantta ja siitä tulee kaistale. Kaistaleen kohdalla on oltava samansuuntainen
+  OpenStreetMapin tie tai raide, jottei kahden tien välistä luiskaa tai rinnakkaisten siltojen väliä
+  täytetä (siltaviivan ja ajoradan reunan välinen enintään 8 metrin kaista kelpaa ilmankin), ja
+  siltaviiva samalla korkeudella enintään 30 metrin päässä: mukaan tulevat siltojen päät mutta eivät
+  sillan alittavat tiet.
+- Raiteiden keskilinjat (`kanta:Raide`, koko Espoo): raiteelle tehdään 14 metriä leveä kaistale
+  raiteen korkeudella (mediaani 10 metrin matkalta), jolloin raidesillat (esim. Raide-Jokerin
+  kaareva silta Kehä I:n yli Laajalahdessa) saavat korkeuden myös päistään.
 
-Raiteiden keskilinjat ovat kantakartassa mitattuine korkeuksineen (`kanta:Raide`, koko Espoo).
-Raiteelle tehdään kaistale, joka on raiteen kohdalla (1,6 m keskilinjasta) mitatulla korkeudella
-(mediaani 10 metrin matkalta); sen ulkopuolella maasto laskee penkereen luiskana (1:3)
-maanpintaan enintään 7 metrin päässä. Luiska vain täyttää kuoppia eikä peitä siltojen kansia.
-Korkeusmalli on paikoin ajalta ennen raidetta (esim. Raide-Jokeri Laajalahdessa on 1,5–2 metriä
-vanhaa maanpintaa ylempänä), jolloin raiteelle tulee loiva penger.
+Nauhoja on noin 4 500, ja `sillat.json` on 0,85 Mt.
 
-Kansista ja kaistaleista tehdään korkeusmallin pikseleittäin yksi pinta: pinta on alin niistä,
-jotka ovat maanpinnan yläpuolella. Päällekkäiset kansit ja kaistaleet kuvaavat samaa ajorataa
-(alempi on ajoradan tai raiteen pinta, ylempi esim. siltaviivan reunapalkki), joten laattoja ei
-tule päällekkäin eikä paloina. Yli 3 metriä ylempänä oleva pinta on oma tasonsa (silta toisen
-yllä). Matalat kohdat, enintään 4,5 metriä maanpinnan yläpuolella, täytetään korkeusmalliin:
-siltojen päät, joista korkeusmallissa on poistettu myös penkereen pää, ja alikulkujen kohdat
-teissä. Siksi tiet ja raiteet nousevat kannelle ilman kuoppaa. Korkeammat jänteet, joiden alta
-kulkee tie, raide tai uoma, piirretään lähikuvassa (zoom 14 tai lähempää, lähialueella kuten
-katot) 3D-laattoina (`public/decks.js`), eikä tarkimpia korkeusmallin tiiliä (z15) nosteta niiden
-kohdalla, joten sillan alla kulkeva tie näkyy. Kaukana nekin nostetaan korkeusmalliin kuten
-ennen. Laatat tehdään z15-tiilen pikseleistä (noin 1,2 m): pinnassa on uusin ilmakuva
-(siltatiedot ja korkeusmalli ovat nykyhetkestä), reunat ja alapinta ovat betonin harmaita, ja
-paksuus on 1,2 metriä. Ilmakuvassa silta näkyy myös maassa laatan alla, joten se tummennetaan
-sillan varjoksi (karttataso `sillat-varjo`, vain ilmakuvan kanssa). Muutettu korkeusmallin tiili
-palautetaan MapLibrelle pakkaamattomana BMP-kuvana, sillä selaimen PNG-pakkaus vie tiileltä jopa
-sekunnin.
+**Laatat** (`public/decks.js`). Lähikuvassa (lähialueella kuten katot) selain hakee nauhan
+näytteille maanpinnan korkeuden MapLibren maastosta, enintään 600 kyselyä piirtokertaa kohden, ja
+uudestaan 4 sekunnin välein, kun tarkemmat korkeusmallin tiilet latautuvat. Laatta piirretään sinne,
+missä nauha on yli metrin maanpinnan yläpuolella, ja sitä jatketaan 15 metriä kummastakin päästä,
+jolloin se peittää sillan päiden kuopat. Laatta on nauhan muotoinen suora tai kaari: pinnassa on
+uusin ilmakuva (siltatiedot ovat nykyhetkestä), reunat ja alapinta ovat betonin harmaita, ja
+paksuus on 1,2 metriä. Toisiaan lähellä olevat laatat ovat yksi kappale yhdellä tekstuurilla.
+Sillan alta näkyy alla kulkeva tie tai joki. Ilmakuvassa silta näkyy myös maassa laatan alla, joten
+se tummennetaan sillan varjoksi (karttataso `sillat-varjo`, vain ilmakuvan kanssa).
 
-Ajoneuvo kulkee täytetyllä kohdalla korkeusmallin pinnalla ja jänteellä laatan pinnalla.
-Ajoneuvo pysyy kannella, jos se tuli sillalle kannen korkeudelta, esimerkiksi penkereeltä.
-Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.
+**Ajoneuvot** (`public/transit.js`). Jos ajoneuvon kohdalla on laatta maanpinnan yläpuolella,
+ajoneuvo kulkee sillä tasolla (maanpinta tai laatta), joka on lähimpänä sen edellistä korkeutta.
+Sillalle penkereeltä tullut ajoneuvo pysyy kannella; sillan ali kulkeva lähestyi alempaa ja pysyy
+alla olevan tien tasolla.
 
 ## Purot ja joet
 
@@ -446,8 +438,8 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
-- `public/bridges.js`: siltojen, ajoväylien ja raiteiden yhteinen pinta, kuoppien täyttö korkeusmalliin, jänteet ja kannen korkeus ajoneuvoille
-- `public/decks.js`: siltojen korkeat jänteet 3D-laattoina ilmakuvatekstuurilla ja varjot
+- `public/bridges.js`: siltojen kansinauhat ja kannen korkeus ajoneuvoille
+- `public/decks.js`: sillat yksinkertaisina 3D-laattoina ilmakuvatekstuurilla ja varjot
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat

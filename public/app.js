@@ -3,7 +3,6 @@ import {
   KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
-import { patchDemTile } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -27,17 +26,6 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
     data = await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   }
   return { data };
-});
-
-// Korkeusmallin tiilet: sillat puuttuvat korkeusmallista, ja ilmakuvan tie notkahtaisi sillan
-// kohdalla. Lähikuvassa kannet piirretään 3D-laattoina (decks.js); karkeammissa tiilissä sillat
-// nostetaan kannen tasolle (bridges.js).
-maplibregl.addProtocol("dem", async (params, abortController) => {
-  const url = "https://" + params.url.slice("dem://".length);
-  const res = await fetch(url, { signal: abortController.signal });
-  if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
-  const [z, x, y] = url.match(/(\d+)\/(\d+)\/(\d+)\.webp$/).slice(1).map(Number);
-  return { data: await patchDemTile(await res.arrayBuffer(), z, x, y) };
 });
 
 // Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
@@ -199,7 +187,7 @@ function buildingColorExpr(mode) {
 function buildStyle() {
   const sources = {
     dem: {
-      type: "raster-dem", tiles: ["dem://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
+      type: "raster-dem", tiles: ["https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
@@ -617,8 +605,8 @@ async function initRoofs() {
   }
 }
 
-// Siltojen kannet 3D-laattoina lähialueella (decks.js). Siltatiedot ja korkeusmalli ovat nykyhetkestä,
-// joten laatan pinnassa on uusin ilmakuva, vaikka kartalla olisi vanhempi.
+// Siltojen kannet 3D-laattoina lähialueella (decks.js); sillat puuttuvat korkeusmallista. Siltatiedot ja
+// korkeusmalli ovat nykyhetkestä, joten laatan pinnassa on uusin ilmakuva, vaikka kartalla olisi vanhempi.
 let decks = null;
 
 function orthoImage(z, x, y) {

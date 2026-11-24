@@ -1,17 +1,23 @@
-// Siltojen korkeat jänteet 3D-laattoina joukkoliikenteen 3D-tasolla (transit.js). Lähikuvan
-// korkeusmallia ei nosteta jänteiden kohdalla (bridges.js), joten sillan alla kulkeva tie tai
-// raide näkyy. Laatat tehdään tarkkojen korkeusmallin tiilten pikseleistä, joissa siltojen ja
-// kaistaleiden yhteinen pinta on korkealla maanpinnan yläpuolella: kussakin kohdassa on yksi pinta
-// (ja silta toisen yllä toisena tasona). Pinnassa on uusin ilmakuva (valaisematta, kuten maasto),
-// reunat ja alapinta ovat betonin harmaita. Ilmakuvassa silta näkyy myös maassa laatan alla; se
-// tummennetaan varjoksi (karttataso sillat-varjo ilmakuvan päällä).
+// Siltojen kannet yksinkertaisina 3D-laattoina joukkoliikenteen 3D-tasolla (transit.js). Kukin
+// kansinauha (bridges.js) on tien tai raiteen keskilinjaa seuraava laatta (suora tai kaareva).
+// Laatta piirretään sinne, missä nauha on korkeusmallin mukaan maanpinnan yläpuolella, ja sitä
+// jatketaan OVERLONG metriä kummastakin päästä, jolloin se peittää sillan päiden kuopat (korkeusmallista
+// on poistettu sillan mukana usein myös penkereen pää). Korkeusmallia ei muuteta, joten sillan
+// alla kulkeva tie näkyy. Pinnassa on uusin ilmakuva (valaisematta, kuten maasto), reunat ja
+// alapinta ovat betonin harmaita. Ilmakuvassa silta näkyy myös maassa laatan alla; se tummennetaan
+// varjoksi (karttataso sillat-varjo ilmakuvan päällä). Lähekkäiset laatat kootaan samaan verkkoon.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
-import { getSpanTiles, onDeckChange } from "./bridges.js";
+import { getRibbons, ready } from "./bridges.js";
 
 const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
 const THICKNESS = 1.2; // m: kannen paksuus
-const LIFT = 0.05; // m: kauempana maasto on nostettu kannen tasolle, ja laatta pysyy sen päällä
+const LIFT = 0.05; // m: laatta hieman maanpinnan yläpuolelle
+const ELEVATED = 1.0; // m: nauha on maanpinnan yläpuolella
+const OVERLONG = 15; // m: laattaa jatketaan maanpinnan yläpuolisen osan kummastakin päästä
 const MAX_RADIUS = 2500; // m
+const SAMPLE_BUDGET = 600; // maaston korkeuskyselyä piirtokertaa kohden
+const SAMPLE_MAX_AGE = 4000; // ms: korkeus tarkistetaan uudelleen, kun korkeusmalli tarkentuu
+const JOIN = 5; // m: näin lähellä toisiaan olevat laatat kootaan samaan verkkoon
 const TEX_ZOOM = 17, TEX_TILES = 3, TILE_PX = 512; // ilmakuvaruudut: taso, enintään kpl kumpaankin suuntaan
 const PLAIN = 0xc3c6c6; // pinta ilman ilmakuvaa
 const SHADOW = "sillat-varjo";
@@ -26,9 +32,10 @@ const latOfY = (y) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) / D2R;
 export function createDecks(map, { orthoImage, ortho = true }) {
   const group = new THREE.Group();
   const sideMaterial = new THREE.MeshLambertMaterial({ color: 0xbcb9b1, side: THREE.DoubleSide });
-  const meshes = new Map(); // korkeusmallin tiili z/x/y → { mesh, lon, lat, box, top, shadow, version }
-  let area = null, dirty = true, orthoGen = 0;
-  onDeckChange(() => { dirty = true; map.triggerRepaint(); });
+  const meshes = new Map(); // avain (nauhat ja niiden laatat) → { mesh, lon, lat, box, top, shadow }
+  const ground = new Map(); // nauha → { h: maanpinta näytteittäin, at: aika }
+  let area = null, dirty = true, orthoGen = 0, loaded = false;
+  ready.then(() => { loaded = true; dirty = true; map.triggerRepaint(); });
   const layers = map.getStyle().layers, above = layers.findIndex((l) => l.id === "ortho");
   map.addSource(SHADOW, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   map.addLayer({
@@ -36,67 +43,122 @@ export function createDecks(map, { orthoImage, ortho = true }) {
     paint: { "fill-color": "#1b2024", "fill-opacity": 0.55 },
   }, layers[above + 1]?.id);
 
-  // Tiilen laatat: kunkin tason jännepikselit yläpintana, reunoina (naapuri ei ole jänne, myös
-  // viereisestä tiilestä katsottuna) ja alapintana. Kulmapisteen korkeus on sen ympärillä olevien
-  // jännepikseleiden keskiarvo, joten pinta on yhtenäinen. Kärkipisteet metreinä tiilen
-  // keskipisteestä, korkeus absoluuttisena korostus mukana.
-  function buildMesh(t, tiles) {
-    const n = 2 ** t.z, W = t.W, H = t.H;
-    const refX = (t.x + 0.5) / n, refY = (t.y + 0.5) / n, lat = latOfY(refY), m = EARTH_CIRC * Math.cos(lat * D2R);
+  const inArea = (r) => {
+    if (!area) return false;
+    const unit = EARTH_CIRC * Math.cos(area.lat * D2R);
+    return Math.hypot((r.minX + r.maxX) / 2 - mercX(area.lon), (r.minY + r.maxY) / 2 - mercY(area.lat)) * unit < area.radius;
+  };
+
+  // Nauhan maanpinta näytteittäin (korostettu, absoluuttinen) ja siitä laatan kattamat näytteet:
+  // maanpinnan yläpuoliset ja OVERLONG metriä niiden kummaltakin puolelta. Palauttaa true, jos
+  // laatta muuttui.
+  function sample(r, now) {
+    const base = map.transform.elevation ?? 0, exag = map.getTerrain()?.exaggeration ?? 1;
+    const h = new Float32Array(r.n);
+    for (let k = 0; k < r.n; k++) {
+      const q = map.queryTerrainElevation([lonOfX(r.x[k]), latOfY(r.y[k])]);
+      h[k] = q == null ? NaN : (q + base) / exag;
+    }
+    ground.set(r, { h, at: now });
+    const drawn = new Uint8Array(r.n);
+    for (let k = 0; k < r.n; k++) {
+      if (!(r.z[k] - h[k] > ELEVATED)) continue;
+      for (let j = k; j >= 0 && r.s[k] - r.s[j] <= OVERLONG; j--) drawn[j] = 1;
+      for (let j = k; j < r.n && r.s[j] - r.s[k] <= OVERLONG; j++) drawn[j] = 1;
+    }
+    const changed = drawn.some((v, k) => v !== r.drawn[k]);
+    r.drawn = drawn;
+    return changed;
+  }
+
+  // Rajallinen määrä korkeuskyselyjä piirtokertaa kohden: uudet nauhat ensin, sitten vanhentuneet.
+  function refresh(now) {
+    let budget = SAMPLE_BUDGET;
+    for (const r of getRibbons()) {
+      if (budget <= 0) break;
+      if (!inArea(r)) continue;
+      const g = ground.get(r);
+      if (g && now - g.at < SAMPLE_MAX_AGE) continue;
+      budget -= r.n;
+      if (sample(r, now)) dirty = true;
+    }
+  }
+
+  // Laatat ryhmittäin: piirretyt nauhat, joiden rajaukset ovat JOIN metrin päässä toisistaan.
+  function clusters() {
+    const items = [];
+    for (const r of getRibbons()) {
+      if (!inArea(r)) continue;
+      const pad = JOIN / (EARTH_CIRC * Math.cos(r.lat * D2R)) + r.half, box = [Infinity, Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < r.n; k++) { // vain laatan kattama osa (raiteen nauha voi olla kilometrien pituinen)
+        if (!r.drawn[k]) continue;
+        box[0] = Math.min(box[0], r.x[k] - pad); box[1] = Math.min(box[1], r.y[k] - pad);
+        box[2] = Math.max(box[2], r.x[k] + pad); box[3] = Math.max(box[3], r.y[k] + pad);
+      }
+      if (box[0] < Infinity) items.push({ r, box });
+    }
+    const parent = items.map((_, i) => i);
+    const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    items.sort((a, b) => a.box[0] - b.box[0]);
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length && items[j].box[0] <= items[i].box[2]; j++) {
+        const a = items[i].box, b = items[j].box;
+        if (b[1] <= a[3] && a[1] <= b[3]) parent[find(j)] = find(i);
+      }
+    }
+    const groups = new Map();
+    items.forEach((it, i) => {
+      const k = find(i);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(it.r);
+    });
+    return [...groups.values()];
+  }
+
+  // Ryhmän verkko: kunkin nauhan piirretyt jaksot nauhana (yläpinta, reunat, alapinta ja päädyt).
+  // Kärkipisteet metreinä ryhmän keskipisteestä, korkeus absoluuttisena korostus mukana.
+  function buildMesh(rs) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of rs) {
+      for (let k = 0; k < r.n; k++) {
+        if (r.drawn[k]) { x0 = Math.min(x0, r.x[k]); y0 = Math.min(y0, r.y[k]); x1 = Math.max(x1, r.x[k]); y1 = Math.max(y1, r.y[k]); }
+      }
+    }
+    const refX = (x0 + x1) / 2, refY = (y0 + y1) / 2, lat = latOfY(refY), m = EARTH_CIRC * Math.cos(lat * D2R);
     const exag = map.getTerrain()?.exaggeration ?? 1;
     const top = [], topUv = [], sides = [], shadow = [];
-    const quad = (out, a, b, c, d) => out.push(...a, ...b, ...c, ...a, ...c, ...d);
     const box = [Infinity, Infinity, -Infinity, -Infinity];
-    const neighbour = (dx, dy) => tiles.get(`${t.z}/${t.x + dx}/${t.y + dy}`);
-    for (const level of ["cells", "upper"]) {
-      const cells = t[level];
-      // Onko pikseli (i, j) jänne tällä tasolla; tiilen ulkopuolella katsotaan naapuritiilestä.
-      const span = (i, j) => {
-        if (i >= 0 && j >= 0 && i < W && j < H) return cells.has(j * W + i);
-        const nb = neighbour(i < 0 ? -1 : i >= W ? 1 : 0, j < 0 ? -1 : j >= H ? 1 : 0);
-        return !!nb && nb[level].has(((j + H) % H) * W + ((i + W) % W));
-      };
-      const node = new Map();
-      const nodeZ = (i, j) => { // kulmapiste (i, j) = pikselien (i - 1 … i, j - 1 … j) kulma
-        const key = j * (W + 1) + i;
-        if (!node.has(key)) {
-          let sum = 0, cnt = 0;
-          for (const [a, b] of [[i - 1, j - 1], [i, j - 1], [i - 1, j], [i, j]]) {
-            const z = a >= 0 && b >= 0 && a < W && b < H ? cells.get(b * W + a) : undefined;
-            if (z != null) { sum += z; cnt++; }
-          }
-          node.set(key, (sum / cnt) * exag + LIFT);
+    const quad = (out, a, b, c, d) => out.push(...a, ...b, ...c, ...a, ...c, ...d);
+    const local = ([x, y], z) => [(x - refX) * m, -(y - refY) * m, z];
+    for (const r of rs) {
+      // Reunat: keskilinjan normaali viereisten osien suunnasta.
+      const L = [], R = [];
+      for (let k = 0; k < r.n; k++) {
+        const a = Math.max(0, k - 1), b = Math.min(r.n - 1, k + 1);
+        const dx = r.x[b] - r.x[a], dy = r.y[b] - r.y[a], len = Math.hypot(dx, dy) || 1;
+        const nx = (-dy / len) * r.half, ny = (dx / len) * r.half;
+        L.push([r.x[k] + nx, r.y[k] + ny]);
+        R.push([r.x[k] - nx, r.y[k] - ny]);
+      }
+      for (let k = 0; k < r.n - 1; k++) {
+        if (!r.drawn[k] || !r.drawn[k + 1]) continue;
+        const z0 = r.z[k] * exag + LIFT, z1 = r.z[k + 1] * exag + LIFT;
+        const l0 = local(L[k], z0), l1 = local(L[k + 1], z1), r0 = local(R[k], z0), r1 = local(R[k + 1], z1);
+        // Yläpinnan kolmiot ylöspäin (vastapäivään ylhäältä katsottuna).
+        const up = (r0[0] - l0[0]) * (r1[1] - l0[1]) - (r0[1] - l0[1]) * (r1[0] - l0[0]) >= 0;
+        if (up) quad(top, l0, r0, r1, l1); else quad(top, l0, l1, r1, r0);
+        const uvs = up ? [L[k], R[k], R[k + 1], L[k], R[k + 1], L[k + 1]] : [L[k], L[k + 1], R[k + 1], L[k], R[k + 1], R[k]];
+        for (const [x, y] of uvs) {
+          topUv.push(x, y);
+          box[0] = Math.min(box[0], x); box[1] = Math.min(box[1], y); box[2] = Math.max(box[2], x); box[3] = Math.max(box[3], y);
         }
-        return node.get(key);
-      };
-      const merc = (i, j) => [(t.x + i / W) / n, (t.y + j / H) / n];
-      const v = (i, j, down) => {
-        const [x, y] = merc(i, j);
-        return [(x - refX) * m, -(y - refY) * m, nodeZ(i, j) - (down ? THICKNESS : 0)];
-      };
-      for (let j = 0; j < H; j++) {
-        let run = -1;
-        for (let i = 0; i <= W; i++) {
-          const here = i < W && cells.has(j * W + i);
-          if (here && run < 0) run = i;
-          if (!here && run >= 0) { // varjo pikselirivin jaksoista
-            shadow.push([merc(run, j), merc(i, j), merc(i, j + 1), merc(run, j + 1), merc(run, j)].map(([x, y]) => [lonOfX(x), latOfY(y)]));
-            run = -1;
-          }
-          if (!here) continue;
-          // Kulmat: luode, lounas, kaakko ja koillinen (vastapäivään ylhäältä katsottuna).
-          const nw = v(i, j), sw = v(i, j + 1), se = v(i + 1, j + 1), ne = v(i + 1, j);
-          quad(top, nw, sw, se, ne);
-          const [x0, y0] = merc(i, j), [x1, y1] = merc(i + 1, j + 1);
-          topUv.push(x0, y0, x0, y1, x1, y1, x0, y0, x1, y1, x1, y0);
-          box[0] = Math.min(box[0], x0); box[1] = Math.min(box[1], y0); box[2] = Math.max(box[2], x1); box[3] = Math.max(box[3], y1);
-          const dnw = v(i, j, true), dsw = v(i, j + 1, true), dse = v(i + 1, j + 1, true), dne = v(i + 1, j, true);
-          quad(sides, dnw, dne, dse, dsw); // alapinta
-          if (!span(i, j - 1)) quad(sides, nw, ne, dne, dnw); // reunat
-          if (!span(i, j + 1)) quad(sides, se, sw, dsw, dse);
-          if (!span(i - 1, j)) quad(sides, sw, nw, dnw, dsw);
-          if (!span(i + 1, j)) quad(sides, ne, se, dse, dne);
-        }
+        shadow.push([L[k], R[k], R[k + 1], L[k + 1], L[k]].map(([x, y]) => [lonOfX(x), latOfY(y)]));
+        const down = (p) => [p[0], p[1], p[2] - THICKNESS];
+        quad(sides, l0, l1, down(l1), down(l0)); // reunat
+        quad(sides, r1, r0, down(r0), down(r1));
+        quad(sides, down(l0), down(l1), down(r1), down(r0)); // alapinta
+        if (k === 0 || !r.drawn[k - 1]) quad(sides, r0, l0, down(l0), down(r0)); // päädyt
+        if (k + 1 === r.n - 1 || !r.drawn[k + 2]) quad(sides, l1, r1, down(r1), down(l1));
       }
     }
     const g = new THREE.BufferGeometry();
@@ -170,34 +232,27 @@ export function createDecks(map, { orthoImage, ortho = true }) {
     meshes.delete(entry.key);
   }
 
-  // Tiilet tehdään uudelleen, kun niiden tai naapuritiilten jänteet muuttuivat (naapurin jänne
-  // poistaa reunan tiilten rajalta).
   function rebuild() {
     dirty = false;
-    const tiles = getSpanTiles(), keep = new Set();
-    for (const [key, t] of tiles) {
-      if (!area || (!t.cells.size && !t.upper.size)) continue;
-      const n = 2 ** t.z, unit = EARTH_CIRC * Math.cos(area.lat * D2R);
-      const d = Math.hypot((t.x + 0.5) / n - mercX(area.lon), (t.y + 0.5) / n - mercY(area.lat)) * unit;
-      if (d > area.radius + unit / n) continue;
+    const keep = new Set();
+    for (const rs of clusters()) {
+      const key = rs.map((r) => `${r.id}:${r.drawn.join("")}`).sort().join("|");
       keep.add(key);
-      const nv = [[-1, 0], [1, 0], [0, -1], [0, 1]].map(([dx, dy]) => tiles.get(`${t.z}/${t.x + dx}/${t.y + dy}`)?.version ?? 0).join();
-      const old = meshes.get(key);
-      if (old && old.version === t.version && old.nv === nv) continue;
-      if (old) dispose(old);
-      const entry = buildMesh(t, tiles);
-      Object.assign(entry, { key, version: t.version, nv });
+      if (meshes.has(key)) continue;
+      const entry = buildMesh(rs);
+      entry.key = key;
       meshes.set(key, entry);
       group.add(entry.mesh);
-      texture(entry); // vasta, kun tiili on tallessa: valmistunut tekstuuri hylätään, jos tiili on jo poistettu
+      texture(entry); // vasta, kun ryhmä on tallessa: valmistunut tekstuuri hylätään, jos ryhmä on jo poistettu
     }
     for (const [key, entry] of meshes) if (!keep.has(key)) dispose(entry);
     const polygons = [...meshes.values()].flatMap((e) => e.shadow);
-    map.getSource(SHADOW)?.setData({ type: "Feature", geometry: { type: "MultiPolygon", coordinates: polygons.map((r) => [r]) } });
+    map.getSource(SHADOW)?.setData({ type: "Feature", geometry: { type: "MultiPolygon", coordinates: polygons.map((p) => [p]) } });
   }
 
   function draw(_, ctx) {
     group.visible = area != null;
+    if (loaded && area) refresh(ctx.now);
     if (dirty) rebuild();
     if (!group.visible) return;
     for (const entry of meshes.values()) {
@@ -213,6 +268,7 @@ export function createDecks(map, { orthoImage, ortho = true }) {
     // Alue, jolla laatat piirretään: { lon, lat, radius (m) } tai null.
     setArea(a) {
       area = a && { ...a, radius: Math.min(a.radius, MAX_RADIUS) };
+      if (!area) for (const r of getRibbons()) r.drawn.fill(0); // ajoneuvot eivät ole laatoilla
       dirty = true;
       map.triggerRepaint();
     },

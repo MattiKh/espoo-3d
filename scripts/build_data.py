@@ -97,10 +97,10 @@ STRIP_DECK = 30  # m: kaistale otetaan mukaan, jos näin lähellä on siltaviiva
 # Siltaviivan ja ajoradan reunan väli (reunapalkki, kaide, jalkakäytävä) on kantta, vaikka siinä ei
 # kulje tietä, kun se on enintään näin leveä (m).
 STRIP_EDGE = 8
-# Raiteiden keskilinjat korkeuksineen (kantakartta) täyttävät korkeusmallin kuopat raiteilla (esim.
-# siltojen päissä, joista korkeusmallissa on poistettu penkereen pää). Raiteelle tehdään kaistale.
+# Raiteiden keskilinjat korkeuksineen (kantakartta) antavat raidesiltojen kansinauhoille korkeuden
+# myös siellä, mistä siltaviivoja ei ole (esim. siltojen päät). Raiteelle tehdään kaistale.
 RAIL_TYPE = "kanta:Raide"
-RAIL_HALF = 7.0  # m: kaistaleen puolileveys: raide (selain: 1,6 m) ja sen penkereen luiskat
+RAIL_HALF = 7.0  # m: kaistaleen puolileveys: kattaa raiteen OSM-keskilinjan, vaikka se olisi metrejä sivussa
 RAIL_STEP = 5.0  # m: kaistaleen pisteväli
 RAIL_SMOOTH = 10.0  # m: korkeus mediaanina näin pitkältä kummaltakin puolelta (mittausten hajonta)
 # 3D-malli kattomuotoineen. Raskas, joten sitä haetaan vain rakennuksille, joiden korkeus
@@ -1227,8 +1227,8 @@ def build_kauniainen():
 
 
 def build_bridges():
-    """Siltojen reunaviivat korkeuksineen. Korkeusmallista sillat puuttuvat, joten selain
-    nostaa niiden avulla silloilla kulkevat ajoneuvot kannen tasolle."""
+    """Siltojen reunaviivat ja kansinauhat korkeuksineen. Korkeusmallista sillat puuttuvat, joten
+    selain piirtää nauhoista sillat laattoina ja ajoneuvot kulkevat niiden pinnalla."""
     log(f"sillat ({BRIDGE_TYPE})")
     lines = {}
     for path in fetch_tiled(BRIDGE_TYPE, "sillat"):
@@ -1248,20 +1248,22 @@ def build_bridges():
     kannet = bridge_decks(viivat)
     kaistat = bridge_strips(viivat, bridge_road_edges(viivat), bridge_osm_roads(viivat))
     raiteet = rail_strips()
+    nauhat = bridge_ribbons(viivat, kannet + kaistat + raiteet, bridge_osm_ways(viivat))
     path = os.path.join(PUBLIC_DATA, "sillat.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla, Raide), tiet © OpenStreetMap",
-                   "viivat": viivat, "kannet": kannet, "kaistat": kaistat, "raiteet": raiteet}, fh, separators=(",", ":"))
+                   "viivat": viivat, "nauhat": nauhat}, fh, separators=(",", ":"))
     log(f"  → sillat.json: {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, "
-        f"{len(raiteet)} raidetta, {os.path.getsize(path) / 1e6:.2f} Mt")
+        f"{len(raiteet)} raidetta → {len(nauhat)} kansinauhaa, {os.path.getsize(path) / 1e6:.2f} Mt")
 
 
 def bridge_decks(viivat):
     """Kansialueet reunaviivapareista. Aineistossa ei kerrota, mitkä viivat ovat saman kannen
     reunoja, joten kannen reunoiksi tulkitaan kaksi samansuuntaista, samalla korkeudella
     olevaa viivaa 3–40 metrin päässä toisistaan. Kullekin viivalle otetaan lähin pari
-    kummaltakin puolelta. Selain nostaa maaston kannen tasolle vain siellä, missä maasto
-    on kantta alempana, joten tasaisella maalla väärä pari ei muuta mitään."""
+    kummaltakin puolelta. Kansista saavat korkeutensa vain samansuuntaiset kansinauhat
+    (bridge_ribbons), ja laatta piirretään vain maanpinnan yläpuolelle, joten tasaisella
+    maalla väärä pari ei muuta mitään."""
     lon0, lat0, kx, ky = 24.7, 60.2, 55462.0, 111415.0
     edges = []
     for line in viivat:
@@ -1350,6 +1352,12 @@ def bridge_road_edges(viivat):
 def bridge_osm_roads(viivat):
     """OpenStreetMapin tiet, väylät ja raiteet (esim. raitiotiesillat) siltojen ympäriltä janoina
     paikallisina metreinä."""
+    return [(a, b) for _, pts in bridge_osm_ways(viivat) for a, b in zip(pts, pts[1:])]
+
+
+def bridge_osm_ways(viivat):
+    """OpenStreetMapin tiet, väylät ja raiteet siltojen ympäriltä: [(tagit, [(x, y), ...])]
+    paikallisina metreinä."""
     boxes = []
     for x0, y0, x1, y1 in bridge_cells(viivat).values():
         (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
@@ -1358,8 +1366,7 @@ def bridge_osm_roads(viivat):
     query = "[out:json][timeout:300];(" + "".join(boxes) + ");out geom;"
     with open(overpass_post(query, os.path.join(CACHE, "sillat_vaylat.json")), encoding="utf-8") as fh:
         ways = [el for el in json.load(fh)["elements"] if el["type"] == "way"]
-    return [(stream_xy(a["lon"], a["lat"]), stream_xy(b["lon"], b["lat"])) for w in ways
-            for a, b in zip(w["geometry"], w["geometry"][1:])]
+    return [(w.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in w["geometry"]]) for w in ways]
 
 
 def bridge_strips(viivat, edges, osm):
@@ -1370,9 +1377,9 @@ def bridge_strips(viivat, edges, osm):
     OSM:n tie tai raide, jottei kahden eri tien välistä luiskaa tai rinnakkaisten siltojen väliä täytetä;
     siltaviivan ja ajoradan reunan välinen kapea kaista (STRIP_EDGE) kelpaa ilmankin.
     Mukaan otetaan vain kannen tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään
-    STRIP_DECK metrin päässä); muut, kuten sillan alittavat tiet, eivät nostaisi mitään. Tasaisella
-    maalla kaistaleet eivät muuta mitään, sillä selain nostaa maastoa vain siellä, missä se on
-    kaistaletta selvästi alempana. Palauttaa kannet kuten bridge_decks."""
+    STRIP_DECK metrin päässä); muut, kuten sillan alittavat tiet, eivät tuottaisi laattaa. Tasaisella
+    maalla kaistaleet eivät muuta mitään, sillä laatta piirretään vain maanpinnan yläpuolelle.
+    Palauttaa kannet kuten bridge_decks."""
     bridge = [[(*stream_xy(l[i], l[i + 1]), l[i + 2]) for i in range(0, len(l), 3)] for l in viivat]
     zone, deck_pts = set(), collections.defaultdict(list)
     for line in bridge:
@@ -1476,7 +1483,8 @@ def bridge_strips(viivat, edges, osm):
 def rail_strips():
     """Raiteiden kaistaleet kuten bridge_strips: keskilinjan molemmin puolin RAIL_HALF metriä,
     pisteet RAIL_STEP metrin välein ja korkeus mediaanina (RAIL_SMOOTH). Maan alla kulkevat
-    raiteet (metro) eivät muuta mitään, sillä selain nostaa maastoa vain kaistaleen alapuolelta."""
+    raiteet (metro) eivät muuta mitään, sillä tunnelit eivät ole kansinauhoja ja laatta piirretään
+    vain maanpinnan yläpuolelle."""
     lines, seen = [], set()
     for path in fetch_tiled(RAIL_TYPE, "kanta_raiteet"):
         for _, el in ET.iterparse(path):
@@ -1517,6 +1525,120 @@ def rail_strips():
         strips.append([[v for k in keep for v in to_ll(*a[k][:3])], [v for k in keep for v in to_ll(*b[k][:3])]])
     log(f"  raiteet: {len(lines)} keskilinjaa, {sum(len(x[0]) // 3 for x in strips)} pistettä")
     return strips
+
+
+# Kansinauhat: kukin silta on yksinkertainen nauha OSM:n tien tai raiteen keskilinjaa pitkin.
+# Korkeus tulee kansista ja kaistaleista (siltaviivat, ajoväylien reunat, raiteet), leveys tien tyypistä.
+RIBBON_STEP = 3.0  # m: keskilinjan näytteiden väli
+RIBBON_HALF = {  # m: puolileveys tien tai raiteen tyypin mukaan (kaistoista, jos niitä on enemmän)
+    "motorway": 5.5, "trunk": 5.5, "primary": 5.0, "secondary": 4.5, "tertiary": 4.0, "unclassified": 3.5,
+    "residential": 3.5, "living_street": 3.0, "service": 2.5, "pedestrian": 3.0, "track": 2.0, "cycleway": 2.0,
+    "footway": 2.0, "path": 2.0, "bridleway": 2.0, "steps": 1.5, "rail": 2.5, "light_rail": 2.0, "tram": 2.0,
+    "subway": 2.5, "narrow_gauge": 2.0,
+}
+
+
+def resample_line(pts, step):
+    """Murtoviiva [(x, y, z), ...] tasavälein (noin step) samaan pituussuhteeseen."""
+    s = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    n = max(2, int(math.ceil(s[-1] / step)) + 1)
+    out, i = [], 0
+    for k in range(n):
+        t = s[-1] * k / (n - 1)
+        while i < len(pts) - 2 and s[i + 1] < t:
+            i += 1
+        f = (t - s[i]) / (s[i + 1] - s[i]) if s[i + 1] > s[i] else 0.0
+        out.append(tuple(pts[i][c] + (pts[i + 1][c] - pts[i][c]) * f for c in range(3)))
+    return out
+
+
+def bridge_ribbons(viivat, decks, ways):
+    """Kansinauhat OSM:n väylistä. Kunkin väylän keskilinjalta otetaan näytteet RIBBON_STEP metrin
+    välein, ja näytteen korkeus on sen kohdalla olevien samansuuntaisten kansien ja kaistaleiden
+    korkeuksien mediaani (eri suuntaan kulkeva on toinen väylä, esim. sillan alittava tie). Peräkkäiset
+    näytteet, joilla on korkeus, ovat nauha. Selain piirtää nauhasta laatan sinne, missä se on
+    maanpinnan yläpuolella (decks.js), ja jatkaa sitä hieman kummastakin päästä.
+    Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m)}]."""
+    quads = collections.defaultdict(list)
+    for a, b in decks:
+        A = [(*stream_xy(a[i], a[i + 1]), a[i + 2]) for i in range(0, len(a), 3)]
+        B = [(*stream_xy(b[i], b[i + 1]), b[i + 2]) for i in range(0, len(b), 3)]
+        length = max(sum(math.hypot(q[0] - p[0], q[1] - p[1]) for p, q in zip(P, P[1:])) for P in (A, B))
+        n = max(2, int(math.ceil(length / 4)) + 1)
+        A, B = resample_line(A, length / (n - 1) or 1), resample_line(B, length / (n - 1) or 1)
+        for i in range(min(len(A), len(B)) - 1):
+            q = (A[i], A[i + 1], B[i + 1], B[i])
+            xs, ys = [p[0] for p in q], [p[1] for p in q]
+            for cx in range(int(min(xs) // 20), int(max(xs) // 20) + 1):
+                for cy in range(int(min(ys) // 20), int(max(ys) // 20) + 1):
+                    quads[(cx, cy)].append(q)
+    near_bridge = set()
+    for l in viivat:
+        for i in range(0, len(l), 3):
+            x, y = stream_xy(l[i], l[i + 1])
+            near_bridge.update((int(x // 50) + dx, int(y // 50) + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+
+    def seg(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        l2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) if l2 else 0.0
+        return math.hypot(a[0] + t * dx - p[0], a[1] + t * dy - p[1]), a[2] + (b[2] - a[2]) * t
+
+    def height(x, y, ux, uy):
+        zs = []
+        for q in quads.get((int(x // 20), int(y // 20)), ()):
+            if not point_in_polygon(x, y, [[*(p[:2] for p in q), q[0][:2]]]):
+                continue
+            dx, dy = q[1][0] - q[0][0], q[1][1] - q[0][1]
+            ln = math.hypot(dx, dy)
+            if not ln or abs(dx * ux + dy * uy) / ln < 0.8:
+                continue  # eri suuntaan kulkeva kansi (esim. silta väylän yllä)
+            (da, za), (db, zb) = seg((x, y), q[0], q[1]), seg((x, y), q[3], q[2])
+            zs.append((za * db + zb * da) / (da + db) if da + db else za)
+        return sorted(zs)[len(zs) // 2] if zs else None
+
+    to_ll = lambda x, y, z: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6), round(z, 1)]
+    ribbons = []
+    for tags, pts in ways:
+        kind = tags.get("highway") or tags.get("railway")
+        if kind not in RIBBON_HALF and (kind or "").replace("_link", "") not in RIBBON_HALF:
+            continue
+        if tags.get("tunnel") not in (None, "no") or tags.get("layer", "0").lstrip("-").isdigit() and int(tags.get("layer", "0")) < 0:
+            continue
+        if not any((int(x // 50), int(y // 50)) in near_bridge for x, y in pts):
+            continue
+        half = RIBBON_HALF.get(kind) or RIBBON_HALF[kind.replace("_link", "")] * 0.8
+        try:
+            half = max(half, float(tags["width"]) / 2)
+        except (KeyError, ValueError):
+            if tags.get("lanes", "").isdigit() and "railway" not in tags:
+                half = max(half, int(tags["lanes"]) * 1.75 + 0.5)
+        if tags.get("junction") == "roundabout":
+            half = max(half, 4.5)
+        line = resample_line([(x, y, 0.0) for x, y in pts], RIBBON_STEP)
+        zs = []
+        for i, (x, y, _) in enumerate(line):
+            a, b = line[max(0, i - 1)], line[min(len(line) - 1, i + 1)]
+            ln = math.hypot(b[0] - a[0], b[1] - a[1]) or 1.0
+            zs.append(height(x, y, (b[0] - a[0]) / ln, (b[1] - a[1]) / ln))
+        run = []
+        for (x, y, _), z in list(zip(line, zs)) + [((0, 0, 0), None)]:
+            if z is not None:
+                run.append((x, y, z))
+                continue
+            if len(run) >= 4:
+                # Korkeus tasoitetaan mediaanilla (päällekkäisten kansien ja mittausten hajonta).
+                zm = [sorted(p[2] for p in run[max(0, k - 2):k + 3])[len(run[max(0, k - 2):k + 3]) // 2] for k in range(len(run))]
+                pts3 = [(p[0], p[1], z) for p, z in zip(run, zm)]
+                s = [0.0]
+                for a, b in zip(pts3, pts3[1:]):
+                    s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+                keep = sorted(set(simplify_indices([p[:2] for p in pts3], 0.3)) | set(simplify_indices(list(zip(s, zm)), 0.1)))
+                ribbons.append({"p": [v for k in keep for v in to_ll(*pts3[k])], "w": round(half, 1)})
+            run = []
+    return ribbons
 
 
 def read_positions_3d(el):
