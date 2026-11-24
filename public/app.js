@@ -44,7 +44,11 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 // mutta sallii vastausten tallentamisen selaimen välimuistiin. Ruudut haetaan oman protokollan
 // kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa, ja kartan pysähdyttyä näkymän
 // ympäriltä haetaan valmiiksi naapuriruudut. Karttaa siirrettäessä ne tulevat välimuistista heti.
-const ORTHO_PREFETCH_RADIUS = 2; // ruutua keskiruudun ympäriltä samalla tasolla (yksi karkeammalla)
+const ORTHO_PREFETCH_RADIUS = 1; // ruutua keskiruudun ympäriltä samalla tasolla
+// Ruutuja haetaan enintään kuusi kerrallaan, jottei karttapalvelu ruuhkaudu (MapLibre pyytäisi
+// jopa 16 kerrallaan ja ennakkohaku lisäisi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa,
+// ja ennakkohaku käyttää enintään kahta paikkaa.
+const ORTHO_PARALLEL = 6, ORTHO_PREFETCH_PARALLEL = 2;
 // Ilmakuvien maastoresoluutio on 0,2–0,3 m, ja tason 18 ruudussa pikseli on noin 0,15 m. Tarkemmat
 // ruudut eivät toisi lisää yksityiskohtia, joten lähempänä tason 18 ruutuja suurennetaan.
 const ORTHO_MAXZOOM = 18;
@@ -58,6 +62,8 @@ const ORTHO_BACKGROUND = "#868b84";
 const orthoInflight = new Map();
 const orthoPrefetched = new Set();
 let orthoQueue = [], orthoActive = 0;
+const orthoWaiting = { high: [], low: [] };
+let orthoRunning = 0;
 
 function tileBBox(z, x, y) {
   const world = 2 * Math.PI * 6378137, size = world / 2 ** z, x0 = -world / 2 + x * size, y1 = world / 2 - y * size;
@@ -72,28 +78,52 @@ function orthoUrl(layer, z, x, y) {
   return `${WMS_SERVICES.espoo}?${params}`;
 }
 
-async function loadOrtho(url, priority) {
+// Vuoro karttapalvelulle (ORTHO_PARALLEL); näkyvät ruudut ennen ennakkohakua.
+function orthoSlot(priority) {
+  if (orthoRunning < ORTHO_PARALLEL) {
+    orthoRunning++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => orthoWaiting[priority].push(resolve));
+}
+
+function orthoRelease() {
+  const next = orthoWaiting.high.shift() ?? orthoWaiting.low.shift();
+  if (next) next();
+  else orthoRunning--;
+}
+
+// signal: kartan peruma ruutu (esim. näkymästä jo poistunut) jätetään hakematta, jos se on vielä jonossa.
+async function loadOrtho(url, priority, signal) {
   for (let i = 0; ; i++) {
-    const r = await fetch(url, { priority, cache: i ? "no-cache" : "default" });
-    if (r.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
+    await orthoSlot(priority);
+    let r, data;
+    try {
+      if (signal?.aborted) throw new DOMException("Ruutua ei enää tarvita", "AbortError");
+      r = await fetch(url, { priority, cache: i ? "no-cache" : "default" });
+      if (r.ok && r.headers.get("content-type")?.startsWith("image/")) data = await r.arrayBuffer();
+    } finally {
+      orthoRelease();
+    }
+    if (data) return data;
     if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r.status})`);
     await new Promise((resolve) => setTimeout(resolve, ORTHO_RETRY[i]));
   }
 }
 
 // Sama ruutu haetaan vain kerran, vaikka ennakkohaku ja kartta pyytäisivät sitä yhtä aikaa.
-function fetchOrtho(url, priority) {
+function fetchOrtho(url, priority, signal) {
   let p = orthoInflight.get(url);
   if (!p) {
-    p = loadOrtho(url, priority).finally(() => orthoInflight.delete(url));
+    p = loadOrtho(url, priority, signal).finally(() => orthoInflight.delete(url));
     orthoInflight.set(url, p);
   }
   return p;
 }
 
-maplibregl.addProtocol("ortho", async (params) => {
+maplibregl.addProtocol("ortho", async (params, abortController) => {
   const [layer, z, x, y] = params.url.slice("ortho://".length).split("/");
-  return { data: await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high") };
+  return { data: await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high", abortController.signal) };
 });
 
 function prefetchOrtho() {
@@ -101,24 +131,22 @@ function prefetchOrtho() {
   if (!state.ortho) return;
   const layer = ORTHO_YEARS[state.orthoIndex][1], c = map.getCenter(), zoom = Math.min(ORTHO_MAXZOOM, Math.round(map.getZoom()));
   const wanted = [];
-  for (const [z, r, w] of [[zoom, ORTHO_PREFETCH_RADIUS, 1], [zoom - 1, 1, 2]]) {
-    const n = 2 ** z, lat = (c.lat * Math.PI) / 180;
-    const cx = Math.floor(((c.lng + 180) / 360) * n), cy = Math.floor(((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n);
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const url = orthoUrl(layer, z, cx + dx, cy + dy);
-        if (!orthoPrefetched.has(url)) wanted.push([Math.hypot(dx, dy) * w, url]);
-      }
+  const n = 2 ** zoom, lat = (c.lat * Math.PI) / 180, r = ORTHO_PREFETCH_RADIUS;
+  const cx = Math.floor(((c.lng + 180) / 360) * n), cy = Math.floor(((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n);
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const url = orthoUrl(layer, zoom, cx + dx, cy + dy);
+      if (!orthoPrefetched.has(url)) wanted.push([Math.hypot(dx, dy), url]);
     }
   }
-  // Lähimmät ruudut ensin; karkeamman tason ruudut kattavat nelinkertaisen alan.
+  // Lähimmät ruudut ensin.
   orthoQueue = wanted.sort((a, b) => a[0] - b[0]).map(([, url]) => url);
   pumpOrtho();
 }
 
-// Neljä ennakkohakua kerrallaan matalalla prioriteetilla, jottei näkyvien ruutujen lataus hidastu.
+// Ennakkohaut matalalla prioriteetilla, jottei näkyvien ruutujen lataus hidastu.
 function pumpOrtho() {
-  while (orthoActive < 4 && orthoQueue.length) {
+  while (orthoActive < ORTHO_PREFETCH_PARALLEL && orthoQueue.length) {
     const url = orthoQueue.shift();
     orthoPrefetched.add(url);
     orthoActive++;

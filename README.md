@@ -26,8 +26,11 @@ sähköautot näkyvät latauspaikoillaan.
   (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
 - Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,
   PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`), ja kartan
-  pysähdyttyä näkymän ympäriltä haetaan valmiiksi naapuriruudut lähimmistä alkaen selaimen
+  pysähdyttyä keskiruudun ympäriltä haetaan valmiiksi kahdeksan naapuriruutua selaimen
   välimuistiin, josta ne tulevat karttaa siirrettäessä muutamassa millisekunnissa.
+- Karttapalvelulle on enintään kuusi pyyntöä kerrallaan (MapLibre pyytäisi jopa 16, ja
+  ennakkohaku lisäsi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa, ennakkohaku käyttää
+  enintään kahta paikkaa, ja kartan perumat ruudut jätetään hakematta, jos ne ovat vielä jonossa.
 - Ilmakuvien maastoresoluutio on 0,2–0,3 m, joten ruutuja haetaan enintään tasolta 18 (pikseli
   noin 0,15 m); lähempänä niitä suurennetaan. Tarkemmat ruudut eivät toisi lisää yksityiskohtia,
   mutta niitä olisi moninkertaisesti.
