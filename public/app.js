@@ -42,16 +42,23 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 
 // Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
 // mutta sallii vastausten tallentamisen selaimen välimuistiin. Ruudut haetaan oman protokollan
-// kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa, ja kartan pysähdyttyä näkymän
-// ympäriltä haetaan valmiiksi naapuriruudut. Karttaa siirrettäessä ne tulevat välimuistista heti.
-const ORTHO_PREFETCH_RADIUS = 1; // ruutua keskiruudun ympäriltä samalla tasolla
+// kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa. Kartan pysähdyttyä haetaan
+// valmiiksi ruudut, jotka näkyisivät, jos karttaa siirtäisi kuudesosan tai kolmanneksen näkymästä
+// mihin tahansa suuntaan; karttaa siirrettäessä ne tulevat välimuistista heti. Kallistetussa
+// näkymässä ruudun taso riippuu etäisyydestä kamerasta, joten siirto vaihtaa muitakin kuin reunan
+// ruutuja. Siirron jälkeistä keskipistettä ei tiedä tarkasti (maasto), joten se lasketaan kahdella
+// tavalla: maaston pinnalta ja keskipisteen korkeuden tasolta.
+const ORTHO_PREFETCH_SHIFTS = [1 / 6, 1 / 3];
 // Ruutuja haetaan enintään kuusi kerrallaan, jottei karttapalvelu ruuhkaudu (MapLibre pyytäisi
 // jopa 16 kerrallaan ja ennakkohaku lisäisi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa,
 // ja ennakkohaku käyttää enintään kahta paikkaa.
 const ORTHO_PARALLEL = 6, ORTHO_PREFETCH_PARALLEL = 2;
-// Ilmakuvien maastoresoluutio on 0,2–0,3 m, ja tason 18 ruudussa pikseli on noin 0,15 m. Tarkemmat
-// ruudut eivät toisi lisää yksityiskohtia, joten lähempänä tason 18 ruutuja suurennetaan.
-const ORTHO_MAXZOOM = 18;
+// Oletuksena olevan vuoden 2024 ilmakuvan maastoresoluutio on 0,30 m, ja tason 17 ruudussa pikseli
+// on juuri 0,30 m, joten lähempänä tason 17 ruutuja suurennetaan. Tarkemmat ruudut eivät toisi
+// lisää yksityiskohtia, mutta kallistetussa näkymässä niitä vaihtuisi karttaa siirrettäessä
+// moninkertaisesti (ruudun taso riippuu etäisyydestä kamerasta), ja kuva sumenisi latauksen ajan.
+// Vanhemmissa (2015: 0,20 m, 2005: 0,25 m) menetetään hieman tarkkuutta.
+const ORTHO_MAXZOOM = 17;
 // Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (ServiceException, HTTP 200) kuvan
 // sijaan. Ruutua yritetään silloin uudelleen hetken päästä; muuten MapLibre jättäisi sen
 // virheelliseksi ja näyttäisi tilalla karkeamman ruudun, eikä kuva tarkentuisi.
@@ -64,6 +71,7 @@ const orthoPrefetched = new Set();
 let orthoQueue = [], orthoActive = 0;
 const orthoWaiting = { high: [], low: [] };
 let orthoRunning = 0;
+const orthoDone = new Set(); // haetut ruudut: selaimen välimuistissa, joten ne eivät jonota
 
 function tileBBox(z, x, y) {
   const world = 2 * Math.PI * 6378137, size = world / 2 ** z, x0 = -world / 2 + x * size, y1 = world / 2 - y * size;
@@ -95,6 +103,11 @@ function orthoRelease() {
 
 // signal: kartan peruma ruutu (esim. näkymästä jo poistunut) jätetään hakematta, jos se on vielä jonossa.
 async function loadOrtho(url, priority, signal) {
+  if (orthoDone.has(url)) {
+    const r = await fetch(url, { priority });
+    if (r.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
+    orthoDone.delete(url);
+  }
   for (let i = 0; ; i++) {
     await orthoSlot(priority);
     let r, data;
@@ -105,7 +118,11 @@ async function loadOrtho(url, priority, signal) {
     } finally {
       orthoRelease();
     }
-    if (data) return data;
+    if (data) {
+      if (orthoDone.size > 5000) orthoDone.clear();
+      orthoDone.add(url);
+      return data;
+    }
     if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r.status})`);
     await new Promise((resolve) => setTimeout(resolve, ORTHO_RETRY[i]));
   }
@@ -129,18 +146,31 @@ maplibregl.addProtocol("ortho", async (params, abortController) => {
 function prefetchOrtho() {
   orthoQueue = [];
   if (!state.ortho) return;
-  const layer = ORTHO_YEARS[state.orthoIndex][1], c = map.getCenter(), zoom = Math.min(ORTHO_MAXZOOM, Math.round(map.getZoom()));
-  const wanted = [];
-  const n = 2 ** zoom, lat = (c.lat * Math.PI) / 180, r = ORTHO_PREFETCH_RADIUS;
-  const cx = Math.floor(((c.lng + 180) / 360) * n), cy = Math.floor(((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2) * n);
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      const url = orthoUrl(layer, zoom, cx + dx, cy + dy);
-      if (!orthoPrefetched.has(url)) wanted.push([Math.hypot(dx, dy), url]);
+  const layer = ORTHO_YEARS[state.orthoIndex][1], { width, height } = map.transform, wanted = new Set();
+  const options = { tileSize: 512, minzoom: 0, maxzoom: ORTHO_MAXZOOM, roundZoom: true, terrain: map.terrain };
+  const centers = [map.getCenter()];
+  for (const f of ORTHO_PREFETCH_SHIFTS) {
+    for (const [dx, dy] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+      const p = map.transform.centerPoint.clone();
+      p.x += dx * width * f;
+      p.y += dy * height * f;
+      for (const locate of [() => map.unproject(p), () => map.transform.pointLocation(p)]) {
+        try {
+          centers.push(locate());
+        } catch { // piste horisontin yläpuolella (jyrkkä kallistus)
+        }
+      }
     }
   }
-  // Lähimmät ruudut ensin.
-  orthoQueue = wanted.sort((a, b) => a[0] - b[0]).map(([, url]) => url);
+  for (const center of centers) {
+    const t = map.transform.clone();
+    t.center = center;
+    for (const { canonical: { z, x, y } } of t.coveringTiles(options)) { // keskeltä alkaen
+      const url = orthoUrl(layer, z, x, y);
+      if (!orthoPrefetched.has(url) && !orthoDone.has(url) && !orthoInflight.has(url)) wanted.add(url);
+    }
+  }
+  orthoQueue = [...wanted];
   pumpOrtho();
 }
 

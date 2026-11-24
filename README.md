@@ -25,15 +25,21 @@ sähköautot näkyvät latauspaikoillaan.
 - Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
   (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
 - Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,
-  PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`), ja kartan
-  pysähdyttyä keskiruudun ympäriltä haetaan valmiiksi kahdeksan naapuriruutua selaimen
-  välimuistiin, josta ne tulevat karttaa siirrettäessä muutamassa millisekunnissa.
+  PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`). Kartan
+  pysähdyttyä haetaan valmiiksi selaimen välimuistiin ruudut, jotka näkyisivät, jos karttaa
+  siirtäisi kuudesosan tai kolmanneksen näkymästä mihin tahansa suuntaan. Kallistetussa
+  näkymässä ruudun tarkkuustaso riippuu etäisyydestä kamerasta, joten pienikin siirto vaihtaa
+  suurimman osan ruuduista, ja kuva sumeni latauksen ajaksi. Nyt pieni siirto ei yleensä tarvitse
+  palvelimelta mitään (200 px:n siirrossa kolmeen suuntaan ei mitään, kameraa kohti yksi ruutu
+  16:sta). Jo haetut ruudut tulevat välimuistista muutamassa millisekunnissa.
 - Karttapalvelulle on enintään kuusi pyyntöä kerrallaan (MapLibre pyytäisi jopa 16, ja
   ennakkohaku lisäsi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa, ennakkohaku käyttää
   enintään kahta paikkaa, ja kartan perumat ruudut jätetään hakematta, jos ne ovat vielä jonossa.
-- Ilmakuvien maastoresoluutio on 0,2–0,3 m, joten ruutuja haetaan enintään tasolta 18 (pikseli
-  noin 0,15 m); lähempänä niitä suurennetaan. Tarkemmat ruudut eivät toisi lisää yksityiskohtia,
-  mutta niitä olisi moninkertaisesti.
+  Jo kerran haetut ruudut eivät jonota, koska ne tulevat selaimen välimuistista.
+- Vuoden 2024 ilmakuvan maastoresoluutio on 0,30 m, joten ruutuja haetaan enintään tasolta 17
+  (pikseli 0,30 m); lähempänä niitä suurennetaan. Tarkemmat ruudut eivät toisi lisää
+  yksityiskohtia, mutta niitä olisi moninkertaisesti. Vanhemmissa (2015: 0,20 m, 2005: 0,25 m)
+  menetetään hieman tarkkuutta.
 - Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (`ServiceException`, HTTP 200)
   kuvan sijaan. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin päästä; muuten ruutu jäisi
   virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva tarkentuisi.
