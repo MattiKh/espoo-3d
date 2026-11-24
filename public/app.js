@@ -45,6 +45,13 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
 // kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa, ja kartan pysähdyttyä näkymän
 // ympäriltä haetaan valmiiksi naapuriruudut. Karttaa siirrettäessä ne tulevat välimuistista heti.
 const ORTHO_PREFETCH_RADIUS = 2; // ruutua keskiruudun ympäriltä samalla tasolla (yksi karkeammalla)
+// Ilmakuvien maastoresoluutio on 0,2–0,3 m, ja tason 18 ruudussa pikseli on noin 0,15 m. Tarkemmat
+// ruudut eivät toisi lisää yksityiskohtia, joten lähempänä tason 18 ruutuja suurennetaan.
+const ORTHO_MAXZOOM = 18;
+// Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (ServiceException, HTTP 200) kuvan
+// sijaan. Ruutua yritetään silloin uudelleen hetken päästä; muuten MapLibre jättäisi sen
+// virheelliseksi ja näyttäisi tilalla karkeamman ruudun, eikä kuva tarkentuisi.
+const ORTHO_RETRY = [1000, 3000, 8000]; // ms
 // Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin. Ilmakuvan alla tausta on
 // siksi ilmakuvan keskisävyinen harmaa, jottei rako näy vaaleana (myös kuvauksen ulkopuoliset alueet).
 const ORTHO_BACKGROUND = "#868b84";
@@ -65,11 +72,20 @@ function orthoUrl(layer, z, x, y) {
   return `${WMS_SERVICES.espoo}?${params}`;
 }
 
+async function loadOrtho(url, priority) {
+  for (let i = 0; ; i++) {
+    const r = await fetch(url, { priority, cache: i ? "no-cache" : "default" });
+    if (r.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
+    if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r.status})`);
+    await new Promise((resolve) => setTimeout(resolve, ORTHO_RETRY[i]));
+  }
+}
+
 // Sama ruutu haetaan vain kerran, vaikka ennakkohaku ja kartta pyytäisivät sitä yhtä aikaa.
 function fetchOrtho(url, priority) {
   let p = orthoInflight.get(url);
   if (!p) {
-    p = fetch(url, { priority }).then((r) => (r.ok ? r.arrayBuffer() : new ArrayBuffer(0))).finally(() => orthoInflight.delete(url));
+    p = loadOrtho(url, priority).finally(() => orthoInflight.delete(url));
     orthoInflight.set(url, p);
   }
   return p;
@@ -83,7 +99,7 @@ maplibregl.addProtocol("ortho", async (params) => {
 function prefetchOrtho() {
   orthoQueue = [];
   if (!state.ortho) return;
-  const layer = ORTHO_YEARS[state.orthoIndex][1], c = map.getCenter(), zoom = Math.round(map.getZoom());
+  const layer = ORTHO_YEARS[state.orthoIndex][1], c = map.getCenter(), zoom = Math.min(ORTHO_MAXZOOM, Math.round(map.getZoom()));
   const wanted = [];
   for (const [z, r, w] of [[zoom, ORTHO_PREFETCH_RADIUS, 1], [zoom - 1, 1, 2]]) {
     const n = 2 ** z, lat = (c.lat * Math.PI) / 180;
@@ -203,7 +219,7 @@ function buildStyle() {
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
-    ortho: { type: "raster", tiles: orthoTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, attribution: ATTR_ESPOO },
+    ortho: { type: "raster", tiles: orthoTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, maxzoom: ORTHO_MAXZOOM, attribution: ATTR_ESPOO },
     kohteet: {
       type: "vector", tiles: [`gz://${BASE}tiles/kohteet/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`],
       minzoom: 8, maxzoom: 15, attribution: ATTR_ESPOO + " · " + ATTR_HSY,

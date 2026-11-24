@@ -28,6 +28,12 @@ sähköautot näkyvät latauspaikoillaan.
   PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`), ja kartan
   pysähdyttyä näkymän ympäriltä haetaan valmiiksi naapuriruudut lähimmistä alkaen selaimen
   välimuistiin, josta ne tulevat karttaa siirrettäessä muutamassa millisekunnissa.
+- Ilmakuvien maastoresoluutio on 0,2–0,3 m, joten ruutuja haetaan enintään tasolta 18 (pikseli
+  noin 0,15 m); lähempänä niitä suurennetaan. Tarkemmat ruudut eivät toisi lisää yksityiskohtia,
+  mutta niitä olisi moninkertaisesti.
+- Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (`ServiceException`, HTTP 200)
+  kuvan sijaan. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin päästä; muuten ruutu jäisi
+  virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva tarkentuisi.
 - Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
   ruutujen välissä vaaleana rakona. Ilmakuvan alla tausta on siksi ilmakuvan keskisävyinen
   harmaa, joten raot ja kuvauksen reunat eivät erotu. (Ruutujen haku suurempana ja reunojen
