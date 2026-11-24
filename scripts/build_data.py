@@ -731,6 +731,11 @@ ROOF_MIN_AREA = 0.05  # m²: pienemmät kolmiot jätetään pois
 # hieman sisempänä, jottei se välky 3D-rakennuksen seinän kanssa.
 ROOF_SKIRT = 2.0  # m
 ROOF_INSET = 0.03  # m
+# Tasakattoinen rakennus, jonka LOD0-korkeus (korkein kohta) on selvästi kattojen keskikorkeutta
+# suurempi, on monitasoinen (esim. matala osa ja korkeampi osa) ja piirtyisi liian korkeaksi. Se
+# jaetaan kattopintojen mukaisiin osiin, jos osat kattavat vähintään tämän osuuden pohjasta;
+# muuten korkeudeksi otetaan kattojen pinta-alalla painotettu keskikorkeus.
+ROOF_PART_COVER = 0.8
 
 
 def build_roofs():
@@ -738,12 +743,20 @@ def build_roofs():
     CityGML:n tapaan kierretty ulospäin, joten kolmioiden kiertosuunta säilytetään (katot
     käännetään silti aina ylöspäin). Tiedostot public/tiles/katot/14/x/y.bin (gzip) jakavat
     rakennukset keskipisteen mukaan, ja index.json luettelee ne. Rakennusaineistoon lisätään
-    räystään korkeus, ja rakennustiilet tehdään uudelleen."""
+    räystään korkeus, monitasoiset tasakattoiset rakennukset korjataan (overtall_fix), ja
+    rakennustiilet tehdään uudelleen."""
     log(f"katot ({LOD2_TYPE}), ruudut {ROOF_CELL} m")
     path = os.path.join(OUT, "rakennukset.geojson")
     with open(path, encoding="utf-8") as fh:
         feats = json.load(fh)["features"]
     targets = roof_targets(feats)
+    # Korjattavat: 3D-mallissa olevat, joita ei ole jo jaettu osiin (fix_heights tai aiempi ajo).
+    split = {str(f["properties"].get("tunnus")) for f in feats if f["properties"].get("osa")}
+    footprints = collections.defaultdict(list)
+    for f in feats:
+        p = f["properties"]
+        if p.get("tunnus") and not p.get("arvio") and str(p["tunnus"]) not in split:
+            footprints[str(p["tunnus"])].extend(geom_polygons(f["geometry"]))
     cells = sorted({(int(t["mx"] // ROOF_CELL), int(t["my"] // ROOF_CELL)) for t in targets.values()})
     os.makedirs(os.path.join(CACHE, "lod2_ruudut"), exist_ok=True)
 
@@ -752,16 +765,19 @@ def build_roofs():
         dest = os.path.join(CACHE, "lod2_ruudut", f"{cell[0]}_{cell[1]}.xml")
         return http_get(ESPOO_WFS, espoo_params(LOD2_TYPE, bbox_filter(x0, y0, x0 + ROOF_CELL, y0 + ROOF_CELL)), dest, timeout=900)
 
-    roofs, flat = {}, set()
+    roofs, flat, fixes = {}, set(), {}
     with cf.ThreadPoolExecutor(max_workers=3) as ex:  # maltillinen rinnakkaisuus palvelimen takia
         for i, raw in enumerate(ex.map(fetch, cells), 1):
-            for tunnus, roof in parse_roofs(raw, targets):
+            for tunnus, roof, fix in parse_roofs(raw, targets, footprints):
                 if roof:
                     roofs.setdefault(tunnus, roof)  # ruutujen rajalla olevat rakennukset tulevat kahdesti
                 else:
                     flat.add(tunnus)
+                if fix:
+                    fixes.setdefault(tunnus, fix)
             if i % 25 == 0 or i == len(cells):
                 log(f"  {i}/{len(cells)} ruutua: kaltevia kattoja {len(roofs)}, tasakattoja tai ilman kattopintoja {len(flat - set(roofs))}")
+    feats = apply_height_fixes(feats, fixes)
     for f in feats:
         roof = roofs.get(str(f["properties"].get("tunnus")))
         if roof:
@@ -796,16 +812,79 @@ def roof_targets(feats):
     return out
 
 
-def parse_roofs(path, targets):
-    """Ruudun LOD2-tiedoston rakennukset: (tunnus, katto tai None tasakatolle)."""
+def parse_roofs(path, targets, footprints):
+    """Ruudun LOD2-tiedoston rakennukset: (tunnus, katto tai None tasakatolle, korkeuden korjaus
+    tai None). Korjaus haetaan vain tasakattoisille rakennuksille, joiden LOD0-pohja on annettu."""
     for _, el in ET.iterparse(path):
         if el.tag != BLDG + "Building":
             continue
         attrs = {a.get("name"): a.findtext(GEN + "value") for a in el.iter(GEN + "stringAttribute")}
         tunnus = attrs.get("rakennustunnus")
         if tunnus in targets:
-            yield tunnus, roof_mesh(el, targets[tunnus])
+            roof = roof_mesh(el, targets[tunnus])
+            fix = overtall_fix(el, targets[tunnus], footprints[tunnus]) if not roof and tunnus in footprints else None
+            yield tunnus, roof, fix
         el.clear()
+
+
+def overtall_fix(el, t, polys):
+    """Monitasoisen tasakattoisen rakennuksen korjaus: ("osat", [(rengas, korkeus), ...]) tai
+    ("keski", korkeus), tai None, jos LOD0-korkeus vastaa kattoja. Kukin kattopinta on osa, jonka
+    korkeus on pinnan keskikorkeus maanpinnasta (kuten lod2_roof_parts); mukaan otetaan pinnat,
+    joiden keskipiste on LOD0-pohjan sisällä."""
+    roofs, walls = surface_rings(el, "RoofSurface", t), surface_rings(el, "WallSurface", t)
+    if not roofs or not walls:
+        return None
+    ground = min(z for r in walls for _, _, z in r)
+    parts, area, hsum = [], 0.0, 0.0
+    for r in roofs:
+        a = abs(newell(r)[2]) / 2  # vaakaprojektion ala (m²)
+        if a < 0.5:
+            continue
+        h = sum(z for _, _, z in r) / len(r) - ground
+        area += a
+        hsum += a * h
+        parts.append((r, max(1.0, h), a))
+    if not area:
+        return None
+    mean = hsum / area
+    if t["korkeus"] - mean <= max(3.0, 0.25 * t["korkeus"]):
+        return None
+    k = math.cos(math.radians(t["lat"]))
+    kept, kept_area = [], 0.0
+    for r, h, a in parts:
+        ring = [merc_to_lonlat(t["mx"] + x / k, t["my"] + y / k) for x, y, _ in r]
+        cx, cy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+        if any(point_in_polygon(cx, cy, poly) for poly in polys):
+            kept.append((ring + [ring[0]], round(h, 1)))
+            kept_area += a
+    foot = sum(abs(signed_area([((x - t["lon"]) * 111320 * k, (y - t["lat"]) * 111320) for x, y in poly[0]])) for poly in polys)
+    if kept and kept_area >= ROOF_PART_COVER * foot:
+        return ("osat", kept)
+    return ("keski", round(max(1.0, mean), 1))
+
+
+def apply_height_fixes(feats, fixes):
+    """Korvaa monitasoisten rakennusten LOD0-pohjat kattopintojen mukaisilla osilla tai laskee
+    korkeuden kattojen keskikorkeuteen (overtall_fix)."""
+    out, done = [], set()
+    for f in feats:
+        p = f["properties"]
+        tunnus = str(p.get("tunnus"))
+        fix = fixes.get(tunnus)
+        if not fix:
+            out.append(f)
+        elif fix[0] == "keski":
+            p["korkeus"], p["keski"] = fix[1], 1
+            out.append(f)
+        elif tunnus not in done:  # saman rakennuksen muut LOD0-pohjat jäävät pois
+            done.add(tunnus)
+            for ring, h in fix[1]:
+                out.append({"type": "Feature", "properties": {**p, "korkeus": h, "osa": 1},
+                            "geometry": {"type": "Polygon", "coordinates": [ring]}})
+    kinds = collections.Counter(fix[0] for fix in fixes.values())
+    log(f"  monitasoisia tasakattoisia: osiin jaettu {kinds['osat']}, keskikorkeuteen laskettu {kinds['keski']}")
+    return out
 
 
 def surface_rings(el, kind, t):
@@ -976,7 +1055,7 @@ def write_roof_tiles(roofs, targets):
         path = os.path.join(root, str(ROOF_TILE_ZOOM), str(tx), f"{ty}.bin")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as fh:
-            fh.write(gzip.compress(bytes(buf), 9))
+            fh.write(gzip.compress(bytes(buf), 9, mtime=0))  # sama sisältö = sama tiedosto (versionhallinta)
         size += os.path.getsize(path)
     with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as fh:
         json.dump({"zoom": ROOF_TILE_ZOOM, "luokat": classes, "tiilet": sorted(f"{x}/{y}" for x, y in groups)}, fh)

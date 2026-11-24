@@ -645,7 +645,8 @@ map.on("click", (e) => {
     .map(([k, v]) => {
       // Rakennusrekisteristä täydennettyjen rakennusten korkeus on arvioitu kerrosluvusta.
       const label = k === "korkeus" && p.osa ? "Korkeus (m, rakennuksen osa)"
-        : k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
+        : k === "korkeus" && p.keski ? "Korkeus (m, kattojen keskikorkeus)"
+          : k === "korkeus" && p.arvio ? "Korkeus (m, arvio)" : FIELD_LABELS[k] ?? k.replace(/_/g, " ");
       return el("tr", {}, el("th", {}, label), el("td", {}, formatValue(k, v)));
     });
   const title = POPUP_TITLES[key]?.(p) ?? p.Nimi ?? p.nimi ?? p.NIMI ?? layerTitle(key);

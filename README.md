@@ -110,6 +110,13 @@ ja savisyvyyskartta, liito-oravat, johtokartat sekä vääräväri-ilmakuva.
   on oma korkeutensa (`build_data.py`, `fix_heights`). Vuoden 2026 aineistossa tällaisia oli 208,
   joista 179 jaettiin osiin ja 22:n korkeus rajattiin kerrosluvun mukaan (LOD2-mallia ei
   löytynyt).
+- Myös monitasoiset tasakattoiset rakennukset piirtyisivät liian korkeiksi, esim. Dipoli
+  (17,5 m koko pohjan alalta) ja Tapiolan keskustan liikerakennukset. Kun koko Espoon LOD2-malli
+  käsitellään kattoja varten, rakennus, jonka LOD0-korkeus on yli 3 m ja yli 25 % suurempi kuin
+  kattojen pinta-alalla painotettu keskikorkeus, jaetaan kattopintojen mukaisiin osiin
+  (`overtall_fix`). Jos osat kattavat alle 80 % pohjasta, korkeudeksi otetaan kattojen
+  keskikorkeus ("Korkeus (m, kattojen keskikorkeus)"). Osiin jaettiin 372 rakennusta (Dipoli
+  334 osaan) ja keskikorkeuteen laskettiin 36.
 
 - Espoon avoimesta vesialueaineistosta (WFS `GIS:Vesialueet`) puuttuu suuri osa
   merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista), ja myös Espoon
