@@ -1246,10 +1246,13 @@ def build_bridges():
     for line in viivat:
         line[:] = [round(v, 6) for v in line]
     kannet = bridge_decks(viivat)
-    kaistat = bridge_strips(viivat, bridge_road_edges(viivat), bridge_osm_roads(viivat))
+    edges, ways = bridge_road_edges(viivat), bridge_osm_ways(viivat)
+    kaistat = bridge_strips(viivat, edges, [(a, b) for _, pts in ways for a, b in zip(pts, pts[1:])])
     raiteet = rail_strips()
-    log(f"  {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, {len(raiteet)} raidetta")
-    korkeus = build_dem(kannet, kaistat, raiteet)
+    tiet, tiealat, reunat = road_cuts(viivat, edges, ways)
+    log(f"  {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, {len(raiteet)} raidetta, "
+        f"{len(tiet)} korjattavaa tienpintaa")
+    korkeus = build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat)
     path = os.path.join(PUBLIC_DATA, "sillat.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla, Raide), tiet © OpenStreetMap",
@@ -1348,15 +1351,9 @@ def bridge_road_edges(viivat):
     return edges
 
 
-def bridge_osm_roads(viivat):
-    """OpenStreetMapin tiet, väylät ja raiteet (esim. raitiotiesillat) siltojen ympäriltä janoina
-    paikallisina metreinä."""
-    return [(a, b) for _, pts in bridge_osm_ways(viivat) for a, b in zip(pts, pts[1:])]
-
-
 def bridge_osm_ways(viivat):
-    """OpenStreetMapin tiet, väylät ja raiteet siltojen ympäriltä: [(tagit, [(x, y), ...])]
-    paikallisina metreinä."""
+    """OpenStreetMapin tiet, väylät ja raiteet (esim. raitiotiesillat) siltojen ympäriltä:
+    [(tagit, [(x, y), ...])] paikallisina metreinä."""
     boxes = []
     for x0, y0, x1, y1 in bridge_cells(viivat).values():
         (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
@@ -1395,7 +1392,15 @@ def bridge_strips(viivat, edges, osm):
         return any(abs(qz - z) <= STRIP_DZ and (qx - x) ** 2 + (qy - y) ** 2 <= r * r
                    for i in range(int((x - r) // 20), int((x + r) // 20) + 1)
                    for j in range(int((y - r) // 20), int((y + r) // 20) + 1) for qx, qy, qz in deck_pts.get((i, j), ()))
-    lines, nb = bridge + edges, len(bridge)  # indeksi < nb: siltaviiva
+    return edge_strips(bridge + edges, len(bridge), osm, zone, lambda run: any(deck_level(*s[:3]) for s, _ in run))
+
+
+def edge_strips(lines, nb, osm, zone, accept, dz=STRIP_DZ):
+    """Kaistaleet samalla korkeudella olevien samansuuntaisten reunaviivojen väleistä (ks. bridge_strips).
+    lines: viivat [(x, y, z), ...] paikallisina metreinä, joista nb ensimmäistä ovat siltaviivoja; osm:
+    OSM:n tiet janoina; zone: 10 metrin ruudut, joilla näytteitä otetaan; accept(run): otetaanko
+    yhtenäinen kaistale (näytteet ja niiden parit) mukaan; dz: reunojen korkeusero enintään.
+    Palauttaa kannet kuten bridge_decks."""
     grid, roads = collections.defaultdict(list), collections.defaultdict(list)
     for li, line in enumerate(lines):
         for si, (a, b) in enumerate(zip(line, line[1:])):
@@ -1460,7 +1465,7 @@ def bridge_strips(viivat, edges, osm):
                         if k not in best or dist < best[k][1]:
                             best[k] = (lj, dist, px, py, pz, at_end)
                 # Lähin kohta toisen viivan päässä: viivat eivät ole tässä vierekkäin.
-                best = {k: m for k, m in best.items() if not m[5] and abs(m[4] - z) <= STRIP_DZ
+                best = {k: m for k, m in best.items() if not m[5] and abs(m[4] - z) <= dz
                         and ((li < nb or m[0] < nb) and m[1] <= STRIP_EDGE
                              or road_inside((x + m[2]) / 2, (y + m[3]) / 2, ux, uy, m[1]))}
             matches.append(best)
@@ -1470,7 +1475,7 @@ def bridge_strips(viivat, edges, osm):
                 if s and side in m and (not run or run[-1][1][0] == m[side][0]):
                     run.append((s, m[side]))
                     continue
-                if len(run) * STRIP_STEP >= 6 and any(deck_level(*s[:3]) for s, _ in run):
+                if len(run) * STRIP_STEP >= 6 and accept(run):
                     a = [(p[0], p[1], p[2]) for p, _ in run]
                     b = [(q[2], q[3], q[4]) for _, q in run]
                     keep = sorted(set(simplify_indices([p[:2] for p in a], 0.3)) | set(simplify_indices([p[:2] for p in b], 0.3)))
@@ -1540,6 +1545,23 @@ PIECE_QUADS = 40  # pitkät kannet (raiteet) paloiksi, jotta tiileen osuu vain l
 # ulkopuolella maasto laskee penkereen luiskana (RAIL_SLOPE m/m) maanpintaan. Luiska täyttää vain
 # kuoppia (enintään PIT_MAX m) eikä peitä muita kansia (korkeusmalli voi olla ajalta ennen raidetta).
 RAIL_CORE, RAIL_SLOPE, SLOPE_MIN, PIT_MAX = 1.6, 0.3, 0.1, 4.5
+# Korkeusmalli on paikoin vanhempi kuin tie: esim. Kehä I:n Laajalahden kohta on parannettu
+# keilauksen jälkeen, ja tie kulkee nyt metrejä korkeusmallia alempana. Siellä, missä ajoväylien
+# mitatut reunat ovat selvästi korkeusmallin alapuolella, tienpinta lasketaan reunoista (road_cuts).
+CUT_CELL = 20  # m: vertailuruutu
+CUT_MIN = 1.0  # m: reunapisteiden mediaani vähintään näin paljon korkeusmallin alapuolella
+CUT_POINTS = 4  # reunapisteitä ruudussa vähintään
+CUT_CELLS = 3  # yhtenäisellä alueella ruutuja vähintään (yksittäiset ruudut ovat usein mittausvirheitä)
+CUT_PAD = 40  # m: alueen laajennus, jotta koko tieosuus tulee mukaan (myös sillan ali, jonka kohdalla ei verrata)
+CUT_NEAR = 20  # m: siltojen ja tunnelien läheltä ei verrata
+ROAD_MIN = 0.3  # m: tienpintaa korjataan, jos korkeusmalli poikkeaa siitä enemmän
+ROAD_DZ = 1.0  # m: tienpinnan reunojen korkeusero enintään (sivukaltevuus); suurempi ero on eri ajorata
+# Tiealueen puolileveys (m) OSM:n tien tyypin mukaan: mitattu tienpinta levitetään kaistaleiden väliin
+# jääviin aukkoihin (esim. rampin erkanemiskohta, josta reunaviivapari puuttuu).
+ROAD_HALF = {"motorway": 6.0, "trunk": 6.0, "primary": 5.0, "secondary": 4.5, "tertiary": 4.0, "unclassified": 3.5,
+             "residential": 3.5, "living_street": 3.0, "service": 2.5, "pedestrian": 3.0, "busway": 3.5}
+ROAD_SPREAD = 10  # m: näin kauas mitattu tienpinta levitetään tiealueella
+CUT_SLOPE, CUT_BAND = 0.67, 15  # tien ulkopuolella luiska (1:1,5) enintään CUT_BAND metrin leveydeltä
 EARTH_CIRC = 40075016.686
 
 
@@ -1548,7 +1570,115 @@ def merc_unit(lon, lat):
     return (lon + 180) / 360, (1 - math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) / math.pi) / 2
 
 
-def dem_decks(kannet, kaistat, raiteet):
+def dem_tile(z, x, y):
+    """Korkeusmallin tiili välimuistista (ladataan tarvittaessa): polku."""
+    os.makedirs(os.path.join(CACHE, "korkeus", str(z)), exist_ok=True)
+    return http_get(DEM_URL.format(z=z, x=x, y=y), {}, os.path.join(CACHE, "korkeus", str(z), f"{x}_{y}.webp"))
+
+
+def dem_read(path):
+    """Tiilen RGB-taulukko ja korkeudet metreinä (Terrarium)."""
+    import numpy as np
+    from PIL import Image
+    rgb = np.array(Image.open(path).convert("RGB"))
+    return rgb, rgb[..., 0] * 256.0 + rgb[..., 1] + rgb[..., 2] / 256 - 32768
+
+
+def road_cuts(viivat, edges, ways):
+    """Tienpinnat siellä, missä korkeusmalli on vanhempi kuin tie. Ajoväylien reunapisteiden korkeutta
+    verrataan korkeusmalliin (z15) CUT_CELL-ruuduittain; jos reunat ovat mediaanina vähintään CUT_MIN
+    korkeusmallia alempana yhtenäisellä alueella (CUT_CELLS), tie on rakennettu tai laskettu keilauksen
+    jälkeen. Siltojen ja tunnelien lähellä ei verrata: silta puuttuu korkeusmallista, ja tunnelin
+    päällä on maata. Alueella (CUT_PAD) tienpinnat ovat samalla korkeudella olevien reunaviivojen
+    välisiä kaistaleita (edge_strips), joissa on OSM:n tie. Palauttaa tienpinnat ja alueen OSM:n
+    teiden tiealueet (ROAD_HALF) kannet kuten bridge_decks (tiealueen korkeus 0) sekä alueen mitatut
+    reunapisteet ([lon, lat, z, ...] metrin välein), jotka pidetään omalla korkeudellaan."""
+    import numpy as np
+    excl = set()
+
+    def mark(x, y):
+        for i in range(int((x - CUT_NEAR) // 10), int((x + CUT_NEAR) // 10) + 1):
+            for j in range(int((y - CUT_NEAR) // 10), int((y + CUT_NEAR) // 10) + 1):
+                excl.add((i, j))
+
+    covered = lambda t: (t.get("tunnel") not in (None, "no") or t.get("covered") not in (None, "no")
+                         or t.get("layer", "0").startswith("-"))
+    for l in viivat:
+        for i in range(0, len(l), 3):
+            mark(*stream_xy(l[i], l[i + 1]))
+    for tags, pts in ways:
+        if covered(tags):
+            for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+                n = max(1, int(math.hypot(bx - ax, by - ay) // 5))
+                for k in range(n + 1):
+                    mark(ax + (bx - ax) * k / n, ay + (by - ay) * k / n)
+    by_tile = collections.defaultdict(list)
+    for e in edges:
+        for x, y, z in e:
+            if (int(x // 10), int(y // 10)) not in excl:
+                X, Y = merc_unit(x / 55462.0 + 24.7, y / 111415.0 + 60.2)
+                by_tile[(int(X * 2 ** 15), int(Y * 2 ** 15))].append((x, y, z, X * 2 ** 15, Y * 2 ** 15))
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        paths = dict(zip(by_tile, ex.map(lambda k: dem_tile(15, *k), by_tile)))
+    cells = collections.defaultdict(list)
+    for (tx, ty), pts in by_tile.items():
+        _, elev = dem_read(paths[(tx, ty)])
+        H, W = elev.shape
+        for x, y, z, X, Y in pts:
+            cells[(int(x // CUT_CELL), int(y // CUT_CELL))].append(elev[int((Y - ty) * H), int((X - tx) * W)] - z)
+    high = {c for c, v in cells.items() if len(v) >= CUT_POINTS and np.median(v) >= CUT_MIN}
+    zone, seen, areas = set(), set(), 0
+    for c in high:
+        if c in seen:
+            continue
+        comp, stack = [], [c]
+        seen.add(c)
+        while stack:
+            p = stack.pop()
+            comp.append(p)
+            for q in ((p[0] + dx, p[1] + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)):
+                if q in high and q not in seen:
+                    seen.add(q)
+                    stack.append(q)
+        if len(comp) < CUT_CELLS:
+            continue
+        areas += 1
+        r = CUT_PAD // 10 + CUT_CELL // 10
+        for cx, cy in comp:
+            for i in range(cx * CUT_CELL // 10 - r, cx * CUT_CELL // 10 + r + 1):
+                for j in range(cy * CUT_CELL // 10 - r, cy * CUT_CELL // 10 + r + 1):
+                    zone.add((i, j))
+    log(f"  korkeusmallia vanhemmat tiet: {areas} aluetta")
+    osm = [(a, b) for tags, pts in ways if not covered(tags) for a, b in zip(pts, pts[1:])]
+    to_ll = lambda x, y: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6), 0]
+    areas = []
+    for tags, pts in ways:
+        kind = (tags.get("highway") or "").replace("_link", "")
+        if kind not in ROAD_HALF or covered(tags) or not any((int(x // 10), int(y // 10)) in zone for x, y in pts):
+            continue
+        half = ROAD_HALF[kind] * (0.8 if tags["highway"].endswith("_link") else 1)
+        if tags.get("lanes", "").isdigit():
+            half = max(half, int(tags["lanes"]) * 1.75 + 0.5)
+        a, b = [], []
+        for k, (x, y) in enumerate(pts):
+            (x0, y0), (x1, y1) = pts[max(0, k - 1)], pts[min(len(pts) - 1, k + 1)]
+            ln = math.hypot(x1 - x0, y1 - y0) or 1.0
+            nx, ny = -(y1 - y0) / ln, (x1 - x0) / ln
+            a += to_ll(x + nx * half, y + ny * half)
+            b += to_ll(x - nx * half, y - ny * half)
+        areas.append([a, b])
+    anchors = []
+    for e in edges:
+        for (ax, ay, az), (bx, by, bz) in zip(e, e[1:]):
+            if (int(ax // 10), int(ay // 10)) in zone and (int(bx // 10), int(by // 10)) in zone:
+                n = max(1, math.ceil(math.hypot(bx - ax, by - ay)))
+                for k in range(n):
+                    anchors += [round((ax + (bx - ax) * k / n) / 55462.0 + 24.7, 7), round((ay + (by - ay) * k / n) / 111415.0 + 60.2, 7),
+                                round(az + (bz - az) * k / n, 2)]
+    return edge_strips(edges, 0, osm, zone, lambda run: True, ROAD_DZ), areas, anchors
+
+
+def dem_decks(kannet, kaistat, raiteet, tiet, tiealat):
     """Kannet ja kaistaleet korkeusmallin nostoa varten: reunat A ja B Web Mercator -yksiköissä
     samaan määrään pisteitä jaettuina (vastakkaiset osat) ja pitkät paloiksi."""
     import numpy as np
@@ -1559,7 +1689,7 @@ def dem_decks(kannet, kaistat, raiteet):
         return np.stack([np.interp(t, s, P[:, c]) for c in range(3)], axis=1)
 
     out = []
-    for kind, decks in (("kansi", kannet), ("kaista", kaistat), ("raide", raiteet)):
+    for kind, decks in (("kansi", kannet), ("kaista", kaistat), ("raide", raiteet), ("tie", tiet), ("tieala", tiealat)):
         for a, b in decks:
             A = np.array([(*merc_unit(a[i], a[i + 1]), a[i + 2]) for i in range(0, len(a), 3)])
             B = np.array([(*merc_unit(b[i], b[i + 1]), b[i + 2]) for i in range(0, len(b), 3)])
@@ -1575,12 +1705,14 @@ def dem_decks(kannet, kaistat, raiteet):
     return out
 
 
-def dem_patch(elev, z, x, y, decks):
+def dem_patch(elev, z, x, y, decks, anchors=()):
     """Korkeusmallin tiilen (H × W, metreinä) nosto kansien kohdalla. Pikselin pinta on alin
     maanpinnan yläpuolella oleva kansi tai kaistale: päällekkäiset kannet ja kaistaleet ovat samaa
     ajorataa (alempi on ajoradan pinta, ylempi esim. siltaviivan reunapalkki). Jos sen yllä on
-    LEVEL_GAP ylempänä toinen taso (silta toisen yllä), pinta on ylempi kuten ilmakuvassa.
-    Palauttaa uudet korkeudet ja maskin nostetuista pikseleistä."""
+    LEVEL_GAP ylempänä toinen taso (silta toisen yllä), pinta on ylempi kuten ilmakuvassa. Ensin
+    korjataan tienpinnat (road_cuts; anchors: mitatut reunapisteet (I, J, z) tiilen pikseleinä), joten
+    kannet nostetaan korjatun maanpinnan yläpuolelle.
+    Palauttaa uudet korkeudet, maskin nostetuista pikseleistä ja korjatun maanpinnan."""
     import numpy as np
     H, W = elev.shape
     n = 2 ** z
@@ -1607,21 +1739,71 @@ def dem_patch(elev, z, x, y, decks):
                 xj, yj = xi, yi
         return inside
 
-    for d in decks:
+    def raster(d):  # kannen pikselit ja niiden kannen korkeus (reunojen välissä etäisyyksien suhteessa)
         x0, y0, x1, y1 = d["bbox"]
         i0, i1 = max(0, math.floor((x0 - tx0) / size * W)), min(W - 1, math.floor((x1 - tx0) / size * W))
         j0, j1 = max(0, math.floor((y0 - ty0) / size * H)), min(H - 1, math.floor((y1 - ty0) / size * H))
         if i0 > i1 or j0 > j1:
-            continue
+            return None
         J, I = np.mgrid[j0:j1 + 1, i0:i1 + 1]
         X, Y = tx0 + (I + 0.5) / W * size, ty0 + (J + 0.5) / H * size
         inside = contains(d["ring"], X, Y)
         if not inside.any():
-            continue
+            return None
         I, J, X, Y = I[inside], J[inside], X[inside], Y[inside]
         (da, za), (db, zb) = nearest(d["A"], X, Y), nearest(d["B"], X, Y)
-        zd = np.where(da + db > 0, (za * db + zb * da) / np.where(da + db > 0, da + db, 1.0), za)
-        e = elev[J, I]
+        return I, J, np.where(da + db > 0, (za * db + zb * da) / np.where(da + db > 0, da + db, 1.0), za), da, db
+
+    # Tienpinnat (vanhentunut korkeusmalli): tie mitatulle korkeudelle, ja tien ulkopuolella maasto
+    # liittyy siihen luiskana (CUT_SLOPE), leikkauksena tai penkereenä.
+    road = np.full((H, W), np.nan)
+    for d in decks:
+        if d["kind"] == "tie" and (r := raster(d)):
+            I, J, zd = r[:3]
+            cur = road[J, I]
+            # Päällekkäisistä saman tien pinnoista alempi; yli LEVEL_GAP ylempänä oleva on toinen tie
+            # (esim. uusi silta, jota ei ole siltaviivoissa), ja se on pinnalla kuten ilmakuvassa.
+            road[J, I] = np.where(np.isnan(cur) | (zd > cur + LEVEL_GAP), zd, np.where(zd < cur - LEVEL_GAP, cur, np.fmin(cur, zd)))
+    if len(anchors):  # mitatut reunat omalle korkeudelleen, jottei viereisen tien pinta leviä niille
+        I, J, Z = anchors
+        m = np.isnan(road[J, I])
+        road[J[m], I[m]] = Z[m]
+    area = np.zeros((H, W), bool)
+    for d in decks:
+        if d["kind"] == "tieala" and (r := raster(d)):
+            area[r[1], r[0]] = True
+    px = unit * size / W  # m pikseliä kohden
+
+    def spread(zr, steps, where):  # arvot naapuripikseleihin (keskiarvo), askel kerrallaan
+        for k in range(1, steps + 1):
+            nb = np.pad(zr, 1, constant_values=np.nan)
+            nb = np.stack([nb[dj:dj + H, di:di + W] for dj in range(3) for di in range(3)])
+            cnt = (~np.isnan(nb)).sum(axis=0)
+            new = np.isnan(zr) & (cnt > 0) & where
+            zr[new] = np.nansum(nb, axis=0)[new] / cnt[new]
+            yield k, new
+
+    if area.any() and not np.isnan(road).all():
+        for _ in spread(road, int(ROAD_SPREAD / px), area):  # tienpinta tiealueen aukkoihin
+            pass
+    ground = elev.copy()
+    with np.errstate(invalid="ignore"):
+        fix = np.abs(road - elev) > ROAD_MIN
+    if fix.any():
+        ground[fix] = road[fix]
+        zr = np.where(fix, road, np.nan)
+        for k, new in spread(zr, int(CUT_BAND / px), True):
+            m = new & np.isnan(road)  # muut tienpinnat ovat jo oikealla korkeudella
+            ground[m] = np.clip(ground[m], zr[m] - k * px * CUT_SLOPE, zr[m] + k * px * CUT_SLOPE)
+
+    for d in decks:
+        if d["kind"] in ("tie", "tieala") or not (r := raster(d)):
+            continue
+        I, J, zd, da, db = r
+        if d["kind"] == "kaista":  # korjatulla tienpinnalla kaistale on turha (ja reunapalkin korkuinen)
+            m = np.isnan(road[J, I])
+            I, J, zd, da, db = I[m], J[m], zd[m], da[m], db[m]
+        e = ground[J, I]
         if d["kind"] == "raide":
             off = np.abs(da - db) * unit / 2 - RAIL_CORE  # m raiteen ulkopuolella
             side = off > 0
@@ -1640,7 +1822,7 @@ def dem_patch(elev, z, x, y, decks):
         m = ~low & (zd > cur + LEVEL_GAP)
         upper[J[m], I[m]] = np.fmin(upper[J[m], I[m]], zd[m])
     with np.errstate(invalid="ignore"):
-        fill = np.isnan(surf) & (slope - elev <= PIT_MAX)  # luiska vain sinne, missä ei ole muuta pintaa
+        fill = np.isnan(surf) & (slope - ground <= PIT_MAX)  # luiska vain sinne, missä ei ole muuta pintaa
     surf[fill] = slope[fill]
     # Kaistaleiden pikselit siistitään avauksella (kuroutus ja laajennus 3 × 3 -ikkunassa): tukimuurin
     # tai luiskan reunalle osuvat 1–2 pikselin kaistat jäävät pois, mutta kansi säilyy. Tiilen
@@ -1657,19 +1839,25 @@ def dem_patch(elev, z, x, y, decks):
             near |= core[dj:dj + H, di:di + W]
     lifted = ~np.isnan(surf) & (~strip | near)
     top = np.where(np.isnan(upper), surf, upper)
-    return np.where(lifted, top, elev), lifted
+    return np.where(lifted, top, ground), lifted, ground
 
 
-def build_dem(kannet, kaistat, raiteet):
-    """Korkeusmallin tiilet (DEM_ZOOMS), joissa kannet ja kaistaleet on nostettu maanpinnan
-    yläpuolelle (dem_patch), kansioon public/tiles/korkeus/z/x/y.webp. Tarkimmista tiilistä
-    tallennetaan nostettujen pikselien alkuperäinen maanpinta (korkeus/maa/x/y.webp; muualla musta),
-    jotta selain voi pitää sillan ali kulkevat ajoneuvot ja uomat alla olevalla pinnalla.
-    Palauttaa nostettujen tiilten luettelon {z: [x, y, ...]}."""
+def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
+    """Korkeusmallin tiilet (DEM_ZOOMS), joissa tienpinnat on korjattu ja kannet ja kaistaleet
+    nostettu maanpinnan yläpuolelle (dem_patch), kansioon public/tiles/korkeus/z/x/y.webp.
+    Tarkimmista tiilistä tallennetaan nostettujen pikselien maanpinta (korkeus/maa/x/y.webp; muualla
+    musta), jotta selain voi pitää sillan ali kulkevat ajoneuvot ja uomat alla olevalla pinnalla.
+    Palauttaa muutettujen tiilten luettelon {z: [x, y, ...]}."""
     import numpy as np
     from PIL import Image
 
-    decks = dem_decks(kannet, kaistat, raiteet)
+    def terrarium(h):
+        v = h + 32768
+        return np.stack([v // 256, np.floor(v) % 256, np.floor((v - np.floor(v)) * 256)], axis=-1).astype(np.uint8)
+
+    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat)
+    pins = np.array(reunat, float).reshape(-1, 3)  # mitatut reunapisteet Web Mercator -yksiköissä
+    pins[:, 0], pins[:, 1] = (pins[:, 0] + 180) / 360, (1 - np.log(np.tan(np.pi / 4 + np.radians(pins[:, 1]) / 2)) / np.pi) / 2
     out = os.path.join(TILES, "korkeus")
     shutil.rmtree(out, ignore_errors=True)
     index, size = {}, 0
@@ -1681,33 +1869,35 @@ def build_dem(kannet, kaistat, raiteet):
             for tx in range(int(x0 * n), int(x1 * n) + 1):
                 for ty in range(int(y0 * n), int(y1 * n) + 1):
                     tiles[(tx, ty)].append(d)
-        os.makedirs(os.path.join(CACHE, "korkeus", str(z)), exist_ok=True)
-        fetch = lambda k: http_get(DEM_URL.format(z=z, x=k[0], y=k[1]), {},
-                                   os.path.join(CACHE, "korkeus", str(z), f"{k[0]}_{k[1]}.webp"))
         with cf.ThreadPoolExecutor(max_workers=4) as ex:
-            paths = dict(zip(tiles, ex.map(fetch, tiles)))
+            paths = dict(zip(tiles, ex.map(lambda k: dem_tile(z, *k), tiles)))
         index[z] = []
+        pin_tiles = collections.defaultdict(list)
+        for k, key in enumerate(map(tuple, np.floor(pins[:, :2] * n).astype(int))):
+            pin_tiles[key].append(k)
         for (tx, ty), hits in sorted(tiles.items()):
-            rgb = np.array(Image.open(paths[(tx, ty)]).convert("RGB"))
-            elev = rgb[..., 0] * 256.0 + rgb[..., 1] + rgb[..., 2] / 256 - 32768
-            new, lifted = dem_patch(elev, z, tx, ty, hits)
-            if not lifted.any():
+            rgb, elev = dem_read(paths[(tx, ty)])
+            p = pins[pin_tiles.get((tx, ty), [])]
+            H, W = elev.shape
+            anchors = ((p[:, 0] * n - tx) * W).astype(int), ((p[:, 1] * n - ty) * H).astype(int), p[:, 2]
+            new, lifted, ground = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
+            changed = np.abs(new - elev) > 1e-6
+            if not changed.any():
                 continue
-            if z == DEM_ZOOMS[-1]:
+            if z == DEM_ZOOMS[-1]:  # myös ilman nostoja, jotta selain löytää jokaiselle tiilelle maanpinnan
                 raw = np.zeros_like(rgb)
-                raw[lifted] = rgb[lifted]
+                raw[lifted] = terrarium(ground[lifted])
                 path = os.path.join(out, "maa", str(tx), f"{ty}.webp")
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 Image.fromarray(raw).save(path, "WEBP", lossless=True, method=6)
                 size += os.path.getsize(path)
-            v = new[lifted] + 32768
-            rgb[lifted] = np.stack([v // 256, np.floor(v) % 256, np.floor((v - np.floor(v)) * 256)], axis=1)
+            rgb[changed] = terrarium(new[changed])
             path = os.path.join(out, str(z), str(tx), f"{ty}.webp")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             Image.fromarray(rgb).save(path, "WEBP", lossless=True, method=6)
             size += os.path.getsize(path)
             index[z] += [tx, ty]
-        log(f"  korkeusmalli z{z}: {len(index[z]) // 2}/{len(tiles)} tiiltä nostettu")
+        log(f"  korkeusmalli z{z}: {len(index[z]) // 2}/{len(tiles)} tiiltä muutettu")
     log(f"  → tiles/korkeus: {size / 1e6:.1f} Mt")
     return index
 

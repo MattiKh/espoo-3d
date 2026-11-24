@@ -101,7 +101,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Kauniaisen raja kartalla | HSY:n seutukartta, kunnat 2021 (WFS) |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
-| Ajoväylien reunaviivat siltojen kohdalla (kansien täydennys) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`; tiet © OpenStreetMap |
+| Ajoväylien reunaviivat siltojen kohdalla (kansien täydennys, korkeusmallia uudemmat tiet) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`; tiet © OpenStreetMap |
 | Raiteiden keskilinjat korkeuksineen (kuoppien täyttö) | Espoo WFS `kanta:Raide` (kantakartta) |
 | Alusten sijainnit, nimet, tyypit, mitat ja määränpäät | Fintraffic / Digitraffic AIS (REST, CC BY 4.0) |
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
@@ -347,7 +347,7 @@ usein poistettu myös penkereen pää, jolloin tiehen tuli kuoppa juuri ennen si
 korkeusmalli nostetaan siltojen kohdalla kannen tasolle. Nosto lasketaan valmiiksi
 (`build_data.py`): skripti hakee Mapterhornin korkeusmallin tiilet (zoom 13–15) siltojen kohdalta,
 nostaa kannet ja tallentaa muuttuneet tiilet häviöttömänä WebP:nä kansioon `public/tiles/korkeus`
-(514 tiiltä, noin 34 Mt). Selain hakee siltojen kohdalla nämä tiilet ja muualla alkuperäiset
+(519 tiiltä, noin 35 Mt). Selain hakee siltojen kohdalla nämä tiilet ja muualla alkuperäiset
 (`sillat.json` kertoo, mitkä tiilet on nostettu), eikä se käsittele korkeusmallia itse. Nosto tekee
 sillasta umpinaisen: sillan alta kulkeva tie tai joki jää nostetun maaston alle.
 
@@ -382,10 +382,29 @@ pinnaksi tulee ylempi taso kuten ilmakuvassa. Kaistaleiden pikselit siistitään
 (3 × 3): tukimuurin tai luiskan yläreunalle osuvat 1–2 pikselin kaistat jäävät pois, jottei niistä
 tule piikkejä, mutta kansi säilyy.
 
-Tarkimmista tiilistä (zoom 15) tallennetaan myös nostettujen pikselien alkuperäinen maanpinta
+**Korkeusmallia uudemmat tiet.** Korkeusmalli on paikoin vanhempi kuin tie. Esimerkiksi Kehä I:tä
+on parannettu Laajalahden kohdalla (liittymiä on korvattu silloilla ja eritasoliittymillä), ja
+Turuntien liittymän kohdalla tie kulkee nyt 2–6 metriä korkeusmallin maanpintaa alempana. Ilmakuvan
+ajorata aaltoili vanhan maanpinnan mukaan. `build_data.py` vertaa kantakartan ajoväylien reunojen
+mitattua korkeutta korkeusmalliin 20 metrin ruuduittain; siltojen ja tunnelien läheltä (20 m) ei
+verrata, koska silta puuttuu korkeusmallista ja tunnelin päällä on maata. Jos reunat ovat ruudussa
+mediaanina vähintään metrin korkeusmallia alempana yhtenäisellä, vähintään kolmen ruudun alueella,
+tie on rakennettu tai laskettu keilauksen jälkeen. Tällaisia alueita löytyi 21, enimmäkseen uusilla
+asuinalueilla ja työmailla (esim. Kiviruukki, Hehkurinne). Alueella (+40 m) tienpinta lasketaan
+samalla korkeudella olevien reunaviivojen välisistä kaistaleista (sivukaltevuus enintään metri),
+mitatut reunapisteet pidetään omalla korkeudellaan, ja kaistaleiden väliin jääviin aukkoihin
+(esim. rampin erkanemiskohta) levitetään mitattu pinta OpenStreetMapin tiealueella (leveys tien
+tyypin ja kaistojen mukaan). Tien ulkopuolella maasto liittyy uuteen pintaan luiskana (1:1,5,
+enintään 15 m). Yli 3 metriä ylempänä oleva tienpinta on oma tasonsa, esimerkiksi uusi silta, jota
+ei vielä ole siltaviivoissa, ja se jää pinnalle kuten ilmakuvassa. Kannet nostetaan korjatun
+maanpinnan yläpuolelle, mutta korjatulla tienpinnalla ajoväylien kaistaleita ei nosteta. Korjattujen
+tiilten mitatuista reunapisteistä, joiden korkeus muuttui, 93 % on nyt 0,3 metrin päässä mitatusta
+(ennen 6 %).
+
+Tarkimmista tiilistä (zoom 15) tallennetaan myös nostettujen pikselien (korjattu) maanpinta
 (`public/tiles/korkeus/maa`, muualla musta). Selain lataa sen, kun se hakee nostetun tiilen. Sillan
 ali kulkeva ajoneuvo (`public/transit.js`) lähestyi alempaa ja pysyy alla olevan tien tasolla, ja
-uoma (`public/streams.js`) kulkee sillan alla alkuperäisellä pinnalla. Sillalle kannen korkeudelta,
+uoma (`public/streams.js`) kulkee sillan alla maanpinnalla. Sillalle kannen korkeudelta,
 esimerkiksi penkereeltä, tullut ajoneuvo pysyy kannella.
 
 ## Purot ja joet

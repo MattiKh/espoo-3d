@@ -1,9 +1,9 @@
 // Sillat. Maaston korkeusmallista (Maanmittauslaitos 2 m) sillat on poistettu, joten ilmakuvan
 // tie notkahtaisi sillan kohdalla alla olevan tien tai joen tasolle. scripts/build_data.py nostaa
-// korkeusmallin tiilet kansien kohdalla valmiiksi kannen tasolle (public/tiles/korkeus), ja selain
-// hakee siltojen kohdalla nämä tiilet (app.js). Tarkimmista tiilistä on tallennettu myös
-// alkuperäinen maanpinta, jotta sillan ali kulkeva ajoneuvo (transit.js) tai uoma (streams.js)
-// voidaan pitää alla olevalla pinnalla. Espoon kantakartan siltojen reunaviivoista saadaan kannen
+// korkeusmallin tiilet kansien kohdalla valmiiksi kannen tasolle ja korjaa korkeusmallia uudempien
+// teiden pinnan (public/tiles/korkeus), ja selain hakee näiden kohdalla nämä tiilet (app.js).
+// Tarkimmista tiilistä on tallennettu myös nostettujen kohtien maanpinta, jotta sillan ali kulkeva
+// ajoneuvo (transit.js) tai uoma (streams.js) voidaan pitää alla olevalla pinnalla. Espoon kantakartan siltojen reunaviivoista saadaan kannen
 // korkeus ajoneuvoille.
 
 const LON0 = 24.7, LAT0 = 60.2, KX = 55462, KY = 111415; // paikalliset metrit, kuten transit.js
