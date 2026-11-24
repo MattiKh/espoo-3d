@@ -99,6 +99,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Espoon ja Kauniaisen raja (ajoneuvojen rajaus) | Tilastokeskus, kunnat 1:1 000 000 |
 | Kauniaisen raja kartalla | HSY:n seutukartta, kunnat 2021 (WFS) |
 | Siltojen reunaviivat ja kansien korkeudet | Espoo WFS `kanta:Silta` (kantakartta) |
+| Ajoväylien reunaviivat siltojen kohdalla (kansien täydennys) | Espoo WFS `kanta:Liikennevayla`, `kanta:Kevyenliikenteenvayla`; tiet © OpenStreetMap |
 | Alusten sijainnit, nimet, tyypit, mitat ja määränpäät | Fintraffic / Digitraffic AIS (REST, CC BY 4.0) |
 | Lentokoneiden sijainnit, korkeudet, konetyypit | adsb.fi:n avoin ADS-B-rajapinta (välityspalvelimen kautta) |
 | Lentojen reitit ja lentoyhtiöt | adsbdb.com (lentotunnuksen mukaan) |
@@ -343,6 +344,26 @@ siltojen reunaviivoissa on kannen mitattu korkeus. `build_data.py` muodostaa nii
 kannen reunoiksi tulkitaan samansuuntaiset, samalla korkeudella olevat viivat 3–40 metrin päässä
 toisistaan. Selain nostaa korkeusmallin tiilet kansialueilla kannen tasolle (`public/bridges.js`)
 ja muistaa alkuperäisen maanpinnan korkeuden.
+
+Siltaviivoista puuttuu kuitenkin usein toinen reuna. Esimerkiksi Otasolmun kiertoliittymästä
+(Kehä I kulkee sen alta) on vain sisäkaaret, ja leveiltä tai kaarevilta silloilta pareja ei
+löytynyt. Korkeusmallin mukaan noin 120 kohdassa maasto oli siltaviivan vieressä vähintään 2 metriä
+kantta alempana ilman kansialuetta (67:ssä yli 4 metriä). Siksi siltojen lähellä (40 m) haetaan
+myös kantakartan ajoväylien ja kevyen liikenteen väylien reunaviivat (`kanta:Liikennevayla`,
+`kanta:Kevyenliikenteenvayla`), joissa on mitattu korkeus. Kunkin reunaviivan vierestä etsitään
+lähin samansuuntainen viiva kummaltakin puolelta: jos se on samalla korkeudella (enintään kahden
+metrin ero, sillä siltaviiva on usein reunapalkin päällä ajorataa ylempänä), väli on kantta ja
+siitä tulee kaistale. Alla kulkevan tien reuna on metrejä alempana, joten kaistale ei peitä sitä.
+Kaistaleen kohdalla on lisäksi oltava samansuuntainen OpenStreetMapin tie, jottei kahden tien
+välistä luiskaa tai rinnakkaisten siltojen väliä täytetä; siltaviivan ja ajoradan reunan välinen
+enintään 8 metrin kaista (reunapalkki, jalkakäytävä) kelpaa ilmankin. Mukaan otetaan vain kannen
+tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään 20 metrin päässä).
+
+Kaistaleita on myös tasaisella maalla, joten selain nostaa niillä maastoa vain, jos se on yli
+0,5 metriä kaistaletta alempana. Kaistaleiden nostamat pikselit siistitään avauksella (3 × 3):
+tukimuurin tai luiskan yläreunalle osuvat 1–2 pikselin kaistat jäävät pois, jottei niistä tule
+piikkejä, mutta kansi säilyy. Korjauksen jälkeen kantta alempana olevia siltaviivakohtia on 48
+(22 yli 4 metriä), ja osa niistäkin on sillan alla kulkevia rakenteita.
 
 Ajoneuvo pysyy kannella, jos se tuli sillalle kannen korkeudelta, esimerkiksi penkereeltä.
 Sillan ali kulkeva ajoneuvo lähestyi alempaa ja pysyy alla olevan tien tasolla.

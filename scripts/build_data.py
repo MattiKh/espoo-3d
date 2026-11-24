@@ -82,6 +82,21 @@ BUILDING_TILE = 6000
 REGISTER_TYPE = "GIS:Rakennukset"
 # Kantakartan sillat: reunaviivat, joiden jokaisella pisteellä on mitattu korkeus (N2000).
 BRIDGE_TYPE = "kanta:Silta"
+# Siltaviivoista puuttuu usein toinen reuna (esim. Otasolmun kiertoliittymästä on vain sisäkaaret),
+# jolloin kansialuetta ei synny. Siltojen lähellä kannet täydennetään ajoväylien reunaviivoista,
+# joissa on mitattu korkeus (bridge_strips).
+BRIDGE_ROAD_TYPES = ("kanta:Liikennevayla", "kanta:Kevyenliikenteenvayla")
+BRIDGE_CELL = 1500  # Web Mercator -yksikköä: reunaviivat haetaan siltojen ympäriltä ruuduittain
+BRIDGE_ZONE = 40  # m: kaistaleita muodostetaan näin lähellä siltaviivoja
+STRIP_STEP = 2.0  # m: reunaviivan näytteiden väli
+STRIP_REACH = 40  # m: kaistaleen leveys enintään
+# m: kaistaleen reunojen korkeusero enintään. Siltaviiva on usein reunapalkin päällä metrin tai
+# puolitoista ajoradan reunaa ylempänä; sillan alittava tie on yleensä vähintään neljä metriä alempana.
+STRIP_DZ = 2.0
+STRIP_DECK = 20  # m: kaistale otetaan mukaan, jos näin lähellä on siltaviiva samalla korkeudella (STRIP_DZ)
+# Siltaviivan ja ajoradan reunan väli (reunapalkki, kaide, jalkakäytävä) on kantta, vaikka siinä ei
+# kulje tietä, kun se on enintään näin leveä (m).
+STRIP_EDGE = 8
 # 3D-malli kattomuotoineen. Raskas, joten sitä haetaan vain rakennuksille, joiden korkeus
 # LOD0-mallissa on epäilyttävä (ks. fix_heights).
 LOD2_TYPE = "bldg:building_lod2"
@@ -1225,10 +1240,13 @@ def build_bridges():
     for line in viivat:
         line[:] = [round(v, 6) for v in line]
     kannet = bridge_decks(viivat)
+    kaistat = bridge_strips(viivat, bridge_road_edges(viivat), bridge_osm_roads(viivat))
     path = os.path.join(PUBLIC_DATA, "sillat.json")
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"lahde": "Espoon kantakartta (kanta:Silta)", "viivat": viivat, "kannet": kannet}, fh, separators=(",", ":"))
-    log(f"  → sillat.json: {len(viivat)} reunaviivaa, {len(kannet)} kantta, {os.path.getsize(path) / 1e6:.2f} Mt")
+        json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla), tiet © OpenStreetMap",
+                   "viivat": viivat, "kannet": kannet, "kaistat": kaistat}, fh, separators=(",", ":"))
+    log(f"  → sillat.json: {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, "
+        f"{os.path.getsize(path) / 1e6:.2f} Mt")
 
 
 def bridge_decks(viivat):
@@ -1277,6 +1295,173 @@ def bridge_decks(viivat):
             b = [v for k in range(len(b) - 3, -1, -3) for v in b[k:k + 3]]
         decks.append([a, b])
     return decks
+
+
+def bridge_cells(viivat):
+    """Siltojen ympäristö Web Mercator -ruuduittain: ruudun siltaviivojen rajaus laajennettuna,
+    jotta mukaan tulevat kaistaleiden kaikki reunat."""
+    pad = 2 * (BRIDGE_ZONE + STRIP_REACH)  # Web Mercatorin yksikkö on 60. leveyspiirillä noin puoli metriä
+    cells = {}
+    for line in viivat:
+        for i in range(0, len(line), 3):
+            x, y = lonlat_to_merc(line[i], line[i + 1])
+            c = cells.setdefault((int(x // BRIDGE_CELL), int(y // BRIDGE_CELL)), [x, y, x, y])
+            c[:] = [min(c[0], x), min(c[1], y), max(c[2], x), max(c[3], y)]
+    return {k: (b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad) for k, b in cells.items()}
+
+
+def bridge_road_edges(viivat):
+    """Ajoväylien ja kevyen liikenteen väylien reunaviivat siltojen ympäriltä paikallisina metreinä
+    [(x, y, z), ...]."""
+    cells = bridge_cells(viivat)
+    os.makedirs(os.path.join(CACHE, "sillat_tiet"), exist_ok=True)
+
+    def fetch(job):
+        type_name, (cx, cy), bbox = job
+        dest = os.path.join(CACHE, "sillat_tiet", f"{type_name.split(':')[1]}_{cx}_{cy}.xml")
+        return http_get(ESPOO_WFS, espoo_params(type_name, bbox_filter(*bbox)), dest, timeout=600)
+
+    jobs = [(t, k, b) for t in BRIDGE_ROAD_TYPES for k, b in sorted(cells.items())]
+    edges, seen = [], set()
+    with cf.ThreadPoolExecutor(max_workers=3) as ex:
+        for n, path in enumerate(ex.map(fetch, jobs), 1):
+            if n % 100 == 0 or n == len(jobs):
+                log(f"  ajoväylien reunat: ladattu {n}/{len(jobs)} ruutua")
+            for _, el in ET.iterparse(path):
+                if local(el.tag) not in ("Liikennevayla", "Kevyenliikenteenvayla"):
+                    continue
+                if el.get(GML + "id") not in seen:  # sama viiva voi tulla useasta ruudusta
+                    seen.add(el.get(GML + "id"))
+                    for ls in el.iter(GML + "LineString"):
+                        pts = [(*stream_xy(*merc_to_lonlat(x, y)), z) for x, y, z in read_positions_3d(ls) if z]
+                        if len(pts) >= 2:
+                            edges.append(pts)
+                el.clear()
+    return edges
+
+
+def bridge_osm_roads(viivat):
+    """OpenStreetMapin tiet ja väylät siltojen ympäriltä janoina paikallisina metreinä."""
+    boxes = []
+    for x0, y0, x1, y1 in bridge_cells(viivat).values():
+        (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
+        boxes.append(f'way["highway"]({s:.5f},{w:.5f},{n:.5f},{e:.5f});')
+    query = "[out:json][timeout:300];(" + "".join(boxes) + ");out geom;"
+    with open(overpass_post(query, os.path.join(CACHE, "sillat_osm.json")), encoding="utf-8") as fh:
+        ways = [el for el in json.load(fh)["elements"] if el["type"] == "way"]
+    return [(stream_xy(a["lon"], a["lat"]), stream_xy(b["lon"], b["lat"])) for w in ways
+            for a, b in zip(w["geometry"], w["geometry"][1:])]
+
+
+def bridge_strips(viivat, edges, osm):
+    """Kansialueita täydentävät kaistaleet. Siltojen lähellä (BRIDGE_ZONE) kunkin reunaviivan
+    näytteelle haetaan lähin samansuuntainen viiva kummaltakin puolelta (3–STRIP_REACH m). Jos se
+    on samalla korkeudella (STRIP_DZ), niiden väli on ajoratapintaa; muuten (esim. alla kulkevan
+    tien reuna) kaistaletta ei tule. Kaistaleen keskellä tai reunalla on oltava samansuuntainen
+    OSM:n tie, jottei kahden eri tien välistä luiskaa tai rinnakkaisten siltojen väliä täytetä;
+    siltaviivan ja ajoradan reunan välinen kapea kaista (STRIP_EDGE) kelpaa ilmankin.
+    Mukaan otetaan vain kannen tasolla olevat kaistaleet (siltaviiva samalla korkeudella enintään
+    STRIP_DECK metrin päässä); muut, kuten sillan alittavat tiet, eivät nostaisi mitään. Tasaisella
+    maalla kaistaleet eivät muuta mitään, sillä selain nostaa maastoa vain siellä, missä se on
+    kaistaletta selvästi alempana. Palauttaa kannet kuten bridge_decks."""
+    bridge = [[(*stream_xy(l[i], l[i + 1]), l[i + 2]) for i in range(0, len(l), 3)] for l in viivat]
+    zone, deck_pts = set(), collections.defaultdict(list)
+    for line in bridge:
+        for a, b in zip(line, line[1:]):
+            n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) // 5))
+            for k in range(n + 1):
+                x, y, z = (a[c] + (b[c] - a[c]) * k / n for c in range(3))
+                deck_pts[(int(x // 20), int(y // 20))].append((x, y, z))
+                zone.update((i, j) for i in range(int((x - BRIDGE_ZONE) // 10), int((x + BRIDGE_ZONE) // 10) + 1)
+                            for j in range(int((y - BRIDGE_ZONE) // 10), int((y + BRIDGE_ZONE) // 10) + 1))
+
+    def deck_level(x, y, z):
+        r = STRIP_DECK
+        return any(abs(qz - z) <= STRIP_DZ and (qx - x) ** 2 + (qy - y) ** 2 <= r * r
+                   for i in range(int((x - r) // 20), int((x + r) // 20) + 1)
+                   for j in range(int((y - r) // 20), int((y + r) // 20) + 1) for qx, qy, qz in deck_pts.get((i, j), ()))
+    lines, nb = bridge + edges, len(bridge)  # indeksi < nb: siltaviiva
+    grid, roads = collections.defaultdict(list), collections.defaultdict(list)
+    for li, line in enumerate(lines):
+        for si, (a, b) in enumerate(zip(line, line[1:])):
+            ends = (si == 0, si == len(line) - 2)  # viivan alku- ja loppupää
+            for i in range(int(min(a[0], b[0]) // 20), int(max(a[0], b[0]) // 20) + 1):
+                for j in range(int(min(a[1], b[1]) // 20), int(max(a[1], b[1]) // 20) + 1):
+                    grid[(i, j)].append((li, a, b, ends))
+    for a, b in osm:
+        for i in range(int(min(a[0], b[0]) // 20), int(max(a[0], b[0]) // 20) + 1):
+            for j in range(int(min(a[1], b[1]) // 20), int(max(a[1], b[1]) // 20) + 1):
+                roads[(i, j)].append((a, b))
+
+    def nearest(x, y, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        l2 = dx * dx + dy * dy
+        t = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) if l2 else 0.0
+        return a[0] + t * dx, a[1] + t * dy, t, dx, dy, math.sqrt(l2)
+
+    def road_inside(x, y, ux, uy, width):
+        """Kulkeeko kaistaleen kohdalla samansuuntainen OSM:n tie (keskeltä enintään puolet leveydestä + 1 m)?"""
+        r = width / 2 + 1
+        for i in range(int((x - r) // 20), int((x + r) // 20) + 1):
+            for j in range(int((y - r) // 20), int((y + r) // 20) + 1):
+                for a, b in roads.get((i, j), ()):
+                    px, py, _, dx, dy, ln = nearest(x, y, a, b)
+                    if ln and math.hypot(px - x, py - y) <= r and abs(dx * ux + dy * uy) >= 0.85 * ln:
+                        return True
+        return False
+
+    to_ll = lambda p: [round(p[0] / 55462.0 + 24.7, 6), round(p[1] / 111415.0 + 60.2, 6), round(p[2], 1)]
+    strips = []
+    for li, line in enumerate(lines):
+        samples = []
+        for a, b in zip(line, line[1:]):
+            ln = math.hypot(b[0] - a[0], b[1] - a[1])
+            if not ln:
+                continue
+            n = max(1, math.ceil(ln / STRIP_STEP))
+            for k in range(n):
+                x, y = a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n
+                ok = (int(x // 10), int(y // 10)) in zone
+                samples.append((x, y, a[2] + (b[2] - a[2]) * k / n, (b[0] - a[0]) / ln, (b[1] - a[1]) / ln) if ok else None)
+        matches = []
+        for s in samples:
+            best = {}
+            if s:
+                x, y, z, ux, uy = s
+                near = {}
+                for i in range(int((x - STRIP_REACH) // 20), int((x + STRIP_REACH) // 20) + 1):
+                    for j in range(int((y - STRIP_REACH) // 20), int((y + STRIP_REACH) // 20) + 1):
+                        for lj, a, b, ends in grid.get((i, j), ()):
+                            if lj == li:
+                                continue
+                            px, py, t, dx, dy, ln = nearest(x, y, a, b)
+                            dist = math.hypot(px - x, py - y)
+                            if ln and dist < near.get(lj, (math.inf,))[0]:
+                                near[lj] = (dist, px, py, a[2] + (b[2] - a[2]) * t, abs(dx * ux + dy * uy) / ln,
+                                            (px - x) * -uy + (py - y) * ux, (t <= 0 and ends[0]) or (t >= 1 and ends[1]))
+                for lj, (dist, px, py, pz, parallel, side, at_end) in near.items():
+                    if (1.5 if li < nb or lj < nb else 3) <= dist <= STRIP_REACH and parallel >= 0.9:
+                        k = side > 0
+                        if k not in best or dist < best[k][1]:
+                            best[k] = (lj, dist, px, py, pz, at_end)
+                # Lähin kohta toisen viivan päässä: viivat eivät ole tässä vierekkäin.
+                best = {k: m for k, m in best.items() if not m[5] and abs(m[4] - z) <= STRIP_DZ
+                        and ((li < nb or m[0] < nb) and m[1] <= STRIP_EDGE
+                             or road_inside((x + m[2]) / 2, (y + m[3]) / 2, ux, uy, m[1]))}
+            matches.append(best)
+        for side in (True, False):
+            run = []
+            for s, m in zip(samples + [None], matches + [{}]):
+                if s and side in m and (not run or run[-1][1][0] == m[side][0]):
+                    run.append((s, m[side]))
+                    continue
+                if len(run) * STRIP_STEP >= 6 and any(deck_level(*s[:3]) for s, _ in run):
+                    a = [(p[0], p[1], p[2]) for p, _ in run]
+                    b = [(q[2], q[3], q[4]) for _, q in run]
+                    keep = sorted(set(simplify_indices([p[:2] for p in a], 0.3)) | set(simplify_indices([p[:2] for p in b], 0.3)))
+                    strips.append([[v for k in keep for v in to_ll(a[k])], [v for k in keep for v in to_ll(b[k])]])
+                run = [(s, m[side])] if s and side in m else []
+    return strips
 
 
 def read_positions_3d(el):
