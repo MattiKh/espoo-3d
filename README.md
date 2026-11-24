@@ -28,6 +28,10 @@ sähköautot näkyvät latauspaikoillaan.
   PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`), ja kartan
   pysähdyttyä näkymän ympäriltä haetaan valmiiksi naapuriruudut lähimmistä alkaen selaimen
   välimuistiin, josta ne tulevat karttaa siirrettäessä muutamassa millisekunnissa.
+- Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
+  ruutujen välissä vaaleana rakona. Ruutu haetaan siksi 2 px joka suuntaan suurempana
+  (516 × 516), ja selain leikkaa reunat pois ennen piirtoa. Ilmakuvan alla tausta on
+  ilmakuvan keskisävyinen harmaa, joten mahdolliset muut raot ja kuvauksen reunat eivät erotu.
 - Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h). Uusin kuva-aika luetaan
   kahden minuutin välein, ja aika on tiiliosoitteessa, jottei selain näytä vanhaa kuvaa.
 
