@@ -415,6 +415,11 @@ map.on("load", () => {
   refreshRadar();
   setInterval(refreshRadar, 120000);
   prefetchOrtho();
+  // Osoite ?peli avaa kartan pelillinen maasto päällä (kokeilu).
+  if (new URLSearchParams(location.search).has("peli")) {
+    document.getElementById("pelimaasto").checked = true;
+    setGameTerrain(true);
+  }
 });
 map.on("moveend", () => setTimeout(prefetchOrtho, 400));
 map.on("moveend", updateDetail);

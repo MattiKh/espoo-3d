@@ -471,7 +471,8 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 ## Pelillinen maasto (kokeilu)
 
 Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä Otaniemen ja Laajalahden alueella (noin
-3,6 × 2,4 km). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
+3,6 × 2,4 km): valinta Ilmakuva-osiossa tai suoraan osoitteella `?peli` (esim.
+http://localhost:8765/?peli). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
 maa, avokalliot, puusto neljässä korkeusluokassa (2–10, 10–15, 15–20 ja yli 20 m), muut päällystetyt
 pinnat, päällystämättömät ja päällystetyt tiet sekä rakennukset. `build_data.py` hakee luokat
 HSY:n karttapalvelusta yhtenä kuvana ruutua kohden ja tunnistaa luokan tyylin täyttöväristä

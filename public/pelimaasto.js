@@ -168,7 +168,11 @@ export async function createGameTerrain(map, { base, version }) {
   function setVisible(on) {
     visible = on;
     for (const id of ["pelimaasto", "pelimaasto-varjostus"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    if (on && !inArea(map.getCenter().toArray())) map.flyTo({ center, zoom: 16.2, pitch: 60, bearing: -20 });
+    // Lähemmäs, jotta tekstuurit ja puut (TREE_MINZOOM) näkyvät heti.
+    const here = map.getCenter().toArray(), inside = inArea(here);
+    if (on && (!inside || map.getZoom() < TREE_MINZOOM + 0.5)) {
+      map.flyTo({ center: inside ? here : center, zoom: 16.4, pitch: 60, bearing: map.getBearing(), duration: 2000 });
+    }
     map.triggerRepaint();
   }
 
