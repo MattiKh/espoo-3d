@@ -527,6 +527,8 @@ kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista). Sillan kan
 (kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
 siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois, samoin
 kantakartan viivat, jotka ovat yli 2 m pelillisen maaston pinnan alapuolella (penkereen sisällä).
+Viivat tarkistetaan 2 metrin välein, sillä esim. kävelysillan ääriviivan sivu voi olla yksi suora
+jana, jonka molemmat päät ovat maan tasolla.
 
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti

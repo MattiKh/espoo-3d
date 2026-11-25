@@ -2249,7 +2249,7 @@ def build_landcover_lines(bbox):
                                                             "koko": el.findtext("{*}kokoluokka") or "pieni"}})
                 else:
                     for ls in el.iter(GML + "LineString"):
-                        pts = read_positions_3d(ls)
+                        pts = densify_3d(read_positions_3d(ls), GAME_LINE_STEP / 0.497)  # Web Mercator -yksiköissä
                         flags = [on_bridge(*stream_xy(*merc_to_lonlat(x, y)), z) for x, y, z in pts]
                         for i0, i1, flag in runs(flags):
                             if flag is None and i1 > i0:  # maanpinnassa
@@ -2285,6 +2285,18 @@ def build_landcover_lines(bbox):
 
 
 GAME_LINE_ABOVE = 2.0  # m: sillan alueella näin korkealla maanpinnasta kulkeva viiva on kannella
+GAME_LINE_STEP = 2.0  # m: viivat tihennetään ennen siltatestiä (sillan yli voi kulkea yksi pitkä jana)
+
+
+def densify_3d(pts, step):
+    """Murtoviiva [(x, y, z), ...], jonka pitkille janoille lisätään väliin pisteitä enintään step välein
+    (korkeus lineaarisesti); alkuperäiset pisteet säilyvät."""
+    out = list(pts[:1])
+    for a, b in zip(pts, pts[1:]):
+        n = int(math.hypot(b[0] - a[0], b[1] - a[1]) // step)
+        out += [tuple(a[j] + (b[j] - a[j]) * k / (n + 1) for j in range(3)) for k in range(1, n + 1)]
+        out.append(b)
+    return out
 
 
 def dem_sampler():
