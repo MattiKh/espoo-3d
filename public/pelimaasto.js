@@ -52,7 +52,8 @@ const DECK = 1.0, RAIL_H = 0.9, RAIL_T = 0.25; // m: kannen paksuus, kaiteen kor
 const PIER_STEP = 24, PIER_DEPTH = 40, END_EXTRA = 2; // m: pilarien väli ja syvyys, kantta jatketaan päistä
 // Värit ovat tummia, sillä 3D-tason valaistus on kirkas (kannen pinta vastaa maaston asfalttia).
 const BRIDGE_TOP = { tie: [0.12, 0.125, 0.14], kevyt: [0.4, 0.37, 0.32], raide: [0.22, 0.2, 0.18] };
-const CONCRETE = [0.46, 0.45, 0.43], RAILING = [0.3, 0.33, 0.36];
+const CONCRETE = [0.46, 0.45, 0.43], RAILING = [0.3, 0.33, 0.36], MARKING = [0.92, 0.92, 0.9];
+const DASH = 3, DASH_GAP = 9, DASH_HALF = 0.175; // m: kaistaviivat kannella kuten maassa (3 m viiva, 9 m väli)
 
 function bridgeMesh(list, ref, exag) {
   const pos = [], col = [];
@@ -71,7 +72,7 @@ function bridgeMesh(list, ref, exag) {
     quad(lo[0], lo[3], lo[2], lo[1], color);
     for (let i = 0; i < 4; i++) quad(lo[i], lo[(i + 1) % 4], hi[(i + 1) % 4], hi[i], color);
   };
-  for (const { p, w, k } of list) {
+  for (const { p, w, k, v } of list) {
     const P = [];
     for (let i = 0; i < p.length; i += 3) {
       P.push([(mercX(p[i]) - mercX(ref.lon)) * ref.unit, -(mercY(p[i + 1]) - mercY(ref.lat)) * ref.unit, p[i + 2] * exag + 0.15]);
@@ -101,6 +102,23 @@ function bridgeMesh(list, ref, exag) {
       }
     }
     for (const i of [0, P.length - 1]) quad(at(i, w, P[i][2]), at(i, -w, P[i][2]), at(i, -w, P[i][2] - DECK), at(i, w, P[i][2] - DECK), CONCRETE);
+    // Kaistaviivat kannen pintaan (v: siirrot oikealle kulkusuuntaan nähden, m).
+    const S = [0];
+    for (let i = 1; i < P.length; i++) S.push(S[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+    const along = (t, d) => { // piste matkalla t, d metriä oikealle
+      let i = 0;
+      while (i < P.length - 2 && S[i + 1] < t) i++;
+      const f = Math.min(1, Math.max(0, (t - S[i]) / (S[i + 1] - S[i] || 1)));
+      const nx = N[i][0] + (N[i + 1][0] - N[i][0]) * f, ny = N[i][1] + (N[i + 1][1] - N[i][1]) * f;
+      return [P[i][0] + (P[i + 1][0] - P[i][0]) * f - nx * d, P[i][1] + (P[i + 1][1] - P[i][1]) * f - ny * d,
+        P[i][2] + (P[i + 1][2] - P[i][2]) * f + 0.03];
+    };
+    for (const d of v ?? []) {
+      for (let t = 0; t < S.at(-1); t += DASH + DASH_GAP) {
+        const t1 = Math.min(S.at(-1), t + DASH);
+        quad(along(t, d - DASH_HALF), along(t, d + DASH_HALF), along(t1, d + DASH_HALF), along(t1, d - DASH_HALF), MARKING);
+      }
+    }
     // Pilarit tasavälein (ei päissä); maan alle jäävä osa peittyy maastoon.
     let s = 0;
     for (let i = 1; i < P.length - 1; i++) {

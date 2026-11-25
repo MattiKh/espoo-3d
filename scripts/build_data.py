@@ -2149,6 +2149,21 @@ def clip_near(pts, circles, step=1.0):
     return parts
 
 
+def lane_offsets(tags):
+    """Pääteiden kaista- ja keskiviivojen sivusiirrot (m, oikealle positiivinen) kaistamäärästä:
+    kaksisuuntaisella keskiviiva ja saman suunnan kaistojen välit (menosuunnan kaistat oikealla),
+    yksisuuntaisella kaistojen välit. Muilla teillä ei viivoja. Palauttaa [(siirto, laji)]."""
+    base = tags.get("highway", "").replace("_link", "")
+    if base not in LANE_ROADS:
+        return []
+    w, lanes = LANE_ROADS[base], road_lanes(tags)
+    if road_oneway(tags):
+        return [((i - lanes / 2) * w, "kaista") for i in range(1, lanes)]
+    fwd = int(tags["lanes:forward"]) if tags.get("lanes:forward", "").isdigit() else (lanes + 1) // 2
+    bwd = max(1, lanes - fwd)
+    return [(0.0, "keski")] + [(i * w, "kaista") for i in range(1, fwd)] + [(-i * w, "kaista") for i in range(1, bwd)]
+
+
 def lane_lines(roads, junctions):
     """Kaistaviivat OSM:n pääteistä: kaksisuuntaisella tiellä keskiviiva vastakkaisten suuntien
     välissä ja kaistaviivat saman suunnan kaistojen välissä (menosuunnan kaistat ovat oikealla),
@@ -2156,17 +2171,9 @@ def lane_lines(roads, junctions):
     Palauttaa [(laji, [(x, y), ...])]."""
     out = []
     for tags, pts, _ in roads:
-        base = tags.get("highway", "").replace("_link", "")
-        if base not in LANE_ROADS or len(pts) < 2:
+        if len(pts) < 2:
             continue
-        w, lanes = LANE_ROADS[base], road_lanes(tags)
-        if road_oneway(tags):
-            offsets = [((i - lanes / 2) * w, "kaista") for i in range(1, lanes)]
-        else:
-            fwd = int(tags["lanes:forward"]) if tags.get("lanes:forward", "").isdigit() else (lanes + 1) // 2
-            bwd = max(1, lanes - fwd)
-            offsets = [(0.0, "keski")] + [(i * w, "kaista") for i in range(1, fwd)] + [(-i * w, "kaista") for i in range(1, bwd)]
-        for d, k in offsets:
+        for d, k in lane_offsets(tags):
             out += [(k, part) for part in clip_near(offset_line(pts, d) if d else pts, junctions)]
     return out
 
@@ -2388,7 +2395,8 @@ def game_bridges(ways):
     korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
     kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien
     pinnasta sillan ulkopuolelta (silta, jolle kansia ei ole, tai kansi mitattu ajorataa alempaa). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
-    Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide}]."""
+    Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide, "v": kaistaviivojen
+    siirrot oikealle (m), jos tiellä on viivoja}]."""
     dem, out = dem_sampler(), []
     for tags, pts, _ in ways:
         if len(pts) < 2 or not (bk := bridge_kind(tags)):
@@ -2412,8 +2420,11 @@ def game_bridges(ways):
         if max(a - b for a, b in zip(z, zo)) < 1.0:
             continue
         keep = sorted(set(simplify_indices([p[:2] for p in line], 0.3)) | set(simplify_indices(list(zip(s, z)), 0.05)))
-        out.append({"p": [v for i in keep for v in (round(line[i][0] / 55462.0 + 24.7, 6), round(line[i][1] / 111415.0 + 60.2, 6),
-                                                   round(z[i], 2))], "w": round(half, 1), "k": kind})
+        bridge = {"p": [v for i in keep for v in (round(line[i][0] / 55462.0 + 24.7, 6), round(line[i][1] / 111415.0 + 60.2, 6),
+                                                round(z[i], 2))], "w": round(half, 1), "k": kind}
+        if kind == "tie" and (lanes := lane_offsets(tags)):
+            bridge["v"] = [round(d, 2) for d, _ in lanes]  # kaistaviivat kannelle (siirto oikealle, m)
+        out.append(bridge)
     return out
 
 
