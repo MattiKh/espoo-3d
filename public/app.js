@@ -434,7 +434,13 @@ map.on("load", () => {
     setGameTerrain(true);
   }
 });
-map.on("moveend", () => setTimeout(prefetchOrtho, 400));
+// Ennakkohaku vasta, kun kartta on pysähtynyt: kyytinäkymässä (ride.js) kamera asetetaan joka
+// ruudussa, ja jokainen asetus päättyy moveend-tapahtumaan.
+let prefetchTimer = null;
+map.on("moveend", () => {
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(prefetchOrtho, 400);
+});
 map.on("moveend", updateDetail);
 
 const busy = document.getElementById("busy");
@@ -559,6 +565,7 @@ function setOverlayOpacity(v) {
 }
 
 function flyTo(place) {
+  transit?.leaveRide();
   if (!place) {
     map.fitBounds(ESPOO_BOUNDS, { pitch: 45, bearing: 0, padding: 40, duration: 2500 });
     return;

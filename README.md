@@ -4,7 +4,8 @@ Selaimessa toimiva 3D-kartta Espoosta. Siinä yhdistyvät maasto, rakennukset,
 kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteistä.
 Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset sekä Espoon
 yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina, ja latauksessa olevat
-sähköautot näkyvät latauspaikoillaan.
+sähköautot näkyvät latauspaikoillaan. Bussin, raitiovaunun, junan, metron tai lautan kyytiin voi
+hypätä klikkaamalla, jolloin maisema näkyy kulkuneuvon keulasta.
 
 ## Paneeli
 
@@ -261,6 +262,47 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
   ruudussa ajoneuvon mukana.
 - Lähikuvassa tilataan vain näkymän ympäristön HFP-ruudut. Taustalle jääneen välilehden
   yhteydet suljetaan 30 sekunnin kuluttua.
+
+### Kyytinäkymä
+
+Bussia, raitiovaunua, lähi- tai kaukojunaa, metroa tai matkustaja-alusta (lautat) klikkaamalla
+hypätään sen kyytiin (`public/ride.js`). Kamera lentää noin kahdessa sekunnissa kulkuneuvon
+keulaan kuljettajan silmien korkeudelle (bussi 2,5 m, raitiovaunu 2,7 m, lähijuna 3 m,
+kaukojuna 3,3 m tiestä tai kiskoista; alus aluksen pituuden mukaan) ja seuraa sen jälkeen
+kulkuneuvon sijaintia ja suuntaa. Tavarajunien, lentokoneiden ja latausautojen klikkaus avaa
+tiedot kuten ennenkin.
+
+- Kamerana on MapLibren oma kamera (`jumpTo`), joten maasto, rakennukset, katot, pelillinen
+  maasto ja muut kulkuneuvot näkyvät kuten muutenkin. Kamera on puoli metriä keulan edessä,
+  jottei oma malli peitä näkymää.
+- Ajoneuvot siirretään ja kamera asetetaan samassa vaiheessa ennen ruudun piirtoa, joten kamera
+  ja kulkuneuvo eivät heilu toistensa suhteen. Korkeus tulee samasta laskusta kuin piirretyllä
+  kulkuneuvolla: sillat ja kannet (`bridges.js`, `groundAt`) sekä raiteiden tasainen profiili.
+  Kulkusuunnan ja korkeuden muutokset pehmennetään, jotta sijaintien kohina ei heiluta näkymää.
+  Kamera pidetään vähintään 1,2 m maaston yläpuolella; ilmakuvatilassa sillan ali kulkiessa
+  kamera nousee hetkeksi kannen yläpuolelle, koska korkeusmalli on nostettu kannen tasolle.
+- Metro kulkee tunnelissa, joten sen kyydissä kamera seuraa 50 metrin korkeudella maanpinnan
+  yläpuolella ja katsoo alaspäin.
+- Katsetta käännetään vetämällä hiirellä tai sormella (sivuttain enintään 120° kulkusuunnasta,
+  pystysuunnassa 3–30° vaakatason alapuolelle) tai nuolinäppäimillä. Kaksoisnapautus tai
+  -klikkaus kääntää katseen takaisin kulkusuuntaan. Kartan oma raahaus, zoomaus ja kierto sekä
+  navigointinapit ovat kyydin ajan pois päältä, ja vedon päättävä klikkaus ei valitse kohdetta.
+- Kyydissä toisen kulkuneuvon klikkaus vaihtaa sen kyytiin. "Poistu kyydistä" tai Esc palauttaa
+  näkymän, josta kyytiin hypättiin; osoiterivin näkymä pysyy kyydin ajan siinä. Paneelin
+  paikkanapit päättävät kyydin heti. Jos kulkuneuvo katoaa datasta (vuoro päättyy, ajoneuvo
+  ajaa Espoon ulkopuolelle tai sijainti ei päivity), kamera nousee sen viimeisen sijainnin
+  yläpuolelle ja palkki kertoo kyydin päättyneen. Kyydissä olevan ajoneuvon HFP-ruutu pysyy
+  tilattuna, vaikka kamera siirtyisi toiseen ruutuun.
+- MapLibre 4.7.1 asettaa näkymän keskipisteen korkeudeksi joka ruudussa maaston korkeuden
+  siinä kohdassa. Kyydin ajaksi korkeus lukitaan (`_elevationFreeze`, jota MapLibre käyttää itse
+  siirtymien aikana), ja keskipiste asetetaan katseen suuntaan niin, että kamera on halutussa
+  kohdassa. Zoomaus valitaan niin, että kameran lähitaso on 1,5 metrin päässä (metrossa
+  kauempana). Kallistuksen yläraja nostetaan kyydin ajaksi 87°:een (`setMaxPitch` sallii
+  85°) ja näkökenttä noin 70°:een vaakasuunnassa (pystysuunnassa 40–60°, kapealla näytöllä 60°).
+- Kapealla näytöllä paneeli painetaan alas kyydin ajaksi. Kun liikettä vähennetään
+  (`prefers-reduced-motion`), kamera siirtyy kyytiin ja takaisin ilman lentoa.
+- Ilmakuvan ennakkohaku tehdään vasta, kun kartta on pysähtynyt, koska kyydissä jokainen
+  kameran asetus päättyy `moveend`-tapahtumaan.
 
 ## Lentokoneet
 
@@ -569,6 +611,7 @@ korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä kev
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
+- `public/ride.js`: kyytinäkymä: kamera kulkuneuvon keulassa, katseen kääntäminen ja kyytipalkki
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio

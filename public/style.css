@@ -239,6 +239,49 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 
 .maplibregl-ctrl-attrib { font-size: 11px; }
 
+/* Kyytinäkymä (ride.js) */
+.ride {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(460px, calc(100% - 24px));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 10px 12px 10px 14px;
+  background: var(--bg);
+  backdrop-filter: blur(10px);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 3;
+}
+.ride[hidden], .ride [hidden] { display: none; }
+.ride-info { flex: 1 1 180px; min-width: 0; }
+.ride .kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.ride h3 { margin: 1px 0 2px; font-size: 15px; }
+.ride .meta { font-size: 12.5px; color: var(--muted); }
+.ride-note { margin: 0; font-size: 13px; }
+.ride button {
+  flex: none;
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ride button:disabled { opacity: 0.6; cursor: default; }
+.ride .hint { flex-basis: 100%; margin: 0; font-size: 11.5px; }
+#map.riding .maplibregl-ctrl-group { display: none; }
+#map.riding .maplibregl-canvas-container { touch-action: none; }
+#map.riding .maplibregl-canvas { cursor: grab !important; }
+#map.riding .looking .maplibregl-canvas { cursor: grabbing !important; }
+
 /* Kapea näyttö: paneeli alareunaan */
 @media (max-width: 700px) {
   #panel {
@@ -254,6 +297,7 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 }
 
 @media (min-width: 701px) {
+  body:not(.panel-closed) .ride { left: calc(50% + 166px); max-width: min(460px, calc(100% - 368px)); }
   body.panel-closed #panel { transform: translateX(calc(-100% + 56px)); }
   body.panel-closed #panel header > div { visibility: hidden; }
 }

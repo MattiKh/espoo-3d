@@ -9,6 +9,7 @@ import { deckHeightAt, isGameMode, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
+import { createRide } from "./ride.js";
 
 const HFP_URL = "wss://mqtt.hsl.fi:443/";
 const RAIL_MQTT_URL = "wss://rata.digitraffic.fi:443/mqtt";
@@ -35,6 +36,7 @@ const LIFT = 0.15; // m maanpinnan yläpuolella
 const METRO_TUNNEL_Z = -15; // m (N2000)
 const METRO_DELAY = 7000; // metron sijainti päivittyy noin 50 metrin askelin 2,5–3 s välein
 const DOT_MAXZOOM = 14.8; // tätä lähempää ajoneuvot näytetään vain malleina
+const RIDE_AHEAD = 0.5; // m: kyytinäkymän kamera keulan edessä, jottei oma malli peitä näkymää
 const ELEV_SMOOTH_MS = 250; // korkeuden muutosten pehmennys
 // Jatkuvan piirron tahti: noin 30 kertaa sekunnissa riittää tasaiseen liikkeeseen ja puolittaa
 // näytönohjaimen kuorman. Karttaa liikutettaessa MapLibre piirtää silti täydellä nopeudella.
@@ -59,23 +61,26 @@ const COLORS = {
 // sama malli käännettynä, joten molemmissa päissä on keula. height on katon korkeus (m),
 // jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), stops,
 // pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä, ja grade radan suurimman
-// kaltevuuden (korkeuden muutos metriä metrillä).
+// kaltevuuden (korkeuden muutos metriä metrillä). eye on kyytinäkymän kameran korkeus maasta
+// (m, ride.js); ajoneuvoihin, joilta se puuttuu (tavarajunat), ei voi hypätä kyytiin.
 const KINDS = {
-  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3 },
+  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3, eye: 2.5 },
   tram: {
-    group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, rail: TRAM, stops: true, grade: 0.07,
+    group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, eye: 2.7, rail: TRAM, stops: true, grade: 0.07,
     cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]],
   },
   train: {
-    group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, rail: RAIL, stops: true, grade: 0.025,
+    group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, eye: 3.0, rail: RAIL, stops: true, grade: 0.025,
     cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]],
   },
+  // Metro kulkee tunnelissa, joten kyydissä kamera seuraa sitä rakennusten yläpuolella ja katsoo
+  // alaspäin, jolloin läpikuultava tunneli näkyy edessä.
   metro: {
-    group: "metro", label: "Metro", gap: 0.6, height: 3.6, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
+    group: "metro", label: "Metro", gap: 0.6, height: 3.6, eye: 50, ridePitch: 66, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
   },
   intercity: {
-    group: "junat", label: "Kaukojuna", gap: 0.8, height: 5.0, rail: RAIL, grade: 0.025,
+    group: "junat", label: "Kaukojuna", gap: 0.8, height: 5.0, eye: 3.3, rail: RAIL, grade: 0.025,
     cars: [["loco", 19.6], ...Array(6).fill(["coach", 26.4])],
   },
   freight: {
@@ -826,6 +831,7 @@ function wantedCells() {
 function syncCells() {
   if (!hfp.client?.connected) return;
   const want = wantedCells();
+  if (riding?.cell) want.add(riding.cell); // kyydissä oleva ajoneuvo ei katoa ruudun vaihtuessa
   const add = [...want].filter((c) => !hfp.cells.has(c)), drop = [...hfp.cells].filter((c) => !want.has(c));
   if (add.length) hfp.client.subscribe(add.map(cellTopic));
   if (drop.length) {
@@ -1555,12 +1561,16 @@ function drawShips(map, ctx) {
   for (const mesh of Object.values(shipMeshes)) mesh.instanceMatrix.needsUpdate = true;
 }
 
+function shipSpeed(sh) {
+  const knots = sh.sog ?? 0;
+  return knots < 0.3 ? "paikallaan" : `${knots.toFixed(1).replace(".", ",")} solmua (${Math.round(knots * KT * 3.6)} km/h)`;
+}
+
 function shipContent(sh) {
-  const m = sh.meta, dim = shipDims(sh), knots = sh.sog ?? 0;
-  const speed = knots < 0.3 ? "paikallaan" : `${knots.toFixed(1).replace(".", ",")} solmua (${Math.round(knots * KT * 3.6)} km/h)`;
+  const m = sh.meta, dim = shipDims(sh);
   const rows = [
     ["Määränpää", m?.destination?.trim() || null],
-    ["Nopeus", speed],
+    ["Nopeus", shipSpeed(sh)],
     ["Tila", NAV_STATUS[sh.navStat] ?? null],
     ["Pituus", dim.known ? `${Math.round(dim.L)} m` : null],
     ["Syväys", m?.draught ? `${(m.draught / 10).toFixed(1).replace(".", ",")} m` : null],
@@ -2202,10 +2212,74 @@ function stats() {
   return { counts, message };
 }
 
+// ------------------------------------------------------------ kyytinäkymä
+
+let ride = null; // kyytinäkymä (ride.js)
+let riding = null; // kulkuneuvo, jonka kyydissä ollaan
+
+// Julkiset kulkuneuvot, joiden kyytiin voi hypätä: bussit, raitiovaunut, junat (ei tavarajunia),
+// metro ja matkustaja-alukset.
+const rideable = (v) => (v.isShip ? shipDims(v).cls === "passenger" : !v.isPlane && !v.isCharge && KINDS[v.kind]?.eye != null);
+
+// Kyytinäkymän kameran paikka (ride.js): keulan kohta, maan, kannen tai meren pinnan korkeus ja
+// kulkusuunta. null, kun kulkuneuvo on kadonnut datasta.
+function poseOf(v) {
+  if (v.isShip) {
+    if (ships.get(v.id) !== v || v.x == null) return null;
+    const dim = shipDims(v), fx = Math.sin(v.heading), fy = Math.cos(v.heading), ahead = dim.ahead + dim.L / 2 + 1;
+    const x = v.x + fx * ahead + fy * dim.right, y = v.y + fy * ahead - fx * dim.right;
+    return { lon: lonOf(x), lat: latOf(y), z: 0, heading: v.heading, eye: Math.min(10, Math.max(2.5, dim.L * 0.12)) };
+  }
+  if (vehicles.get(v.id) !== v || v.x == null) return null;
+  const kind = KINDS[v.kind], h = v.heading ?? v.dir ?? [0, 1], x = v.x + h[0] * RIDE_AHEAD, y = v.y + h[1] * RIDE_AHEAD;
+  // Juuri piirretyn ajoneuvon korkeus (sillat ja raiteiden tasainen profiili mukana); muuten
+  // haetaan maastosta. Metron kohdalla maanpinta.
+  const drawn = !kind.underground && v.elevShown && performance.now() - v.drawnAt < 500;
+  const z = drawn ? v.elevShown[0]
+    : groundAt(v, v.x, v.y, v.elevShown?.[0], mapRef.transform.elevation ?? 0, mapRef.getTerrain()?.exaggeration ?? 1);
+  return { lon: lonOf(x), lat: latOf(y), z, heading: Math.atan2(h[0], h[1]), eye: kind.eye, pitch: kind.ridePitch };
+}
+
+// Kyytipalkin tiedot: laji, linja ja määränpää sekä nopeus ja aikataulu.
+function rideInfo(v) {
+  let kind, title, rows, more = null;
+  if (v.isShip) {
+    kind = shipDims(v).label;
+    title = v.meta?.name?.trim() || `MMSI ${v.mmsi}`;
+    rows = [shipSpeed(v), v.meta?.destination?.trim() ? `määränpää ${v.meta.destination.trim()}` : null];
+  } else {
+    const k = KINDS[v.kind], i = v.info;
+    kind = k.label;
+    title = [i.line, i.headsign].filter(Boolean).join(" → ") || k.label;
+    rows = [`${Math.round((i.spd ?? 0) * 3.6)} km/h`, delayText(i.dl)];
+    if (k.underground) more = "Metro kulkee tunnelissa, joten kamera seuraa sitä rakennusten yläpuolella.";
+  }
+  return node("div", {}, node("div", { class: "kind" }, kind), node("h3", {}, title),
+    node("div", { class: "meta" }, rows.filter(Boolean).join(" · ")), more && node("div", { class: "meta" }, more));
+}
+
+function board(v) {
+  const p = poseOf(v);
+  if (!p) return;
+  popup.remove();
+  riding = v;
+  ride.start(p, rideInfo(v));
+}
+
+// Kyydissä ajoneuvot siirretään ja kamera asetetaan ennen ruudun piirtoa, jotta kamera ja
+// ajoneuvot ovat samassa kohdassa.
+function rideFrame() {
+  tick();
+  ride.update(riding && poseOf(riding));
+}
+
+const nextFrame = () => (ride.active ? rideFrame() : mapRef.triggerRepaint());
+
 // ------------------------------------------------------------ julkinen rajapinta
 
 export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, chargingUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
+  ride = createRide(map, { onEnd: () => { riding = null; } });
   await loadRegion(boundaryUrl);
   // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
   // Ilman raiteita junat kulkevat ilmoitetuissa sijainneissa, eikä metrotunneleita piirretä.
@@ -2223,7 +2297,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
     id: "joukkoliikenne-maan-alla", type: "custom", renderingMode: "3d", onAdd,
     render(gl, matrix) {
       lastRender = performance.now();
-      tick();
+      if (!ride.active) tick(); // kyydissä ajoneuvot siirretään ennen kameraa (rideFrame)
       draw(gl, matrix);
       renderScene(gl, undergroundScene, flatCamera);
     },
@@ -2235,9 +2309,9 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
       renderScene(gl, overlayScene, flatCamera);
       // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti (FRAME_INTERVAL). Kaukaa
       // katsottaessa liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
-      if (!Object.values(groupOn).some(Boolean) && !extrasAnimating()) return;
+      if (!ride.active && !Object.values(groupOn).some(Boolean) && !extrasAnimating()) return;
       const interval = map.getZoom() >= 11 ? FRAME_INTERVAL : 50;
-      repaintTimer ??= setTimeout(() => { repaintTimer = null; map.triggerRepaint(); },
+      repaintTimer ??= setTimeout(() => { repaintTimer = null; nextFrame(); },
         Math.max(0, interval - (performance.now() - lastRender)));
     },
   }, beforeLayer);
@@ -2247,7 +2321,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
 
   // Varmistus: jos piirtosilmukka on pysähtynyt (esim. kaikki ryhmät olivat pois), käynnistetään se.
   setInterval(() => {
-    if (performance.now() - lastRender > 1000 && (Object.values(groupOn).some(Boolean) || extrasAnimating())) map.triggerRepaint();
+    if (performance.now() - lastRender > 1000 && (ride.active || Object.values(groupOn).some(Boolean) || extrasAnimating())) nextFrame();
   }, 1000);
 
   const listeners = [];
@@ -2259,6 +2333,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
     for (const p of planes.values()) if (wall - p.lastRx > PLANE_TIMEOUT) removePlane(p);
     for (const sh of ships.values()) if (wall - sh.lastSeen > 3 * SHIP_POLL) removeShip(sh);
     if (selected) popup.setDOMContent(popupContent(selected));
+    if (riding) ride.setInfo(rideInfo(riding));
     const s = stats();
     for (const fn of listeners) fn(s);
   }, 1000);
@@ -2282,10 +2357,19 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
       map.triggerRepaint();
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },
-    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai alukseen (ja tiedot avattiin).
+    // Pois kyydistä heti, esimerkiksi ennen kuin kartta lennätetään toiseen paikkaan.
+    leaveRide() { ride.stop(); },
+    // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai alukseen (ja tiedot avattiin
+    // tai kulkuneuvon kyytiin hypättiin). Kyydissä klikkaus vaihtaa toisen kulkuneuvon kyytiin
+    // eikä avaa muita tietoja.
     click(point) {
       const v = pick(point);
+      if (ride.active) {
+        if (v && v !== riding && rideable(v)) board(v);
+        return true;
+      }
       if (!v) { popup.remove(); return false; }
+      if (rideable(v)) { board(v); return true; }
       // addTo sulkee aiemman ikkunan (ja nollaa valinnan), joten valinta asetetaan vasta sen jälkeen.
       popup.setLngLat(anchorOf(v, performance.now())).setDOMContent(popupContent(v)).addTo(map);
       selected = v;
