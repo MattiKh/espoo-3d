@@ -319,7 +319,9 @@ function buildStyle() {
         attribution: def.service === "hsy" ? ATTR_HSY : ATTR_ESPOO,
       };
       overlay.push({
-        id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on) },
+        // Pelillisessä tilassa piilotettava taso (hideInGame) on piilossa jo alussa, jottei sen
+        // kuvia haeta turhaan ennen kuin pelillinen maasto on ladattu.
+        id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on && !(def.hideInGame && state.game)) },
         paint: { "raster-opacity": state.overlayOpacity, ...def.paint },
       });
       continue;
