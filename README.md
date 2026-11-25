@@ -507,8 +507,13 @@ Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja pol
 (myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
 (`public/data/pelimaasto_kanta.geojson`, 3 Mt). Nimet ovat maaston
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
-luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja Espoon ulkopuoli on vihertävän harmaa
-(rinnevarjostus on koko näkymässä). Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa
+luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja Espoon ulkopuoli on maaston keskisävyä
+(rinnevarjostus on koko näkymässä). 3D-maastotilassa MapLibre (4.7) näyttää puuttuvan
+rasteriruudun tilalla vain neljä alaruutua tai ladatun yläruudun ja piilottaa muut, joten
+loitonnettaessa maastoruutu jäi toisinaan yhdeksi kuvaksi ilman pintaa ja kartta välähti.
+Pelillisen maaston pinnalle ja varjostukselle pidetään siksi puuttuvan ruudun ladatut ylä- ja
+alaruudut näkyvissä myös MapLibren välimuistista (`keepLoadedTiles`), ja taustan sävy on sama kuin
+maaston, jottei harvinainen jäljelle jäävä aukko erotu. Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa
 samasta aineistosta. Viivat, sillat ja puut ovat vain tarkalla alueella.
 
 Lisäksi OpenStreetMapista ovat kaistaviivat, suojatiet ja raiteet. Pääteille (moottori-, valta-,

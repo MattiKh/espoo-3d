@@ -68,7 +68,10 @@ const ORTHO_RETRY = [1000, 3000, 8000]; // ms
 // Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin. Ilmakuvan alla tausta on
 // siksi ilmakuvan keskisävyinen harmaa, jottei rako näy vaaleana (myös kuvauksen ulkopuoliset alueet).
 const ORTHO_BACKGROUND = "#868b84";
-const GAME_BACKGROUND = "#a9b995"; // pelillisen maaston ulkopuoli
+// Pelillisessä maastossa tausta on maaston keskisävy samasta syystä: 3D-maastotilassa MapLibre
+// jättää loitonnettaessa maastoruudun toisinaan yhdeksi kuvaksi ilman pintaa (pelimaasto.js), ja
+// vaalea tausta välähti. Sama sävy on Espoon ulkopuolella (pelimaasto_worker.js).
+const GAME_BACKGROUND = "#6f8a5a";
 const orthoInflight = new Map();
 const orthoPrefetched = new Set();
 let orthoQueue = [], orthoActive = 0;

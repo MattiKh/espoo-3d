@@ -145,7 +145,7 @@ function shade(c, wx, wy) {
       break;
     default: // ei tietoa (Espoon ulkopuolella): kartan taustaväri pelillisessä tilassa (app.js)
       k = 1;
-      r = 169; g = 185; b = 149;
+      r = 111; g = 138; b = 90;
   }
   out[0] = Math.min(255, r * k);
   out[1] = Math.min(255, g * k);

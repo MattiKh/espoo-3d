@@ -170,6 +170,38 @@ function treeMeshes() {
   };
 }
 
+// MapLibre (4.7) korvaa 3D-maastotilassa puuttuvan rasteriruudun vain neljällä alaruudulla tai
+// ladatulla yläruudulla ja piilottaa muut ladatut ruudut; välimuistiin siirrettyjä ruutuja se ei
+// ota takaisin. Loitonnettaessa maastoruutu jäi siksi toisinaan yhdeksi kuvaksi ilman pintaa, ja
+// kartta välähti. Pelillisen maaston pinnalle ja varjostukselle käytetään tavallista (2D) säilytystä,
+// ja puuttuvan ruudun ladatut ylä- ja alaruudut (kaksi tasoa) pidetään näkyvissä myös välimuistista,
+// kunnes ruutu on valmis. Päällekkäiset ruudut rajataan stensiilillä kuten 2D-kartassa (tarkin päällä).
+function keepLoadedTiles(map, ids) {
+  for (const id of ids) {
+    const cache = map.style?.sourceCaches?.[id], update = cache && Object.getPrototypeOf(cache)._updateCoveredAndRetainedTiles;
+    if (!update) continue;
+    cache._updateCoveredAndRetainedTiles = function (retain, minZoom, maxZoom, zoom, ideal) {
+      update.call(this, retain, minZoom, maxZoom, zoom, ideal, undefined);
+      const keep = (tileID) => {
+        this._addTile(tileID);
+        retain[tileID.key] = tileID;
+        delete this._coveredTiles[tileID.key];
+      };
+      for (const tileID of ideal) {
+        if (this._tiles[tileID.key]?.hasData()) continue;
+        const parent = this.findLoadedParent(tileID, this._source.minzoom);
+        if (parent) keep(parent.tileID);
+        for (const child of tileID.children(this._source.maxzoom)) {
+          for (const c of [child, ...(child.overscaledZ < this._source.maxzoom ? child.children(this._source.maxzoom) : [])]) {
+            const tile = this._tiles[c.key] ?? this._cache.getByKey(c.wrapped().key);
+            if (tile?.hasData()) keep(c);
+          }
+        }
+      }
+    };
+  }
+}
+
 export async function createGameTerrain(map, { base, version }) {
   const info = await fetch(`${base}data/maanpeite.json?v=${version}`).then((r) => r.json());
   worker.postMessage({ type: "init", base, version, info });
@@ -186,6 +218,7 @@ export async function createGameTerrain(map, { base, version }) {
     // Varjostus koko näkymään, jottei yleiskuvan reuna erotu taustasta.
     type: "raster-dem", tiles: ["dem://{z}/{x}/{y}?peli"], encoding: "terrarium", tileSize: 512, maxzoom: 15,
   });
+  keepLoadedTiles(map, ["pelimaasto", "pelimaasto-dem"]);
   map.addLayer({ id: "pelimaasto", type: "raster", source: "pelimaasto", layout: { visibility: "none" }, paint: { "raster-fade-duration": 0 } }, before);
   map.addLayer({
     id: "pelimaasto-varjostus", type: "hillshade", source: "pelimaasto-dem", layout: { visibility: "none" },
