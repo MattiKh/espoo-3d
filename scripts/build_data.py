@@ -2215,7 +2215,7 @@ def build_landcover_lines(bbox):
     jätetään pois, sillä sillat ovat 3D-malleja eikä viiva kuulu maanpintaan."""
     x0, y0, x1, y1 = bbox
     ways, nodes = landcover_osm()
-    on_bridge = bridge_test(ways)
+    on_bridge, road_edges = bridge_test(ways), []
     cells = [(x, y, min(x + LANDCOVER_CELL, x1), min(y + LANDCOVER_CELL, y1))
              for x in range(int(x0), int(x1), LANDCOVER_CELL) for y in range(int(y0), int(y1), LANDCOVER_CELL)]
     to_ll = lambda x, y: [round(v, 6) for v in merc_to_lonlat(x, y)]
@@ -2249,16 +2249,16 @@ def build_landcover_lines(bbox):
                                                             "koko": el.findtext("{*}kokoluokka") or "pieni"}})
                 else:
                     for ls in el.iter(GML + "LineString"):
-                        run = []
-                        for x, y, z in read_positions_3d(ls) + [(None, None, None)]:
-                            if x is not None and not on_bridge(*stream_xy(*merc_to_lonlat(x, y)), z):
-                                run.append((x, y))
-                                continue
-                            if len(run) > 1:
+                        pts = read_positions_3d(ls)
+                        flags = [on_bridge(*stream_xy(*merc_to_lonlat(x, y)), z) for x, y, z in pts]
+                        for i0, i1, flag in runs(flags):
+                            if flag is None and i1 > i0:  # maanpinnassa
+                                run = [p[:2] for p in pts[i0:i1 + 1]]
                                 keep = simplify_indices([(px * 0.497, py * 0.497) for px, py in run], 0.15)  # Web Mercator → noin m
                                 features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
                                                  "geometry": {"type": "LineString", "coordinates": [to_ll(*run[k]) for k in keep]}})
-                            run = []
+                                if type_name == "kanta:Liikennevayla":  # ajoradan reunat siltojen päissä (game_bridges)
+                                    road_edges.append([stream_xy(*merc_to_lonlat(px, py)) for px, py in run])
                 el.clear()
     # OpenStreetMapista kaistaviivat, suojatiet ja raiteet (junat, raitiovaunut) samalta alueelta;
     # siltojen omat viivat ja raiteet jäävät pois (sillat ovat 3D-malleja).
@@ -2277,7 +2277,7 @@ def build_landcover_lines(bbox):
         json.dump({"type": "FeatureCollection", "features": features}, fh, ensure_ascii=False, separators=(",", ":"))
     count = collections.Counter(f["properties"].get("k", "nimi") for f in features)
     log(f"  → pelimaasto_kanta.geojson: {dict(count)}, {os.path.getsize(path) / 1e6:.1f} Mt")
-    bridges = game_bridges(ways)
+    bridges = game_bridges(ways, road_edges)
     with open(os.path.join(PUBLIC_DATA, "pelimaasto_sillat.json"), "w", encoding="utf-8") as fh:
         json.dump({"lahde": "Sillat © OpenStreetMap-tekijät (ODbL), korkeus Espoon kantakartasta", "sillat": bridges}, fh,
                   ensure_ascii=False, separators=(",", ":"))
@@ -2305,24 +2305,36 @@ def dem_sampler():
     return dem
 
 
+def runs(flags):
+    """Peräkkäiset samat arvot: [(alku, loppu, arvo)] (indeksit mukaan lukien)."""
+    out, i0 = [], 0
+    for i in range(1, len(flags) + 1):
+        if i == len(flags) or flags[i] != flags[i0]:
+            out.append((i0, i - 1, flags[i0]))
+            i0 = i
+    return out
+
+
 def bridge_test(ways):
     """Funktio (x, y, z) → jätetäänkö viivan piste pois maanpinnasta: sillan kannella (OSM:n sillan
     alueella, kansi + 2 m, ja vähintään GAME_LINE_ABOVE alkuperäisen korkeusmallin yläpuolella, josta
-    sillat on poistettu) tai sillan penkereen sisällä (vähintään GAME_LINE_ABOVE pelillisen maaston
-    pinnan alapuolella, esim. alikulku, jonka kohdalta penger on täytetty)."""
+    sillat on poistettu; palauttaa sillan indeksin väylissä) tai sillan penkereen sisällä (vähintään
+    GAME_LINE_ABOVE pelillisen maaston pinnan alapuolella, esim. alikulku, jonka kohdalta penger on
+    täytetty; palauttaa "alla"). Muuten None."""
     dem, polys = dem_sampler(), []
-    for tags, pts, _ in ways:
+    for wi, (tags, pts, _) in enumerate(ways):
         kind = bridge_kind(tags)
         if kind and len(pts) > 1:
             ring = offset_line(pts, kind[1] + 2) + offset_line(pts, -kind[1] - 2)[::-1]
             xs, ys = [p[0] for p in ring], [p[1] for p in ring]
-            polys.append((min(xs), min(ys), max(xs), max(ys), [ring + [ring[0]]]))
+            polys.append((min(xs), min(ys), max(xs), max(ys), [ring + [ring[0]]], wi))
 
     def test(x, y, z):
         if z < dem(x, y, "peli") - GAME_LINE_ABOVE:
-            return True
-        return any(a <= x <= c and b <= y <= d and point_in_polygon(x, y, poly) for a, b, c, d, poly in polys) \
-            and z - dem(x, y, False) > GAME_LINE_ABOVE
+            return "alla"
+        if z - dem(x, y, False) <= GAME_LINE_ABOVE:
+            return None
+        return next((wi for a, b, c, d, poly, wi in polys if a <= x <= c and b <= y <= d and point_in_polygon(x, y, poly)), None)
     return test
 
 
@@ -2390,15 +2402,59 @@ def resample_line(pts, step):
     return out
 
 
-def game_bridges(ways):
+def bridge_edge_offsets(line, half, road_edges, reach=8.0):
+    """Ajoradan reunaviivojen sivusiirrot (m, oikealle positiivinen) sillan alussa ja lopussa: maanpinnan
+    reunaviivojen [(x, y), ...] lähimmät kohdat enintään reach metrin päässä sillan päästä ja kannen
+    leveydellä. Alun ja lopun siirrot paritetaan lähimmän mukaan (ero enintään 2 m); parittomat
+    jatkuvat samana. Palauttaa [[alku, loppu], ...]."""
+    def at_end(p, q):
+        ux, uy = q[0] - p[0], q[1] - p[1]
+        ln = math.hypot(ux, uy) or 1.0
+        ux, uy = ux / ln, uy / ln
+        found = []
+        for edge in road_edges:
+            for a, b in zip(edge, edge[1:]):
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                l2 = dx * dx + dy * dy
+                t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) if l2 else 0.0
+                cx, cy = a[0] + t * dx - p[0], a[1] + t * dy - p[1]
+                if math.hypot(cx, cy) > reach + half:
+                    continue
+                along, side = cx * ux + cy * uy, cx * uy - cy * ux  # oikea normaali (uy, -ux)
+                if abs(along) <= reach and abs(side) <= half:
+                    found.append(side)
+        merged = []
+        for v in sorted(found):
+            if merged and v - merged[-1][-1] < 0.6:
+                merged[-1].append(v)
+            else:
+                merged.append([v])
+        return [sum(m) / len(m) for m in merged]
+
+    start = at_end(line[0], line[1])
+    # Lopussa kulkusuunta käännetään, jolloin myös sivu kääntyy.
+    end = [-v for v in at_end(line[-1], line[-2])]
+    pairs = []
+    for v in start:
+        w = min(end, key=lambda e: abs(e - v), default=None)
+        pairs.append([round(v, 2), round(w if w is not None and abs(w - v) < 2 else v, 2)])
+    for w in end:
+        if all(abs(w - p[1]) > 0.3 for p in pairs):
+            pairs.append([round(w, 2), round(w, 2)])
+    return pairs
+
+
+def game_bridges(ways, road_edges=()):
     """Pelillisen maaston 3D-sillat OSM:n siltaosuuksista [(tagit, [(x, y), ...], solmut)]. Kannen
     korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
     kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien
     pinnasta sillan ulkopuolelta (silta, jolle kansia ei ole, tai kansi mitattu ajorataa alempaa). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
     Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide, "v": kaistaviivojen
-    siirrot oikealle (m), jos tiellä on viivoja}]."""
+    siirrot oikealle (m), jos tiellä on viivoja, "r": ajoradan reunaviivat [[siirto alussa, siirto
+    lopussa], ...]: maanpinnan reunaviivojen (road_edges, kantakartta) sivusijainnit sillan päiden
+    ulkopuolelta, jolloin kannen reunaviivat jatkavat tien reunaviivoja}]."""
     dem, out = dem_sampler(), []
-    for tags, pts, _ in ways:
+    for wi, (tags, pts, _) in enumerate(ways):
         if len(pts) < 2 or not (bk := bridge_kind(tags)):
             continue
         kind, half = bk
@@ -2424,6 +2480,8 @@ def game_bridges(ways):
                                                 round(z[i], 2))], "w": round(half, 1), "k": kind}
         if kind == "tie" and (lanes := lane_offsets(tags)):
             bridge["v"] = [round(d, 2) for d, _ in lanes]  # kaistaviivat kannelle (siirto oikealle, m)
+        if kind == "tie" and (edges := bridge_edge_offsets(line, half, road_edges)):
+            bridge["r"] = edges
         out.append(bridge)
     return out
 

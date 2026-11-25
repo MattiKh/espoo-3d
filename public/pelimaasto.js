@@ -73,7 +73,7 @@ function bridgeMesh(list, ref, exag) {
     quad(lo[0], lo[3], lo[2], lo[1], color);
     for (let i = 0; i < 4; i++) quad(lo[i], lo[(i + 1) % 4], hi[(i + 1) % 4], hi[i], color);
   };
-  for (const { p, w, k, v } of list) {
+  for (const { p, w, k, v, r } of list) {
     const P = [];
     for (let i = 0; i < p.length; i += 3) {
       P.push([(mercX(p[i]) - mercX(ref.lon)) * ref.unit, -(mercY(p[i + 1]) - mercY(ref.lat)) * ref.unit, p[i + 2] * exag + 0.15]);
@@ -114,10 +114,15 @@ function bridgeMesh(list, ref, exag) {
       return [P[i][0] + (P[i + 1][0] - P[i][0]) * f - nx * d, P[i][1] + (P[i + 1][1] - P[i][1]) * f - ny * d,
         P[i][2] + (P[i + 1][2] - P[i][2]) * f + 0.03];
     };
-    // Ajotiesillalla ajoradan reunaviivat (kannen reuna on 1 m ajoradan reunan ulkopuolella).
-    for (const d of k === "tie" ? [w - 1, 1 - w] : []) {
+    // Ajoradan reunaviivat: sivusiirrot maanpinnan reunaviivoista sillan päistä (r: [alussa, lopussa]),
+    // jolloin ne jatkavat tien reunaviivoja; välissä siirto vaihtuu tasaisesti. Ilman niitä ajoradan
+    // reuna on metrin päässä kannen reunasta.
+    const edges = r?.length ? r : k === "tie" ? [[w - 1, w - 1], [1 - w, 1 - w]] : [];
+    for (const [d0, d1] of edges) {
+      const d = (t) => d0 + ((d1 - d0) * t) / (S.at(-1) || 1);
       for (let i = 0; i < P.length - 1; i++) {
-        quad(along(S[i], d - EDGE_HALF), along(S[i], d + EDGE_HALF), along(S[i + 1], d + EDGE_HALF), along(S[i + 1], d - EDGE_HALF), EDGE);
+        const a = d(S[i]), b = d(S[i + 1]);
+        quad(along(S[i], a - EDGE_HALF), along(S[i], a + EDGE_HALF), along(S[i + 1], b + EDGE_HALF), along(S[i + 1], b - EDGE_HALF), EDGE);
       }
     }
     for (const d of v ?? []) {
