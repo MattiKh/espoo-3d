@@ -2204,8 +2204,12 @@ def build_landcover_lines(bbox):
     (Paikannimi, luokka väylännimi: kartan tekstin sijainti, suunta ja koko) pelillisen maaston
     alueelta tiedostoon public/data/pelimaasto_kanta.geojson. Viivat yksinkertaistetaan 0,15 metrin
     tarkkuuteen. Nimen suunta on kantakartassa suuntakulma pohjoisesta myötäpäivään; MapLibren
-    kierto on myötäpäivään vaakatasosta, ja nimi käännetään aina luettavaksi (enintään 90°)."""
+    kierto on myötäpäivään vaakatasosta, ja nimi käännetään aina luettavaksi (enintään 90°).
+    Siltojen kannella kulkevat viivat (sillan alueella yli GAME_LINE_ABOVE maanpinnan yläpuolella)
+    jätetään pois, sillä sillat ovat 3D-malleja eikä viiva kuulu maanpintaan."""
     x0, y0, x1, y1 = bbox
+    ways, nodes = landcover_osm()
+    on_bridge = bridge_test(ways)
     cells = [(x, y, min(x + LANDCOVER_CELL, x1), min(y + LANDCOVER_CELL, y1))
              for x in range(int(x0), int(x1), LANDCOVER_CELL) for y in range(int(y0), int(y1), LANDCOVER_CELL)]
     to_ll = lambda x, y: [round(v, 6) for v in merc_to_lonlat(x, y)]
@@ -2239,20 +2243,26 @@ def build_landcover_lines(bbox):
                                                             "koko": el.findtext("{*}kokoluokka") or "pieni"}})
                 else:
                     for ls in el.iter(GML + "LineString"):
-                        pts = read_positions(ls)
-                        if len(pts) < 2:
-                            continue
-                        keep = simplify_indices([(x * 0.497, y * 0.497) for x, y in pts], 0.15)  # Web Mercator → noin metrit
-                        features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
-                                         "geometry": {"type": "LineString", "coordinates": [to_ll(*pts[k]) for k in keep]}})
+                        run = []
+                        for x, y, z in read_positions_3d(ls) + [(None, None, None)]:
+                            if x is not None and not on_bridge(*stream_xy(*merc_to_lonlat(x, y)), z):
+                                run.append((x, y))
+                                continue
+                            if len(run) > 1:
+                                keep = simplify_indices([(px * 0.497, py * 0.497) for px, py in run], 0.15)  # Web Mercator → noin m
+                                features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
+                                                 "geometry": {"type": "LineString", "coordinates": [to_ll(*run[k]) for k in keep]}})
+                            run = []
                 el.clear()
-    # OpenStreetMapista kaistaviivat, suojatiet ja raiteet (junat, raitiovaunut) samalta alueelta.
-    ways, nodes = landcover_osm()
+    # OpenStreetMapista kaistaviivat, suojatiet ja raiteet (junat, raitiovaunut) samalta alueelta;
+    # siltojen omat viivat ja raiteet jäävät pois (sillat ovat 3D-malleja).
+    ground = [w for w in ways if w[0].get("bridge") in (None, "no")]
     roads = [w for w in ways if w[0].get("highway", "").replace("_link", "") in VEHICLE_ROADS and not osm_covered(w[0])]
+    surface = [w for w in roads if w[0].get("bridge") in (None, "no")]
     local_ll = lambda x, y: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6)]
-    rails = [(RAIL_KINDS[t["railway"]], p) for t, p, _ in ways if t.get("railway") in RAIL_KINDS and not osm_covered(t)]
-    marks = crossings(roads, ways, nodes)
-    for k, pts in lane_lines(roads, road_junctions(roads)) + rails + marks:
+    rails = [(RAIL_KINDS[t["railway"]], p) for t, p, _ in ground if t.get("railway") in RAIL_KINDS and not osm_covered(t)]
+    marks = crossings(surface, ground, nodes)
+    for k, pts in lane_lines(surface, road_junctions(roads)) + rails + marks:
         keep = simplify_indices(pts, 0.15)
         features.append({"type": "Feature", "properties": {"k": k},
                          "geometry": {"type": "LineString", "coordinates": [local_ll(*pts[i]) for i in keep]}})
@@ -2266,6 +2276,43 @@ def build_landcover_lines(bbox):
         json.dump({"lahde": "Sillat © OpenStreetMap-tekijät (ODbL), korkeus Espoon kantakartasta", "sillat": bridges}, fh,
                   ensure_ascii=False, separators=(",", ":"))
     log(f"  → pelimaasto_sillat.json: {len(bridges)} siltaa")
+
+
+GAME_LINE_ABOVE = 2.0  # m: sillan alueella näin korkealla maanpinnasta kulkeva viiva on kannella
+
+
+def dem_sampler():
+    """Korkeusmallin korkeus (m) paikallisten metrien pisteessä z15-tiilistä: nostettu (siltojen kohdalla
+    public/tiles/korkeus) tai alkuperäinen."""
+    cache = {}
+
+    def dem(x, y, lifted=True):
+        X, Y = merc_unit(x / 55462.0 + 24.7, y / 111415.0 + 60.2)
+        X, Y = X * 2 ** 15, Y * 2 ** 15
+        key = (int(X), int(Y), lifted)
+        if key not in cache:
+            path = os.path.join(TILES, "korkeus", "15", str(key[0]), f"{key[1]}.webp")
+            cache[key] = dem_read(path if lifted and os.path.exists(path) else dem_tile(15, key[0], key[1]))[1]
+        a = cache[key]
+        return float(a[int((Y - key[1]) * a.shape[0]), int((X - key[0]) * a.shape[1])])
+    return dem
+
+
+def bridge_test(ways):
+    """Funktio (x, y, z) → onko piste sillan kannella: OSM:n sillan alueella (kansi + 2 m) ja
+    vähintään GAME_LINE_ABOVE alkuperäisen korkeusmallin (josta sillat on poistettu) yläpuolella."""
+    dem, polys = dem_sampler(), []
+    for tags, pts, _ in ways:
+        kind = bridge_kind(tags)
+        if kind and len(pts) > 1:
+            ring = offset_line(pts, kind[1] + 2) + offset_line(pts, -kind[1] - 2)[::-1]
+            xs, ys = [p[0] for p in ring], [p[1] for p in ring]
+            polys.append((min(xs), min(ys), max(xs), max(ys), [ring + [ring[0]]]))
+
+    def test(x, y, z):
+        return any(a <= x <= c and b <= y <= d and point_in_polygon(x, y, poly) for a, b, c, d, poly in polys) \
+            and z - dem(x, y, False) > GAME_LINE_ABOVE
+    return test
 
 
 def landcover_osm():
@@ -2338,19 +2385,7 @@ def game_bridges(ways):
     kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä (silta, jolle kansia ei
     ole). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
     Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide}]."""
-    cache = {}
-
-    def dem(x, y, lifted=True):
-        X, Y = merc_unit(x / 55462.0 + 24.7, y / 111415.0 + 60.2)
-        X, Y = X * 2 ** 15, Y * 2 ** 15
-        key = (int(X), int(Y), lifted)
-        if key not in cache:
-            path = os.path.join(TILES, "korkeus", "15", str(key[0]), f"{key[1]}.webp")
-            cache[key] = dem_read(path if lifted and os.path.exists(path) else dem_tile(15, key[0], key[1]))[1]
-        a = cache[key]
-        return float(a[int((Y - key[1]) * a.shape[0]), int((X - key[0]) * a.shape[1])])
-
-    out = []
+    dem, out = dem_sampler(), []
     for tags, pts, _ in ways:
         if len(pts) < 2 or not (bk := bridge_kind(tags)):
             continue

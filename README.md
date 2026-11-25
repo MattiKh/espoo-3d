@@ -518,7 +518,9 @@ kannet) tai, jos se on alempana, suoraan sillan päiden välillä. Pelillisessä
 korkeusmallin tiilet vaihdetaan versioon, jossa yli 2,5 metrin jänteet ovat auki ja niiden ympäriltä
 on poistettu noin 3,5 metrin täyttö (`public/tiles/korkeus/peli`, `build_data.py`); matalat kannet
 ja sillan päiden kuopat ovat yhä täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
-kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista).
+kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista). Sillan kannella kulkevat viivat
+(kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
+siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois.
 
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti
