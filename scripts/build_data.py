@@ -2030,6 +2030,28 @@ LANDCOVER_CELL = 2000  # Web Mercator -yksikköä: haku ruuduittain
 # Kaistaviivat OpenStreetMapin teistä (kaistan leveys m tien tyypin mukaan) ja raiteet.
 LANE_ROADS = {"motorway": 3.75, "trunk": 3.75, "primary": 3.5, "secondary": 3.5, "tertiary": 3.25}
 RAIL_KINDS = {"rail": "rata", "tram": "ratikka", "light_rail": "ratikka"}
+# Ajotiet risteysten tunnistukseen (kaistaviivat katkaistaan risteyksissä) ja suojateiden leveyteen.
+VEHICLE_ROADS = ("motorway", "trunk", "primary", "secondary", "tertiary", "unclassified", "residential", "living_street", "busway")
+JUNCTION_MARGIN = 3.0  # m: kaistaviivat katkaistaan risteyksessä leveimmän tien puolikkaan ja tämän säteeltä
+UNMARKED = ("unmarked", "no", "informal")  # OSM: merkitsemätön ylityskohta
+
+
+def road_oneway(tags):
+    base = tags.get("highway", "").replace("_link", "")
+    return tags.get("oneway") in ("yes", "1", "true") or base == "motorway" or tags.get("junction") == "roundabout"
+
+
+def road_lanes(tags):
+    """Kaistamäärä: lanes, muuten yksi kumpaankin suuntaan (yksisuuntaisella rampilla yksi)."""
+    if tags.get("lanes", "").isdigit():
+        return int(tags["lanes"])
+    return 1 if road_oneway(tags) and tags.get("highway", "").endswith("_link") else 2
+
+
+def road_half(tags):
+    """Ajoradan puolileveys (m) kaistamäärästä."""
+    w = LANE_ROADS.get(tags.get("highway", "").replace("_link", ""), 3.0)
+    return max(2.5, road_lanes(tags) * w / 2)
 
 
 def osm_covered(tags):
@@ -2056,27 +2078,86 @@ def offset_line(pts, d):
     return out
 
 
-def lane_lines(ways):
-    """Kaistaviivat OSM:n teistä [(tagit, [(x, y), ...])]: kaksisuuntaisella tiellä keltainen
-    keskiviiva vastakkaisten suuntien välissä ja valkoiset kaistaviivat saman suunnan kaistojen
-    välissä (kaistamäärä lanes, oletuksena yksi kumpaankin suuntaan; menosuunnan kaistat ovat
-    oikealla), yksisuuntaisella vain kaistaviivat. Palauttaa [(laji, [(x, y), ...])]."""
+def road_junctions(roads):
+    """Risteykset OSM:n ajoteistä [(tagit, [(x, y), ...], [solmu, ...])]: solmut, joihin yhtyy
+    vähintään kolme tien osaa (tien jatkuminen toisena väylänä ei ole risteys). Palauttaa
+    [(x, y, säde)], säde = leveimmän risteävän tien puolikas + JUNCTION_MARGIN."""
+    degree, where, half = collections.Counter(), {}, collections.defaultdict(float)
+    for tags, pts, ids in roads:
+        for i, nid in enumerate(ids):
+            degree[nid] += 1 if i in (0, len(ids) - 1) else 2
+            where[nid] = pts[i]
+            half[nid] = max(half[nid], road_half(tags))
+    return [(*where[n], half[n] + JUNCTION_MARGIN) for n, d in degree.items() if d >= 3]
+
+
+def clip_near(pts, circles, step=1.0):
+    """Murtoviivan osat, jotka eivät ole minkään ympyrän (x, y, säde) sisällä."""
+    dense = [pts[0]]
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        n = max(1, math.ceil(math.hypot(bx - ax, by - ay) / step))
+        dense += [(ax + (bx - ax) * k / n, ay + (by - ay) * k / n) for k in range(1, n + 1)]
+    near = [c for c in circles if min(p[0] for p in pts) - c[2] < c[0] < max(p[0] for p in pts) + c[2]
+            and min(p[1] for p in pts) - c[2] < c[1] < max(p[1] for p in pts) + c[2]]
+    parts, run = [], []
+    for x, y in dense:
+        if any((x - cx) ** 2 + (y - cy) ** 2 < r * r for cx, cy, r in near):
+            if len(run) > 1:
+                parts.append(run)
+            run = []
+        else:
+            run.append((x, y))
+    if len(run) > 1:
+        parts.append(run)
+    return parts
+
+
+def lane_lines(roads, junctions):
+    """Kaistaviivat OSM:n pääteistä: kaksisuuntaisella tiellä keskiviiva vastakkaisten suuntien
+    välissä ja kaistaviivat saman suunnan kaistojen välissä (menosuunnan kaistat ovat oikealla),
+    yksisuuntaisella vain kaistaviivat. Viivat katkaistaan risteysalueilla (road_junctions).
+    Palauttaa [(laji, [(x, y), ...])]."""
     out = []
-    for tags, pts in ways:
-        kind = tags.get("highway", "")
-        base = kind.replace("_link", "")
-        if base not in LANE_ROADS or len(pts) < 2 or osm_covered(tags):
+    for tags, pts, _ in roads:
+        base = tags.get("highway", "").replace("_link", "")
+        if base not in LANE_ROADS or len(pts) < 2:
             continue
-        w = LANE_ROADS[base]
-        oneway = tags.get("oneway") in ("yes", "1", "true") or base == "motorway" or tags.get("junction") == "roundabout"
-        lanes = int(tags["lanes"]) if tags.get("lanes", "").isdigit() else (1 if oneway and kind.endswith("_link") else 2)
-        if oneway:
+        w, lanes = LANE_ROADS[base], road_lanes(tags)
+        if road_oneway(tags):
             offsets = [((i - lanes / 2) * w, "kaista") for i in range(1, lanes)]
         else:
             fwd = int(tags["lanes:forward"]) if tags.get("lanes:forward", "").isdigit() else (lanes + 1) // 2
             bwd = max(1, lanes - fwd)
             offsets = [(0.0, "keski")] + [(i * w, "kaista") for i in range(1, fwd)] + [(-i * w, "kaista") for i in range(1, bwd)]
-        out += [(k, offset_line(pts, d) if d else pts) for d, k in offsets]
+        for d, k in offsets:
+            out += [(k, part) for part in clip_near(offset_line(pts, d) if d else pts, junctions)]
+    return out
+
+
+def crossings(roads, ways, nodes):
+    """Suojatiet ja pyörätien jatkeet OSM:stä: ylitysväylät (footway/cycleway=crossing) sellaisinaan
+    ja ylityskohdat (highway=crossing), joille ei ole väylää, ajoradan poikki tien leveydeltä.
+    Merkitsemättömät jätetään pois. Palauttaa [(laji, [(x, y), ...])]."""
+    out, on_way = [], set()
+    for tags, pts, ids in ways:
+        kind = "suojatie" if tags.get("footway") == "crossing" else "pyorajatke" if tags.get("cycleway") == "crossing" else None
+        if kind and tags.get("crossing") not in UNMARKED and len(pts) > 1:
+            out.append((kind, pts))
+            on_way.update(ids)
+    at = {}
+    for tags, pts, ids in roads:
+        for i, nid in enumerate(ids):
+            at.setdefault(nid, (tags, pts, i))
+    for node in nodes:
+        tags = node.get("tags", {})
+        if node["id"] in on_way or node["id"] not in at or tags.get("crossing") in UNMARKED:
+            continue
+        road, pts, i = at[node["id"]]
+        (ax, ay), (bx, by) = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
+        ln = math.hypot(bx - ax, by - ay) or 1.0
+        nx, ny, h = (by - ay) / ln, -(bx - ax) / ln, road_half(road)
+        x, y = pts[i]
+        out.append(("suojatie", [(x - nx * h, y - ny * h), (x + nx * h, y + ny * h)]))
     return out
 
 
@@ -2130,14 +2211,18 @@ def build_landcover_lines(bbox):
     # OpenStreetMapista kaistaviivat ja raiteet (junat, raitiovaunut) samalta alueelta.
     (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
     box = f"({s:.5f},{w:.5f},{n:.5f},{e:.5f})"
-    query = (f'[out:json][timeout:180];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary)(_link)?$"]{box};'
-             f'way["railway"~"^(rail|tram|light_rail)$"]{box};);out geom;')
-    with open(overpass_post(query, os.path.join(CACHE, "pelimaasto", "osm.json")), encoding="utf-8") as fh:
-        ways = [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]])
-                for el in json.load(fh)["elements"] if el["type"] == "way"]
+    query = (f'[out:json][timeout:180];(way["highway"~"^({"|".join(VEHICLE_ROADS)})(_link)?$"]{box};'
+             f'way["railway"~"^(rail|tram|light_rail)$"]{box};way["footway"="crossing"]{box};'
+             f'way["cycleway"="crossing"]{box};node["highway"="crossing"]{box};);out geom;')
+    with open(overpass_post(query, os.path.join(CACHE, "pelimaasto", "osm2.json")), encoding="utf-8") as fh:
+        elements = json.load(fh)["elements"]
+    ways = [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]], el["nodes"])
+            for el in elements if el["type"] == "way"]
+    roads = [w for w in ways if w[0].get("highway", "").replace("_link", "") in VEHICLE_ROADS and not osm_covered(w[0])]
     local_ll = lambda x, y: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6)]
-    for k, pts in lane_lines(ways) + [(RAIL_KINDS[t["railway"]], p) for t, p in ways
-                                      if t.get("railway") in RAIL_KINDS and not osm_covered(t)]:
+    rails = [(RAIL_KINDS[t["railway"]], p) for t, p, _ in ways if t.get("railway") in RAIL_KINDS and not osm_covered(t)]
+    marks = crossings(roads, ways, [el for el in elements if el["type"] == "node"])
+    for k, pts in lane_lines(roads, road_junctions(roads)) + rails + marks:
         keep = simplify_indices(pts, 0.15)
         features.append({"type": "Feature", "properties": {"k": k},
                          "geometry": {"type": "LineString", "coordinates": [local_ll(*pts[i]) for i in keep]}})

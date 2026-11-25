@@ -496,10 +496,15 @@ Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja pol
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
 luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja alueen ulkopuoli on vihertävän harmaa.
 
-Lisäksi OpenStreetMapista ovat kaistaviivat ja raiteet. Pääteille (moottori-, valta-, kanta-, seutu-
-ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan) mukaan
-kaksisuuntaisille keltainen keskiviiva ja saman suunnan kaistojen väliin valkoiset kaistaviivat
-(kaista 3,25–3,75 m, 3 m viiva ja 9 m väli); asuntokaduilla ei ole viivoja. Raiteet (juna ja
+Lisäksi OpenStreetMapista ovat kaistaviivat, suojatiet ja raiteet. Pääteille (moottori-, valta-,
+kanta-, seutu- ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan)
+mukaan kaksisuuntaisille keskiviiva ja saman suunnan kaistojen väliin kaistaviivat, kaikki
+valkoisia (kaista 3,25–3,75 m, 3 m viiva ja 9 m väli); asuntokaduilla ei ole viivoja. Viivat
+katkaistaan risteysalueilla: risteys on solmu, johon yhtyy vähintään kolme ajotien osaa, ja viivat
+jätetään pois leveimmän risteävän tien puolikkaan ja 3 metrin säteeltä. Suojatiet ovat ylitysväyliä
+(`footway=crossing`) tai ylityskohtia (`highway=crossing`), joille väylää ei ole, jolloin ylitys
+tehdään ajoradan poikki tien leveydeltä; merkitsemättömät jätetään pois. Ne piirretään seepraksi
+(3 m leveä, 0,5 m raidat ajoradan suuntaisina), ja pyörätien jatkeet kahtena rivinä 0,5 m neliöitä. Raiteet (juna ja
 raitiovaunu, ei tunneleissa) piirretään sepelipohjana, ratapölkkyinä ja kahtena kiskona noin
 1,5 metrin päässä toisistaan. Leveydet ovat metreinä, joten ne skaalautuvat zoomauksen mukana.
 Kokeilualueella kulkee Raide-Jokeri; rantarata on alueen pohjoispuolella ja metro tunnelissa.
