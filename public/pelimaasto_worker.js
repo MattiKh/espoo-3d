@@ -2,8 +2,10 @@
 // karttaruutujen pintakuvat: jokaisella luokalla on oma tekstuurinsa (metsissä latvukset, pelloilla
 // vaot, vedessä aallot), ja kuviot lasketaan maailman koordinaateista, joten ne jatkuvat ruudusta
 // toiseen. Lisäksi metsiin sijoitellaan puut tasavälisestä ruudukosta satunnaisesti siirtäen.
+// Tarkat luokkaruudut (0,3 m) ovat vain kokeilualueelta; muualla Espoossa ja loitonnettaessa
+// käytetään yleiskuvan karkeampia luokkaruutuja (maanpeite.json: yleiskuva).
 
-const LC_ZOOM = 16; // luokkaruutujen taso
+const LC_ZOOM = 16; // tarkkojen luokkaruutujen taso
 const EARTH_CIRC = 40075016.686;
 const M = EARTH_CIRC * Math.cos((60.18 * Math.PI) / 180); // m Web Mercator -yksikköä kohden Espoossa
 const TILE_PX = 512;
@@ -15,17 +17,25 @@ const TREE_STEP = 4.5; // m: puiden ruudukko
 const TREE_HEIGHT = [0, 0, 0, 0, 0, 0, 6, 12, 17, 22]; // m luokittain
 
 let base = "", version = 0;
-const tiles = new Map(); // "x/y" → Promise<{ px, data } | null>
+let detail = null; // tarkkojen ruutujen alue [x0, y0, x1, y1] tasolla LC_ZOOM
+let overview = new Map(); // yleiskuvan taso → Set("x/y")
+const tiles = new Map(); // "z/x/y" → Promise<{ px, data } | null>
 
-function classTile(x, y) {
-  const key = `${x}/${y}`;
+function hasTile(z, x, y) {
+  if (z === LC_ZOOM) return !!detail && x >= detail[0] && x <= detail[2] && y >= detail[1] && y <= detail[3];
+  return !!overview.get(z)?.has(`${x}/${y}`);
+}
+
+function classTile(z, x, y) {
+  const key = `${z}/${x}/${y}`;
   let p = tiles.get(key);
   if (p) {
     tiles.delete(key);
     tiles.set(key, p);
     return p;
   }
-  p = fetch(`${base}tiles/maanpeite/${LC_ZOOM}/${x}/${y}.png?v=${version}`)
+  if (!hasTile(z, x, y)) return Promise.resolve(null);
+  p = fetch(`${base}tiles/maanpeite/${z}/${x}/${y}.png?v=${version}`)
     .then((r) => (r.ok ? r.blob() : null))
     .then((blob) => blob && createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" }))
     .then((bmp) => {
@@ -42,13 +52,13 @@ function classTile(x, y) {
   return p;
 }
 
-// Luokkaruudut, jotka kattavat Web Mercator -alueen; luokka pisteessä (0, jos ei tietoa).
-async function classSampler(X0, Y0, X1, Y1) {
-  const n = 2 ** LC_ZOOM, got = new Map();
+// Tason z luokkaruudut, jotka kattavat Web Mercator -alueen; luokka pisteessä (0, jos ei tietoa).
+async function classSampler(z, X0, Y0, X1, Y1) {
+  const n = 2 ** z, got = new Map();
   const tx0 = Math.floor(X0 * n), tx1 = Math.floor(X1 * n - 1e-12), ty0 = Math.floor(Y0 * n), ty1 = Math.floor(Y1 * n - 1e-12);
   const jobs = [];
   for (let tx = tx0; tx <= tx1; tx++) {
-    for (let ty = ty0; ty <= ty1; ty++) jobs.push(classTile(tx, ty).then((t) => got.set(tx * 100000 + ty, t)));
+    for (let ty = ty0; ty <= ty1; ty++) jobs.push(classTile(z, tx, ty).then((t) => got.set(tx * 100000 + ty, t)));
   }
   await Promise.all(jobs);
   let lastKey = -1, last = null;
@@ -133,9 +143,9 @@ function shade(c, wx, wy) {
       k = 1;
       r = 196; g = 120; b = 98;
       break;
-    default:
+    default: // ei tietoa (Espoon ulkopuolella): kartan taustaväri pelillisessä tilassa (app.js)
       k = 1;
-      r = 150; g = 158; b = 138;
+      r = 169; g = 185; b = 149;
   }
   out[0] = Math.min(255, r * k);
   out[1] = Math.min(255, g * k);
@@ -143,11 +153,35 @@ function shade(c, wx, wy) {
   return out;
 }
 
+// Luokan keskiväri (tekstuurin keskiarvo) loitonnettuun kuvaan, jossa tekstuurin hienot kuviot
+// sekoittuisivat kohinaksi.
+const MEAN = Array.from({ length: 14 }, (_, c) => {
+  const sum = [0, 0, 0];
+  for (let i = 0; i < 4000; i++) {
+    const [r, g, b] = shade(c, hash(i, c) * 997, hash(c, i) * 991);
+    sum[0] += r; sum[1] += g; sum[2] += b;
+  }
+  return sum.map((v) => v / 4000);
+});
+
+// Luokkaruutujen tasot maalattavan tason mukaan tarkimmasta alkaen: lähellä tarkat ruudut, niiden
+// ulkopuolella yleiskuva ja kauempaa yleiskuvan tasot, joista tarkin kattaa ruudun enintään
+// neljällä luokkaruudulla. Karkein taso on viimeisenä, sillä sen meri ulottuu laajimmalle.
+function levelsFor(z) {
+  const levels = [...overview.keys()].sort((a, b) => b - a);
+  if (z >= LC_ZOOM - 2 || !levels.length) return [LC_ZOOM, ...levels];
+  const i = levels.findIndex((l) => l <= z + 1);
+  return levels.slice(i < 0 ? -1 : i);
+}
+
 // Ruudun pintakuva pakkaamattomana 24-bittisenä BMP:nä (PNG:n pakkaus olisi hidasta).
 async function paintTile(z, x, y) {
   const n = 2 ** z, span = 1 / n, X0 = x / n, Y0 = y / n, S = TILE_PX;
-  const classAt = await classSampler(X0, Y0, X0 + span, Y0 + span);
-  const pxM = (span * M) / S, outline = pxM < 0.7, d = 0.35 / M;
+  // Luokkarajojen epäsäännöllisyys (r) kasvaa luokkaruudun pikselin koon mukaan (tarkoissa noin 0,3 m).
+  const samplers = await Promise.all(levelsFor(z).map(async (l) => ({
+    at: await classSampler(l, X0, Y0, X0 + span, Y0 + span), r: Math.max(1, M / 2 ** l / 1024 / 0.3),
+  })));
+  const pxM = (span * M) / S, outline = pxM < 0.7, flat = pxM > 3, d = 0.35 / M;
   const row = Math.ceil((S * 3) / 4) * 4, size = 54 + row * S, buf = new ArrayBuffer(size), dv = new DataView(buf), px = new Uint8Array(buf);
   dv.setUint16(0, 0x4d42, true);
   dv.setUint32(2, size, true);
@@ -162,12 +196,32 @@ async function paintTile(z, x, y) {
     const Y = Y0 + ((j + 0.5) / S) * span, wy = Y * M;
     for (let i = 0, o = 54 + j * row; i < S; i++, o += 3) {
       const X = X0 + ((i + 0.5) / S) * span, wx = X * M;
-      // Luokkarajat hieman epäsäännöllisiksi (käsin piirretty vaikutelma).
-      const jx = ((vnoise(wx * 0.8, wy * 0.8) - 0.5) * 0.5) / M, jy = ((vnoise(wx * 0.8 + 31.7, wy * 0.8) - 0.5) * 0.5) / M;
-      const c = classAt(X + jx, Y + jy);
-      const [r, g, b] = shade(c, wx, wy);
-      // Luokkien rajoille tumma ääriviiva lähikuvassa.
-      const e = outline && (classAt(X + jx + d, Y + jy) !== c || classAt(X + jx, Y + jy + d) !== c) ? 0.74 : 1;
+      let c = 0, e = 1;
+      for (const { at, r } of samplers) {
+        // Luokkarajat hieman epäsäännöllisiksi (käsin piirretty vaikutelma). Karkeassa luokkaruudussa
+        // lisäksi pikselin kokoinen vaihtelu, jottei pikselien porrastus näy lähikuvassa.
+        let jx = (vnoise((wx * 0.8) / r, (wy * 0.8) / r) - 0.5) * 0.5 * r;
+        let jy = (vnoise((wx * 0.8) / r + 31.7, (wy * 0.8) / r) - 0.5) * 0.5 * r;
+        if (r > 1) {
+          jx += (vnoise((wx * 4) / r, (wy * 4) / r + 57.3) - 0.5) * 0.6 * r;
+          jy += (vnoise((wx * 4) / r + 91.1, (wy * 4) / r) - 0.5) * 0.6 * r;
+        }
+        jx /= M;
+        jy /= M;
+        c = at(X + jx, Y + jy);
+        if (!c) continue;
+        // Luokkien rajoille tumma ääriviiva lähikuvassa.
+        if (outline && (at(X + jx + d, Y + jy) !== c || at(X + jx, Y + jy + d) !== c)) e = 0.74;
+        break;
+      }
+      let r, g, b;
+      if (flat) { // keskiväri ja loiva vaihtelu
+        const v = 0.96 + 0.08 * vnoise(wx / (pxM * 20), wy / (pxM * 20));
+        [r, g, b] = MEAN[c];
+        r *= v; g *= v; b *= v;
+      } else {
+        [r, g, b] = shade(c, wx, wy);
+      }
       px[o] = b * e;
       px[o + 1] = g * e;
       px[o + 2] = r * e;
@@ -179,7 +233,7 @@ async function paintTile(z, x, y) {
 // Puut metsäluokissa ympyrän (keskipiste Web Mercator -yksiköissä, säde metreinä) sisällä:
 // [X, Y, korkeus (m), havupuu (0/1), satunnaisluku 0–1, ...].
 async function plantTrees(cx, cy, radius) {
-  const r = radius / M, classAt = await classSampler(cx - r, cy - r, cx + r, cy + r);
+  const r = radius / M, classAt = await classSampler(LC_ZOOM, cx - r, cy - r, cx + r, cy + r);
   const out = [], s = TREE_STEP, wx0 = cx * M, wy0 = cy * M;
   for (let gx = Math.floor((wx0 - radius) / s); gx <= Math.ceil((wx0 + radius) / s); gx++) {
     for (let gy = Math.floor((wy0 - radius) / s); gy <= Math.ceil((wy0 + radius) / s); gy++) {
@@ -199,6 +253,12 @@ self.onmessage = async ({ data: msg }) => {
   try {
     if (msg.type === "init") {
       ({ base, version } = msg);
+      const [w, s, e, nb] = msg.info.alue, k = 2 ** LC_ZOOM;
+      const tx = (lon) => Math.floor(((lon + 180) / 360) * k);
+      const ty = (lat) => Math.floor(((1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2) * k);
+      detail = [tx(w + 1e-9), ty(nb - 1e-9), tx(e - 1e-9), ty(s + 1e-9)];
+      overview = new Map(Object.entries(msg.info.yleiskuva?.tasot ?? {}).map(([l, xy]) =>
+        [Number(l), new Set(xy.flatMap((v, i) => (i % 2 ? [] : [`${v}/${xy[i + 1]}`])))]));
     } else if (msg.type === "tile") {
       const buffer = await paintTile(msg.z, msg.x, msg.y);
       self.postMessage({ id: msg.id, buffer }, [buffer]);

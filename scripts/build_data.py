@@ -1997,6 +1997,9 @@ LANDCOVER_LAYERS = ["merialue"] + LANDCOVER_CLASSES
 LANDCOVER_BBOX = (24.80, 60.175, 24.85, 60.195)  # Otaniemi–Laajalahti
 LANDCOVER_AREA_ZOOM = 14  # alue koostuu kokonaisista tämän tason ruuduista (selaimen alin taso)
 LANDCOVER_ZOOM, LANDCOVER_PX = 16, 1024  # luokkaruudut: 1024 px, noin 0,3 m
+# Yleiskuva loitonnettuun näkymään koko Espoosta: taso 12 haetaan HSY:ltä (1024 px, noin 4,8 m),
+# taso 9 (noin 38 m) kootaan siitä yleisimmällä luokalla (HSY:n palvelin ei ehdi piirtää niin laajaa kuvaa).
+LANDCOVER_OVERVIEW = (12, 9)
 
 
 def landcover_area():
@@ -2054,11 +2057,121 @@ def build_landcover():
             total += os.path.getsize(dest)
     lon0, lat1 = merc_to_lonlat(-world / 2 + x0 * world / a, world / 2 - y0 * world / a)
     lon1, lat0 = merc_to_lonlat(-world / 2 + (x1 + 1) * world / a, world / 2 - (y1 + 1) * world / a)
+    log(f"  → tiles/maanpeite: {len(tiles)} ruutua, {total / 1e6:.1f} Mt")
+    overview = build_landcover_overview(lut, layers)
     with open(os.path.join(PUBLIC_DATA, "maanpeite.json"), "w", encoding="utf-8") as fh:
         json.dump({"lahde": "HSY, Helsingin seudun maanpeiteaineisto 2024", "luokat": LANDCOVER_CLASSES,
-                   "taso": LANDCOVER_ZOOM, "alue": [lon0, lat0, lon1, lat1]}, fh, ensure_ascii=False)
-    log(f"  → tiles/maanpeite: {len(tiles)} ruutua, {total / 1e6:.1f} Mt")
+                   "taso": LANDCOVER_ZOOM, "alue": [lon0, lat0, lon1, lat1], "yleiskuva": overview}, fh, ensure_ascii=False)
     build_landcover_lines(lonlat_to_merc(lon0, lat0) + lonlat_to_merc(lon1, lat1))
+
+
+def build_landcover_overview(lut, layers):
+    """Pelillisen maaston yleiskuva koko Espoosta (LANDCOVER_OVERVIEW): luokkaruudut kuten
+    build_landcover, Espoon rajan ulkopuolella 0 merta lukuun ottamatta. Karkeassa kuvassa HSY:n pienet kuviot jäävät
+    piirtymättä, joten raon täyttää viereinen luokka. Palauttaa tasojen ruudut ja alueen
+    maanpeite.json-tiedostoon."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    z, low = LANDCOVER_OVERVIEW
+    with open(os.path.join(PUBLIC_DATA, "espoo_raja.geojson"), encoding="utf-8") as fh:
+        geoms = [f["geometry"] for f in json.load(fh)["features"]]
+    # Ulkoreunat (Kauniainen on Espoon sisällä, joten se on mukana).
+    rings = [[lonlat_to_merc(lon, lat) for lon, lat in poly[0]] for g in geoms
+             for poly in (g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]])]
+    world, size = 2 * math.pi * R, 2 * math.pi * R / 2 ** z
+    xs, ys = [x for r in rings for x, _ in r], [y for r in rings for _, y in r]
+    tx0, tx1 = int((min(xs) + world / 2) // size), int((max(xs) + world / 2) // size)
+    ty0, ty1 = int((world / 2 - max(ys)) // size), int((world / 2 - min(ys)) // size)
+    out, px = os.path.join(TILES, "maanpeite"), LANDCOVER_PX
+    os.makedirs(os.path.join(CACHE, "maanpeite", "yleis"), exist_ok=True)
+
+    def mask_of(tx, ty):
+        bx, by = -world / 2 + tx * size, world / 2 - ty * size
+        img = Image.new("1", (px, px), 0)
+        draw = ImageDraw.Draw(img)
+        for r in rings:
+            draw.polygon([((x - bx) / size * px, (by - y) / size * px) for x, y in r], fill=1)
+        return np.asarray(img, bool)
+
+    def fetch(t, tz=z, tpx=px, lyr=layers, prefix=""):
+        span = world / 2 ** tz
+        bx, by = -world / 2 + t[0] * span, world / 2 - t[1] * span
+        dest = os.path.join(CACHE, "maanpeite", "yleis", f"{prefix}{tz}_{t[0]}_{t[1]}.png")
+        try:
+            return http_get(HSY_WMS, {"SERVICE": "WMS", "VERSION": "1.1.1", "REQUEST": "GetMap", "LAYERS": lyr, "STYLES": "",
+                                      "SRS": "EPSG:3857", "WIDTH": tpx, "HEIGHT": tpx, "FORMAT": "image/png",
+                                      "TRANSPARENT": "TRUE", "FORMAT_OPTIONS": "antialias:none",
+                                      "BBOX": f"{bx},{by - span},{bx + span},{by}"}, dest, timeout=600, retries=2)
+        except RuntimeError:  # tiheä ruutu ei ehdi HSY:n yhdyskäytävän aikarajaan: neljänä palana
+            if tpx < 256:
+                raise
+            img, half = Image.new("RGBA", (tpx, tpx)), tpx // 2
+            for i in range(2):
+                for j in range(2):
+                    sub = fetch((2 * t[0] + i, 2 * t[1] + j), tz + 1, half, lyr, prefix)
+                    img.paste(Image.open(sub).convert("RGBA"), (i * half, j * half))
+            img.save(dest)
+            return dest
+
+    # Meri (HSY:n merialue yksinään on nopea hakea) näytetään myös Espoon rajan ulkopuolella, jottei
+    # rannikko katkea rajaan; naapurikuntien maa jää tyhjäksi.
+    def sea_of(t, tz=z):
+        path = fetch(t, tz, px, "asuminen_ja_maankaytto:maanpeite_merialue_2024", "meri_")
+        return np.asarray(Image.open(path).convert("RGBA"))[..., 3] > 127
+
+    land = {(tx, ty): mask_of(tx, ty) for tx in range(tx0, tx1 + 1) for ty in range(ty0, ty1 + 1)}
+    full = [t for t, m in land.items() if m.any()]
+    with cf.ThreadPoolExecutor(max_workers=2) as ex:
+        paths = dict(zip(full, ex.map(fetch, full)))
+    tiles, grids, total = [], {}, 0
+    for t, mask in land.items():
+        cls = np.zeros((px, px), np.uint8)
+        if t in paths:
+            rgba = np.asarray(Image.open(paths[t]).convert("RGBA")).astype(np.uint32)
+            cls = np.where(rgba[..., 3] > 127, lut[(rgba[..., 0] << 16) | (rgba[..., 1] << 8) | rgba[..., 2]], 0).astype(np.uint8)
+            for _ in range(8):  # raot viereisellä luokalla
+                hole = (cls == 0) & mask
+                if not hole.any():
+                    break
+                for shift in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                    src = np.roll(cls, shift, (0, 1))
+                    take = hole & (src > 0)
+                    cls[take] = src[take]
+                    hole &= ~take
+            cls[~mask] = 0
+        cls[(cls == 0) & sea_of(t)] = 1
+        if not cls.any():
+            continue
+        tiles.append(t)
+        grids[t] = cls
+        dest = os.path.join(out, str(z), str(t[0]), f"{t[1]}.png")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        Image.fromarray(cls).save(dest, optimize=True)
+        total += os.path.getsize(dest)
+    # Alempi taso: f × f ruutua yhdeksi, pikseliin lohkon yleisin luokka (myös 0, jotta raja säilyy);
+    # meri koko ruudun alueelta, sillä selain käyttää tätä tasoa myös tarkempien ulkopuolella.
+    f, index = 2 ** (z - low), {str(z): [v for t in tiles for v in t], str(low): []}
+    for lx in range(tx0 // f, tx1 // f + 1):
+        for ly in range(ty0 // f, ty1 // f + 1):
+            big = np.zeros((f * px, f * px), np.uint8)
+            for (tx, ty), cls in grids.items():
+                if tx // f == lx and ty // f == ly:
+                    big[(ty - ly * f) * px:(ty - ly * f + 1) * px, (tx - lx * f) * px:(tx - lx * f + 1) * px] = cls
+            blocks = big.reshape(px, f, px, f)
+            counts = np.stack([(blocks == k).sum((1, 3)) for k in range(len(LANDCOVER_CLASSES) + 1)], -1)
+            cls = counts.argmax(-1).astype(np.uint8)
+            cls[(cls == 0) & sea_of((lx, ly), low)] = 1
+            if not cls.any():
+                continue
+            dest = os.path.join(out, str(low), str(lx), f"{ly}.png")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            Image.fromarray(cls).save(dest, optimize=True)
+            total += os.path.getsize(dest)
+            index[str(low)] += [lx, ly]
+    lon0, lat1 = merc_to_lonlat(-world / 2 + tx0 * size, world / 2 - ty0 * size)
+    lon1, lat0 = merc_to_lonlat(-world / 2 + (tx1 + 1) * size, world / 2 - (ty1 + 1) * size)
+    log(f"  → yleiskuva: {len(tiles)} + {len(index[str(low)]) // 2} ruutua, {total / 1e6:.1f} Mt")
+    return {"tasot": index, "alue": [lon0, lat0, lon1, lat1]}
 
 
 # Pelillisen maaston päälle kantakartan teiden reunaviivat ja kadunnimet (sama alue).

@@ -1,7 +1,8 @@
-// Pelillinen maasto (kokeilu, Otaniemi–Laajalahti). HSY:n maanpeiteaineiston luokat (metsät
-// korkeusluokittain, pellot, tiet, vesi, ...) ovat valmiina rasteriruutuina (scripts/build_data.py,
-// public/tiles/maanpeite). Selain maalaa niistä työsäikeessä (pelimaasto_worker.js) tekstuurit, ja
-// MapLibre levittää ne maaston päälle kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
+// Pelillinen maasto (kokeilu). HSY:n maanpeiteaineiston luokat (metsät korkeusluokittain, pellot,
+// tiet, vesi, ...) ovat valmiina rasteriruutuina (scripts/build_data.py, public/tiles/maanpeite):
+// Otaniemi–Laajalahti tarkkoina (0,3 m) ja koko Espoo yleiskuvana (noin 5 ja 38 m). Selain maalaa
+// niistä työsäikeessä (pelimaasto_worker.js) tekstuurit, ja MapLibre levittää ne maaston päälle
+// kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
 // Päällä ovat kantakartan teiden ja polkujen reunaviivat, kadunnimet kantakartan sijainnein ja
 // suunnin sekä OpenStreetMapista kaistaviivat, suojatiet ja raiteet (public/data/pelimaasto_kanta.geojson).
 // Metsiin voi valita kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
@@ -171,15 +172,19 @@ function treeMeshes() {
 
 export async function createGameTerrain(map, { base, version }) {
   const info = await fetch(`${base}data/maanpeite.json?v=${version}`).then((r) => r.json());
-  worker.postMessage({ type: "init", base, version });
+  worker.postMessage({ type: "init", base, version, info });
   const layers = map.getStyle().layers, before = layers[layers.findIndex((l) => l.id === "ortho") + 1]?.id;
+  // Yleiskuvan ansiosta pinta näkyy myös loitonnettaessa koko Espoon näkymään asti.
+  const all = info.yleiskuva?.alue ?? info.alue;
+  const bounds = [Math.min(all[0], info.alue[0]), Math.min(all[1], info.alue[1]), Math.max(all[2], info.alue[2]), Math.max(all[3], info.alue[3])];
   map.addSource("pelimaasto", {
-    type: "raster", tiles: ["peli://{z}/{x}/{y}"], tileSize: 512, minzoom: 14, maxzoom: 19, bounds: info.alue,
+    type: "raster", tiles: ["peli://{z}/{x}/{y}"], tileSize: 512, minzoom: info.yleiskuva ? 8 : 14, maxzoom: 19, bounds,
     attribution: "Maanpeite © HSY",
   });
   map.addSource("pelimaasto-dem", {
     // Pelillisen tilan korkeusmalli (sillat auki, bridges.js), sillä varjostus näkyy vain siinä.
-    type: "raster-dem", tiles: ["dem://{z}/{x}/{y}?peli"], encoding: "terrarium", tileSize: 512, maxzoom: 15, bounds: info.alue,
+    // Varjostus koko näkymään, jottei yleiskuvan reuna erotu taustasta.
+    type: "raster-dem", tiles: ["dem://{z}/{x}/{y}?peli"], encoding: "terrarium", tileSize: 512, maxzoom: 15,
   });
   map.addLayer({ id: "pelimaasto", type: "raster", source: "pelimaasto", layout: { visibility: "none" }, paint: { "raster-fade-duration": 0 } }, before);
   map.addLayer({
@@ -365,11 +370,6 @@ export async function createGameTerrain(map, { base, version }) {
   function setVisible(on) {
     visible = on;
     for (const id of LAYER_IDS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
-    // Lähemmäs, jotta tekstuurit ja puut (TREE_MINZOOM) näkyvät heti.
-    const here = map.getCenter().toArray(), inside = inArea(here);
-    if (on && (!inside || map.getZoom() < TREE_MINZOOM + 0.5)) {
-      map.flyTo({ center: inside ? here : center, zoom: 16.4, pitch: 60, bearing: map.getBearing(), duration: 2000 });
-    }
     map.triggerRepaint();
   }
 

@@ -447,7 +447,7 @@ function setVisible(def, on) {
   } else if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else if (def.wms) {
-    map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
+    map.setLayoutProperty(def.id, "visibility", on && !(def.hideInGame && state.game) ? "visible" : "none");
   } else {
     for (const l of map.getStyle().layers) {
       if (l.id.startsWith(def.id + "__")) map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
@@ -478,6 +478,7 @@ let gameTerrain = null;
 async function setGameTerrain(on) {
   state.game = on;
   document.getElementById("pelimaasto").checked = on;
+  for (const def of LAYERS.filter((d) => d.hideInGame)) setVisible(def, def.on);
   if (on && state.ortho) setOrtho(false);
   updateBackground();
   if (on && !gameTerrain) {

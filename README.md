@@ -472,8 +472,9 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 
 ## Pelillinen maasto (kokeilu)
 
-Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä Otaniemen ja Laajalahden alueella (noin
-3,6 × 2,4 km): valinta Ilmakuva-osiossa tai suoraan osoitteella `?peli` (esim.
+Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä: koko Espoo maanpeitteen mukaan
+väritettynä ja Otaniemen ja Laajalahden alue (noin 3,6 × 2,4 km) tarkkana. Valinta on
+Ilmakuva-osiossa, tai pelillisen tilan saa suoraan osoitteella `?peli` (esim.
 http://localhost:8765/?peli). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
 maa, avokalliot, puusto neljässä korkeusluokassa (2–10, 10–15, 15–20 ja yli 20 m), muut päällystetyt
 pinnat, päällystämättömät ja päällystetyt tiet sekä rakennukset. `build_data.py` hakee luokat
@@ -482,19 +483,33 @@ HSY:n karttapalvelusta yhtenä kuvana ruutua kohden ja tunnistaa luokan tyylin t
 `public/tiles/maanpeite` (taso 16, 1024 px eli noin 0,3 m; 96 ruutua, 3,7 Mt). Koko Espoo veisi
 samalla tarkkuudella arviolta 0,15–0,2 Gt ja 1 metrin tarkkuudella 30–40 Mt.
 
+Loitonnettua näkymää varten koko Espoosta on yleiskuva (`build_landcover_overview`): taso 12
+(1024 px eli noin 4,8 m) haetaan HSY:ltä ja taso 9 (noin 38 m) kootaan siitä ruudun yleisimmällä
+luokalla, sillä HSY:n palvelin ei ehdi piirtää niin laajaa kuvaa. Tiheät ruudut eivät ehdi
+palvelimen aikarajaan kokonaisina, joten ne haetaan neljänä palana. Karkeassa kuvassa pienimmät
+kuviot jäävät piirtymättä, ja raot täytetään viereisellä luokalla. Espoon rajan (rantaviiva)
+ulkopuolelta mukana on vain meri, jonka HSY:n merialue-taso antaa nopeasti yksinään, jottei
+rannikko katkea rajaan; tasolla 9 meri on koko ruudun alueelta. Naapurikuntien maa jää tyhjäksi
+(35 + 4 ruutua, 4,7 Mt).
+
 Selain maalaa luokista tekstuurit työsäikeessä (`public/pelimaasto_worker.js`): metsissä on
 latvuksia (korkeammassa puustossa suurempia ja tummempia), pelloilla vakoja, vedessä aaltoja, kalliossa
 halkeamia, pihoilla laatoitus ja teillä asfaltti tai sora. Kuviot lasketaan maailman
 koordinaateista, joten ne jatkuvat ruudusta toiseen, ja luokkarajat ovat hieman epäsäännöllisiä ja
 lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle kuten ilmakuvan
-(tasot 14–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
+(tasot 8–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
+Luokat tulevat tarkoista ruuduista niiden alueella ja muualla yleiskuvasta, jolloin luokkarajojen
+epäsäännöllisyys kasvaa ruudun karkeuden mukaan. Kauempaa katsottaessa (pikseli yli 3 m) luokat
+väritetään tekstuurin keskivärillä, sillä hienot kuviot sekoittuisivat kohinaksi.
 Ruudun maalaus vie työsäikeessä 13–50 ms.
 
 Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja polkujen reunaviivat
 (myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
 (`public/data/pelimaasto_kanta.geojson`, 3 Mt). Nimet ovat maaston
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
-luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja alueen ulkopuoli on vihertävän harmaa.
+luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja Espoon ulkopuoli on vihertävän harmaa
+(rinnevarjostus on koko näkymässä). Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa
+samasta aineistosta. Viivat, sillat ja puut ovat vain tarkalla alueella.
 
 Lisäksi OpenStreetMapista ovat kaistaviivat, suojatiet ja raiteet. Pääteille (moottori-, valta-,
 kanta-, seutu- ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan)

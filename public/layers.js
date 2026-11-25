@@ -123,9 +123,10 @@ export const LAYERS = [
   // Espoon omista vesiaineistoista (WFS GIS:Vesialueet ja WMS Vesistot) puuttuu paloja
   // merialueesta, esim. Haukilahden lahdelta. HSY:n maanpeiteaineistossa meri ja sisävedet ovat
   // kokonaisina. HSY:n oletussininen vaalennetaan, ja reunojen pehmennys otetaan pois, jottei
-  // karttaruutujen rajoille jää vaaleita saumoja.
+  // karttaruutujen rajoille jää vaaleita saumoja. Pelillisessä maastossa vedet ovat jo pinnassa
+  // samasta aineistosta, joten taso piilotetaan (hideInGame).
   {
-    id: "wms_vesialueet", title: "Vesialueet", on: true, service: "hsy",
+    id: "wms_vesialueet", title: "Vesialueet", on: true, service: "hsy", hideInGame: true,
     wms: "asuminen_ja_maankaytto:maanpeite_merialue_2024,asuminen_ja_maankaytto:maanpeite_vesi_2024",
     params: { FORMAT_OPTIONS: "antialias:none" },
     paint: { "raster-brightness-min": 0.3, "raster-saturation": -0.15 },
