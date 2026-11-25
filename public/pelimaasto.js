@@ -315,21 +315,35 @@ export async function createGameTerrain(map, { base, version }) {
     return lon > w && lon < e && lat > s && lat < n;
   }
 
-  // Uudet puut keskipisteen ympäriltä (työsäie), korkeudet haetaan vähitellen.
+  // Uudet puut keskipisteen ympäriltä (työsäie), korkeudet haetaan vähitellen. Puut ovat kiinteässä
+  // ruudukossa maailman koordinaateissa, joten edelliseltä kerralta tutut puut sijoitetaan heti
+  // samalle korkeudelle ja maastosta haetaan vain uusien korkeus; muuten metsä välähtäisi, kun
+  // kaikki puut piilotettaisiin ja palautettaisiin vähitellen.
   async function plant(c) {
     asking = true;
     try {
       const { trees: t } = await ask({ type: "trees", x: mercX(c.lng), y: mercY(c.lat), radius: TREE_RADIUS });
       if (!treesOn) return;
+      const known = new Map();
+      for (let i = 0; heights && i < heights.length; i++) {
+        if (!Number.isNaN(heights[i])) known.set(`${trees[5 * i]},${trees[5 * i + 1]}`, heights[i]);
+      }
       trees = t;
       ref = { lon: c.lng, lat: c.lat, unit: EARTH_CIRC * Math.cos(c.lat * D2R) };
-      heights = new Float32Array(trees.length / 5).fill(NaN);
+      heights = new Float32Array(trees.length / 5);
       next = 0;
       passes = 0;
-      for (const mesh of Object.values(meshes)) mesh.count = Math.min(TREE_MAX, heights.length);
-      const hide = new THREE.Matrix4().makeScale(0, 0, 0);
-      for (let i = 0; i < Math.min(TREE_MAX, heights.length); i++) {
-        for (const mesh of Object.values(meshes)) mesh.setMatrixAt(i, hide);
+      const n = Math.min(TREE_MAX, heights.length), hide = new THREE.Matrix4().makeScale(0, 0, 0);
+      for (const mesh of Object.values(meshes)) mesh.count = n;
+      for (let i = 0; i < heights.length; i++) {
+        heights[i] = known.get(`${trees[5 * i]},${trees[5 * i + 1]}`) ?? NaN;
+        if (i >= n) continue;
+        if (Number.isNaN(heights[i])) for (const mesh of Object.values(meshes)) mesh.setMatrixAt(i, hide);
+        else placeTree(i, heights[i]);
+      }
+      for (const mesh of Object.values(meshes)) {
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
       }
     } finally {
       asking = false;
@@ -353,7 +367,8 @@ export async function createGameTerrain(map, { base, version }) {
     crown.setColorAt(i, color);
   }
 
-  // Korkeudet maastosta piirtokerroittain (HEIGHT_BUDGET); yksi uusintakierros, kun korkeusmalli tarkentuu.
+  // Korkeudet maastosta piirtokerroittain (HEIGHT_BUDGET); ensimmäisellä kierroksella vain uusille
+  // puille, ja yksi uusintakierros kaikille, kun korkeusmalli tarkentuu.
   function fillHeights(now) {
     if (!heights || next >= heights.length && (passes > 1 || now - passAt < HEIGHT_RECHECK)) return false;
     if (next >= heights.length) {
@@ -362,7 +377,9 @@ export async function createGameTerrain(map, { base, version }) {
     }
     const base = map.transform.elevation ?? 0, n = Math.min(heights.length, TREE_MAX);
     let used = 0;
-    for (; next < n && used < HEIGHT_BUDGET; next++, used++) {
+    for (; next < n && used < HEIGHT_BUDGET; next++) {
+      if (passes === 0 && !Number.isNaN(heights[next])) continue; // tuttu puu, jo paikallaan
+      used++;
       const q = map.queryTerrainElevation([lonOfX(trees[5 * next]), latOfY(trees[5 * next + 1])]);
       if (q == null) continue;
       heights[next] = q + base;

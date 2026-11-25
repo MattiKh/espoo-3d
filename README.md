@@ -554,7 +554,9 @@ Metsiin voi valita (Pelillinen maasto → 3D-puut metsissä tai osoitteella `?pe
 keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää) matalapolygonisia 3D-puita
 (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti siirrettynä, puun korkeus puustoluokasta, matalammassa puustossa enimmäkseen lehtipuita (pyöreä
 latvus) ja korkeammassa havupuita (kartio). Puita on noin 10 000, ja niiden korkeus haetaan
-maastosta vähitellen. Puut piirretään instansseina joukkoliikenteen 3D-tasolle; piirto vie noin
+maastosta vähitellen. Kun keskipiste siirtyy 150 m, puut sijoitellaan uudelleen; edelliseltä
+kerralta tutut puut (sama ruudukon kohta) pysyvät paikallaan, ja korkeus haetaan vain uusille,
+jottei metsä välähdä liikkuessa. Puut piirretään instansseina joukkoliikenteen 3D-tasolle; piirto vie noin
 4 ms. Puut ovat oletuksena pois, sillä ne ovat pelillisen maaston raskain osa: noin 0,7 miljoonaa
 kolmiota joka kuvassa, noin 10 Mt ilmentymätietoja ja 150 metrin siirron jälkeen uudet
 korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä keventää puhelinkäyttöä.
