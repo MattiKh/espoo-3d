@@ -1852,8 +1852,8 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
     nostettu maanpinnan yläpuolelle (dem_patch), kansioon public/tiles/korkeus/z/x/y.webp.
     Tarkimmista tiilistä tallennetaan nostettujen pikselien maanpinta (korkeus/maa/x/y.webp; muualla
     musta), jotta selain voi pitää sillan ali kulkevat ajoneuvot ja uomat alla olevalla pinnalla.
-    Pelillisen maaston alueelta tallennetaan lisäksi versio, jossa korkeat jänteet (GAME_SPAN) ovat
-    auki (korkeus/peli/z/x/y.webp). Palauttaa muutettujen tiilten luettelot {z: [x, y, ...]}:
+    Pelillisen maaston alueelta tallennetaan lisäksi versio, jossa nostot ovat auki OSM:n siltojen
+    kohdalla (siltaalat; sillat ovat 3D-malleja) (korkeus/peli/z/x/y.webp). Palauttaa muutettujen tiilten luettelot {z: [x, y, ...]}:
     tavallinen ja pelillinen."""
     import numpy as np
     from PIL import Image
@@ -1890,11 +1890,11 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
             anchors = ((p[:, 0] * n - tx) * W).astype(int), ((p[:, 1] * n - ty) * H).astype(int), p[:, 2]
             new, lifted, ground, bridge_area = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
             if tx + 1 > gx0 * n and tx < (gx1 + 1) * n and ty + 1 > gy0 * n and ty < (gy1 + 1) * n:
-                # Pelillisen maaston korkeusmalli: korkeat jänteet auki siltojen kohdalla (siltaalat: OSM:n
-                # sillat, jotka ovat 3D-malleja), muualla täytettyinä kuten ennen. Avattua jännettä
+                # Pelillisen maaston korkeusmalli: siltojen kohdalla (siltaalat: OSM:n sillat, jotka ovat
+                # 3D-malleja) kaikki nostot auki, muualla täytettyinä kuten ennen. Avattua kohtaa
                 # laajennetaan sillan alueella noin 3,5 m (z15: 3 pikseliä), jottei sen reunaan jää
                 # rosoista täytön seinämää.
-                opened = lifted & bridge_area & (new - ground > GAME_SPAN)
+                opened = lifted & bridge_area
                 for _ in range({15: 3, 14: 2}.get(z, 1)):
                     grown = opened.copy()
                     grown[1:] |= opened[:-1]
@@ -1997,7 +1997,6 @@ LANDCOVER_LAYERS = ["merialue"] + LANDCOVER_CLASSES
 LANDCOVER_BBOX = (24.80, 60.175, 24.85, 60.195)  # Otaniemi–Laajalahti
 LANDCOVER_AREA_ZOOM = 14  # alue koostuu kokonaisista tämän tason ruuduista (selaimen alin taso)
 LANDCOVER_ZOOM, LANDCOVER_PX = 16, 1024  # luokkaruudut: 1024 px, noin 0,3 m
-GAME_SPAN = 2.5  # m: tätä korkeammat jänteet ovat pelillisessä maastossa 3D-siltoja, matalammat täytetään
 
 
 def landcover_area():
@@ -2283,7 +2282,7 @@ GAME_LINE_ABOVE = 2.0  # m: sillan alueella näin korkealla maanpinnasta kulkeva
 
 def dem_sampler():
     """Korkeusmallin korkeus (m) paikallisten metrien pisteessä z15-tiilistä: nostettu (siltojen kohdalla
-    public/tiles/korkeus) tai alkuperäinen."""
+    public/tiles/korkeus), alkuperäinen (lifted=False) tai pelillisen maaston (lifted="peli")."""
     cache = {}
 
     def dem(x, y, lifted=True):
@@ -2291,7 +2290,8 @@ def dem_sampler():
         X, Y = X * 2 ** 15, Y * 2 ** 15
         key = (int(X), int(Y), lifted)
         if key not in cache:
-            path = os.path.join(TILES, "korkeus", "15", str(key[0]), f"{key[1]}.webp")
+            sub = ["peli", "15"] if lifted == "peli" else ["15"]
+            path = os.path.join(TILES, "korkeus", *sub, str(key[0]), f"{key[1]}.webp")
             cache[key] = dem_read(path if lifted and os.path.exists(path) else dem_tile(15, key[0], key[1]))[1]
         a = cache[key]
         return float(a[int((Y - key[1]) * a.shape[0]), int((X - key[0]) * a.shape[1])])
@@ -2299,8 +2299,10 @@ def dem_sampler():
 
 
 def bridge_test(ways):
-    """Funktio (x, y, z) → onko piste sillan kannella: OSM:n sillan alueella (kansi + 2 m) ja
-    vähintään GAME_LINE_ABOVE alkuperäisen korkeusmallin (josta sillat on poistettu) yläpuolella."""
+    """Funktio (x, y, z) → jätetäänkö viivan piste pois maanpinnasta: sillan kannella (OSM:n sillan
+    alueella, kansi + 2 m, ja vähintään GAME_LINE_ABOVE alkuperäisen korkeusmallin yläpuolella, josta
+    sillat on poistettu) tai sillan penkereen sisällä (vähintään GAME_LINE_ABOVE pelillisen maaston
+    pinnan alapuolella, esim. alikulku, jonka kohdalta penger on täytetty)."""
     dem, polys = dem_sampler(), []
     for tags, pts, _ in ways:
         kind = bridge_kind(tags)
@@ -2310,6 +2312,8 @@ def bridge_test(ways):
             polys.append((min(xs), min(ys), max(xs), max(ys), [ring + [ring[0]]]))
 
     def test(x, y, z):
+        if z < dem(x, y, "peli") - GAME_LINE_ABOVE:
+            return True
         return any(a <= x <= c and b <= y <= d and point_in_polygon(x, y, poly) for a, b, c, d, poly in polys) \
             and z - dem(x, y, False) > GAME_LINE_ABOVE
     return test
@@ -2382,8 +2386,8 @@ def resample_line(pts, step):
 def game_bridges(ways):
     """Pelillisen maaston 3D-sillat OSM:n siltaosuuksista [(tagit, [(x, y), ...], solmut)]. Kannen
     korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
-    kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä (silta, jolle kansia ei
-    ole). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
+    kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien
+    pinnasta sillan ulkopuolelta (silta, jolle kansia ei ole, tai kansi mitattu ajorataa alempaa). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
     Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide}]."""
     dem, out = dem_sampler(), []
     for tags, pts, _ in ways:
@@ -2396,7 +2400,13 @@ def game_bridges(ways):
             s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
         zl = [dem(x, y) for x, y, _ in line]
         zo = [dem(x, y, False) for x, y, _ in line]
-        z0, z1 = zl[0], zl[-1]
+        # Päiden korkeus tien pinnasta 4 m sillan ulkopuolelta (kantakartan kansi voi olla mitattu ajorataa
+        # alempaa, esim. alikulun kohdalla).
+        ends = []
+        for a, c in ((line[0], line[1]), (line[-1], line[-2])):
+            ln = math.hypot(a[0] - c[0], a[1] - c[1]) or 1.0
+            ends.append(dem(a[0] + (a[0] - c[0]) / ln * 4, a[1] + (a[1] - c[1]) / ln * 4))
+        z0, z1 = ends
         z = [max(h, z0 + (z1 - z0) * t / (s[-1] or 1)) for h, t in zip(zl, s)]
         z = [sorted(z[max(0, i - 2):i + 3])[len(z[max(0, i - 2):i + 3]) // 2] for i in range(len(z))]  # mediaani
         if max(a - b for a, b in zip(z, zo)) < 1.0:

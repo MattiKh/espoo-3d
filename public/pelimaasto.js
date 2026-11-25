@@ -50,8 +50,9 @@ maplibregl.addProtocol("peli", async (params) => {
 // Pelillisen maaston korkeusmallissa korkeat jänteet ovat auki, joten sillan alta kulkeva tie näkyy.
 const DECK = 1.0, RAIL_H = 0.9, RAIL_T = 0.25; // m: kannen paksuus, kaiteen korkeus ja paksuus
 const PIER_STEP = 24, PIER_DEPTH = 40, END_EXTRA = 2; // m: pilarien väli ja syvyys, kantta jatketaan päistä
-const BRIDGE_TOP = { tie: [0.3, 0.31, 0.34], kevyt: [0.68, 0.64, 0.56], raide: [0.42, 0.39, 0.35] };
-const CONCRETE = [0.74, 0.73, 0.7], RAILING = [0.5, 0.55, 0.6];
+// Värit ovat tummia, sillä 3D-tason valaistus on kirkas (kannen pinta vastaa maaston asfalttia).
+const BRIDGE_TOP = { tie: [0.12, 0.125, 0.14], kevyt: [0.4, 0.37, 0.32], raide: [0.22, 0.2, 0.18] };
+const CONCRETE = [0.46, 0.45, 0.43], RAILING = [0.3, 0.33, 0.36];
 
 function bridgeMesh(list, ref, exag) {
   const pos = [], col = [];

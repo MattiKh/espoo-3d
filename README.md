@@ -514,13 +514,15 @@ pinnassa asfaltti, kevyen liikenteen sillalla vaalea ja raidesillalla sepeli), r
 kaiteet ja 24 metrin välein pilarit. Ne tehdään OpenStreetMapin siltaosuuksista
 (`public/data/pelimaasto_sillat.json`, alueella 23 siltaa); kannen leveys tulee kaistamäärästä
 (+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
-kannet) tai, jos se on alempana, suoraan sillan päiden välillä. Pelillisessä tilassa alueen
-korkeusmallin tiilet vaihdetaan versioon, jossa yli 2,5 metrin jänteet ovat auki ja niiden ympäriltä
-on poistettu noin 3,5 metrin täyttö (`public/tiles/korkeus/peli`, `build_data.py`); matalat kannet
-ja sillan päiden kuopat ovat yhä täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
+kannet) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien pinnasta
+4 m sillan ulkopuolelta (esim. Kehä I:n alikulun kohdalla kantakartan kansi on mitattu 1–1,7 m
+ajorataa alempaa). Pelillisessä tilassa alueen korkeusmallin tiilet vaihdetaan versioon, jossa
+OSM:n siltojen kohdalla kaikki nostot ovat auki ja niiden ympäriltä on poistettu noin 3,5 metrin
+täyttö (`public/tiles/korkeus/peli`, `build_data.py`); muualla kannet ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
 kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista). Sillan kannella kulkevat viivat
 (kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
-siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois.
+siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois, samoin
+kantakartan viivat, jotka ovat yli 2 m pelillisen maaston pinnan alapuolella (penkereen sisällä).
 
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti
