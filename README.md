@@ -512,7 +512,8 @@ Kokeilualueella kulkee Raide-Jokeri; rantarata on alueen pohjoispuolella ja metr
 Sillat ovat pelillisessä maastossa 3D-malleja (`public/pelimaasto.js`): kansi (1 m paksu,
 pinnassa asfaltti, kevyen liikenteen sillalla vaalea ja raidesillalla sepeli), reunoilla 0,9 m
 kaiteet ja 24 metrin välein pilarit. Pääteiden silloilla kannen pinnassa jatkuvat tien kaista- ja
-keskiviivat samoilla siirroilla kuin maassa (sama laskenta, `lane_offsets`). Ne tehdään OpenStreetMapin siltaosuuksista
+keskiviivat samoilla siirroilla kuin maassa (sama laskenta, `lane_offsets`), ja ajotiesilloilla
+ajoradan reunaviivat kulkevat metrin päässä kannen reunasta. Ne tehdään OpenStreetMapin siltaosuuksista
 (`public/data/pelimaasto_sillat.json`, alueella 23 siltaa); kannen leveys tulee kaistamäärästä
 (+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
 kannet) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien pinnasta

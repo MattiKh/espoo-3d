@@ -54,6 +54,7 @@ const PIER_STEP = 24, PIER_DEPTH = 40, END_EXTRA = 2; // m: pilarien väli ja sy
 const BRIDGE_TOP = { tie: [0.12, 0.125, 0.14], kevyt: [0.4, 0.37, 0.32], raide: [0.22, 0.2, 0.18] };
 const CONCRETE = [0.46, 0.45, 0.43], RAILING = [0.3, 0.33, 0.36], MARKING = [0.92, 0.92, 0.9];
 const DASH = 3, DASH_GAP = 9, DASH_HALF = 0.175; // m: kaistaviivat kannella kuten maassa (3 m viiva, 9 m väli)
+const EDGE_HALF = 0.125, EDGE = [0.88, 0.86, 0.8]; // m: ajoradan reunaviiva kannella (kuten kantakartan reunat maassa)
 
 function bridgeMesh(list, ref, exag) {
   const pos = [], col = [];
@@ -113,6 +114,12 @@ function bridgeMesh(list, ref, exag) {
       return [P[i][0] + (P[i + 1][0] - P[i][0]) * f - nx * d, P[i][1] + (P[i + 1][1] - P[i][1]) * f - ny * d,
         P[i][2] + (P[i + 1][2] - P[i][2]) * f + 0.03];
     };
+    // Ajotiesillalla ajoradan reunaviivat (kannen reuna on 1 m ajoradan reunan ulkopuolella).
+    for (const d of k === "tie" ? [w - 1, 1 - w] : []) {
+      for (let i = 0; i < P.length - 1; i++) {
+        quad(along(S[i], d - EDGE_HALF), along(S[i], d + EDGE_HALF), along(S[i + 1], d + EDGE_HALF), along(S[i + 1], d - EDGE_HALF), EDGE);
+      }
+    }
     for (const d of v ?? []) {
       for (let t = 0; t < S.at(-1); t += DASH + DASH_GAP) {
         const t1 = Math.min(S.at(-1), t + DASH);
