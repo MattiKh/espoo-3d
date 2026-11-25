@@ -7,6 +7,7 @@ import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.j
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, isGameMode, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
+import { buildTunnelInterior } from "./metrotunnel.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
 import { createRide } from "./ride.js";
@@ -73,10 +74,9 @@ const KINDS = {
     group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, eye: 3.0, rail: RAIL, stops: true, grade: 0.025,
     cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]],
   },
-  // Metro kulkee tunnelissa, joten kyydissä kamera seuraa sitä rakennusten yläpuolella ja katsoo
-  // alaspäin, jolloin läpikuultava tunneli näkyy edessä.
+  // Metron kyydissä kamera on tunnelissa (metrotunnel.js).
   metro: {
-    group: "metro", label: "Metro", gap: 0.6, height: 3.6, eye: 50, ridePitch: 66, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
+    group: "metro", label: "Metro", gap: 0.6, height: 3.6, eye: 2.2, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
   },
   intercity: {
@@ -891,6 +891,7 @@ function removeVehicle(v) {
 const scene = new THREE.Scene();
 const undergroundScene = new THREE.Scene();
 const overlayScene = new THREE.Scene(); // yleiskuvan pisteet kaiken päällä
+const tunnelScene = new THREE.Scene(); // metron kyydissä tunnelin sisäpuoli ja metrot (metrotunnel.js)
 const camera = new THREE.Camera();
 // Maan alla olevat kohteet ja pisteet piirretään ilman syvyystestiä. Niille käytetään kameraa,
 // jolta syvyysrajaus puuttuu: suoraan ylhäältä katsottaessa kartan kaukotaso on heti maanpinnan
@@ -900,14 +901,15 @@ const meshes = {};
 const matT = new THREE.Matrix4(), matS = new THREE.Matrix4();
 let renderer = null;
 
+const solidMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+// Metro kulkee Espoossa koko matkan tunnelissa. Se piirretään maan alle läpikuultavana ja
+// maaston läpi näkyvänä (syvyystestiä ei tehdä), tunnelin sisään.
+const undergroundMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.35, depthWrite: false, depthTest: false });
+
 {
-  const solid = new THREE.MeshLambertMaterial({ vertexColors: true });
-  // Metro kulkee Espoossa koko matkan tunnelissa. Se piirretään maan alle läpikuultavana ja
-  // maaston läpi näkyvänä (syvyystestiä ei tehdä), tunnelin sisään.
-  const underground = new THREE.MeshLambertMaterial({ vertexColors: true, transparent: true, opacity: 0.35, depthWrite: false, depthTest: false });
   for (const [key, [build, cap]] of Object.entries(MODELS)) {
     const metro = key.startsWith("metro");
-    const mesh = new THREE.InstancedMesh(build(), metro ? underground : solid, cap);
+    const mesh = new THREE.InstancedMesh(build(), metro ? undergroundMaterial : solidMaterial, cap);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
     mesh.count = 0;
@@ -915,7 +917,7 @@ let renderer = null;
     meshes[key] = mesh;
     (metro ? undergroundScene : scene).add(mesh);
   }
-  for (const sc of [scene, undergroundScene]) {
+  for (const sc of [scene, undergroundScene, tunnelScene]) {
     sc.add(new THREE.AmbientLight(0xffffff, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.8);
     sun.position.set(-0.5, -0.8, 1.6);
@@ -940,19 +942,14 @@ function buildTunnels() {
       s.hexa([...ring(-0.8), ...ring(TUNNEL_HEIGHT - 0.8)], rock);
     }
   }
-  const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT), n = s.pos.length / 3;
-  const pos = new Float32Array(n * 3), colors = new Float32Array(n * 3);
+  const n = s.pos.length / 3, colors = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
-    const lon = lonOf(s.pos[3 * i]), lat = latOf(s.pos[3 * i + 1]);
-    pos[3 * i] = mercX(lon) - ox;
-    pos[3 * i + 1] = mercY(lat) - oy;
-    pos[3 * i + 2] = s.pos[3 * i + 2] / (EARTH_CIRC * Math.cos(lat * D2R));
     // Valaistus väreihin: katto vaaleampi kuin seinät.
     const shade = 0.55 + 0.45 * Math.max(0, s.nor[3 * i + 2]) + 0.15 * Math.abs(s.nor[3 * i]);
     for (let c = 0; c < 3; c++) colors[3 * i + c] = s.col[3 * i + c] * shade;
   }
   const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  g.setAttribute("position", new THREE.BufferAttribute(mercatorPositions(s.pos), 3));
   g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   tunnelMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
     // Molemmat puolet: putken takaseinäkin näkyy, ja Mercator-muunnoksen peilaus ei piilota pintoja.
@@ -962,6 +959,103 @@ function buildTunnels() {
   tunnelMesh.frustumCulled = false;
   tunnelMesh.renderOrder = 1;
   undergroundScene.add(tunnelMesh);
+}
+
+// Paikalliset metrit (z ylös raiteen tasosta) Web Mercator -yksiköiksi suhteessa paikallisen
+// koordinaatiston origoon.
+function mercatorPositions(local) {
+  const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT), out = new Float32Array(local.length);
+  for (let i = 0; i < local.length; i += 3) {
+    const lon = lonOf(local[i]), lat = latOf(local[i + 1]);
+    out[i] = mercX(lon) - ox;
+    out[i + 1] = mercY(lat) - oy;
+    out[i + 2] = local[i + 2] / (EARTH_CIRC * Math.cos(lat * D2R));
+  }
+  return out;
+}
+
+// Maanalaisen kappaleen siirto ja mittakaava kartan mukaan: z on metron raiteiden taso näkymässä.
+function placeUnderground(obj, cmx, cmy, sc, z) {
+  const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT);
+  obj.matrix.set(
+    1 / sc, 0, 0, (ox - cmx) / sc,
+    0, -1 / sc, 0, -(oy - cmy) / sc,
+    0, 0, 1 / sc, z,
+    0, 0, 0, 1);
+  obj.matrixWorldNeedsUpdate = true;
+}
+
+// Metron kyydissä tunnelissa (ride.js) piirretään kartan sijaan tunnelin sisäpuoli
+// (metrotunnel.js) ja metrot tavallisina malleina. Sisäpuoli tummuu etäisyyden mukaan kallion
+// väriin, jolla myös tausta täytetään, joten putkien päät ja asemahallien päädyt näkyvät kalliona.
+const ROCK = col("#121416");
+const tunnelFog = { value: 1 }; // metriä syvyysyksikköä (MapLibren pikseliä) kohden
+let tunnelInterior = null, tunnelView = false;
+
+// Kärkipisteiden y-akseli on Mercator-yksiköissä peilattu, ja kappaleen siirto (placeUnderground)
+// peilaa sen takaisin. three.js kääntää peilatun kappaleen etupuolen, joten sisäpinnat ovat sen
+// silmissä takapuolia (BackSide).
+function tunnelMaterial(far) {
+  return new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    uniforms: { uMeters: tunnelFog, uFar: { value: far }, uFog: { value: ROCK } },
+    vertexShader: `
+      uniform float uMeters;
+      varying vec3 vColor;
+      varying float vDist;
+      void main() {
+        vColor = color;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vDist = gl_Position.w * uMeters;
+      }`,
+    fragmentShader: `
+      uniform float uFar;
+      uniform vec3 uFog;
+      varying vec3 vColor;
+      varying float vDist;
+      void main() {
+        gl_FragColor = vec4(mix(vColor, uFog, smoothstep(uFar * 0.1, uFar, vDist)), 1.0);
+        #include <colorspace_fragment>
+      }`,
+    vertexColors: true,
+  });
+}
+
+function buildInterior() {
+  const parts = buildTunnelInterior();
+  if (!parts) return null;
+  const group = new THREE.Group();
+  group.matrixAutoUpdate = false;
+  for (const [part, far] of [[parts.walls, 260], [parts.lights, 520]]) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(mercatorPositions(part.pos), 3));
+    g.setAttribute("color", new THREE.BufferAttribute(part.col, 3));
+    const mesh = new THREE.Mesh(g, tunnelMaterial(far));
+    mesh.frustumCulled = false;
+    group.add(mesh);
+  }
+  tunnelScene.add(group);
+  return group;
+}
+
+function setTunnelView(on) {
+  if (on === tunnelView) return;
+  if (on) tunnelInterior ??= buildInterior();
+  if (on && !tunnelInterior) return; // raiteita ei ole vielä ladattu
+  tunnelView = on;
+  for (const [key, mesh] of Object.entries(meshes)) {
+    if (!key.startsWith("metro")) continue;
+    mesh.material = on ? solidMaterial : undergroundMaterial;
+    mesh.renderOrder = on ? 0 : 2;
+    (on ? tunnelScene : undergroundScene).add(mesh);
+  }
+  labelLayer.hidden = on; // maanpäällisten ajoneuvojen linjanumerot pois
+}
+
+// Onko kamera maanpinnan alla.
+function cameraUnderground(map, centerElev) {
+  const cp = map.transform.getCameraPosition();
+  return cp.altitude < (map.queryTerrainElevation(cp.lngLat) ?? 0) + centerElev - 1;
 }
 
 // Yleiskuvan pisteet: ympyrä, jolla on valkoinen reuna. Piirretään joka ruudussa ajoneuvon
@@ -1984,13 +2078,13 @@ function draw(gl, matrix) {
 
   if (tunnelMesh) {
     tunnelMesh.visible = groupOn.metro;
-    const ox = mercX(ORIGIN_LON), oy = mercY(ORIGIN_LAT);
-    tunnelMesh.matrix.set(
-      1 / sc, 0, 0, (ox - cmx) / sc,
-      0, -1 / sc, 0, -(oy - cmy) / sc,
-      0, 0, 1 / sc, tunnelZ,
-      0, 0, 0, 1);
-    tunnelMesh.matrixWorldNeedsUpdate = true;
+    placeUnderground(tunnelMesh, cmx, cmy, sc, tunnelZ);
+  }
+  setTunnelView(!!riding && !!KINDS[riding.kind]?.underground && cameraUnderground(map, centerElev));
+  if (tunnelInterior) {
+    tunnelInterior.visible = tunnelView;
+    placeUnderground(tunnelInterior, cmx, cmy, sc, tunnelZ);
+    tunnelFog.value = 1 / (map.transform.worldSize * sc);
   }
 
   // Pisteet kaukaa katsottaessa; ne häivytetään, kun mallit tulevat näkyviin.
@@ -2232,17 +2326,18 @@ function poseOf(v) {
   }
   if (vehicles.get(v.id) !== v || v.x == null) return null;
   const kind = KINDS[v.kind], h = v.heading ?? v.dir ?? [0, 1], x = v.x + h[0] * RIDE_AHEAD, y = v.y + h[1] * RIDE_AHEAD;
+  const exag = mapRef.getTerrain()?.exaggeration ?? 1;
+  const pose = { lon: lonOf(x), lat: latOf(y), heading: Math.atan2(h[0], h[1]), eye: kind.eye, pitch: kind.ridePitch };
+  if (kind.underground) return { ...pose, z: METRO_TUNNEL_Z * exag, underground: true }; // metron raiteiden taso
   // Juuri piirretyn ajoneuvon korkeus (sillat ja raiteiden tasainen profiili mukana); muuten
-  // haetaan maastosta. Metron kohdalla maanpinta.
-  const drawn = !kind.underground && v.elevShown && performance.now() - v.drawnAt < 500;
-  const z = drawn ? v.elevShown[0]
-    : groundAt(v, v.x, v.y, v.elevShown?.[0], mapRef.transform.elevation ?? 0, mapRef.getTerrain()?.exaggeration ?? 1);
-  return { lon: lonOf(x), lat: latOf(y), z, heading: Math.atan2(h[0], h[1]), eye: kind.eye, pitch: kind.ridePitch };
+  // haetaan maastosta.
+  const drawn = v.elevShown && performance.now() - v.drawnAt < 500;
+  return { ...pose, z: drawn ? v.elevShown[0] : groundAt(v, v.x, v.y, v.elevShown?.[0], mapRef.transform.elevation ?? 0, exag) };
 }
 
 // Kyytipalkin tiedot: laji, linja ja määränpää sekä nopeus ja aikataulu.
 function rideInfo(v) {
-  let kind, title, rows, more = null;
+  let kind, title, rows;
   if (v.isShip) {
     kind = shipDims(v).label;
     title = v.meta?.name?.trim() || `MMSI ${v.mmsi}`;
@@ -2252,10 +2347,9 @@ function rideInfo(v) {
     kind = k.label;
     title = [i.line, i.headsign].filter(Boolean).join(" → ") || k.label;
     rows = [`${Math.round((i.spd ?? 0) * 3.6)} km/h`, delayText(i.dl)];
-    if (k.underground) more = "Metro kulkee tunnelissa, joten kamera seuraa sitä rakennusten yläpuolella.";
   }
   return node("div", {}, node("div", { class: "kind" }, kind), node("h3", {}, title),
-    node("div", { class: "meta" }, rows.filter(Boolean).join(" · ")), more && node("div", { class: "meta" }, more));
+    node("div", { class: "meta" }, rows.filter(Boolean).join(" · ")));
 }
 
 function board(v) {
@@ -2299,14 +2393,16 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
       lastRender = performance.now();
       if (!ride.active) tick(); // kyydissä ajoneuvot siirretään ennen kameraa (rideFrame)
       draw(gl, matrix);
-      renderScene(gl, undergroundScene, flatCamera);
+      if (!tunnelView) renderScene(gl, undergroundScene, flatCamera);
     },
   }, undergroundBeforeLayer);
   map.addLayer({
     id: "joukkoliikenne", type: "custom", renderingMode: "3d", onAdd,
     render(gl) {
-      renderScene(gl, scene);
-      renderScene(gl, overlayScene, flatCamera);
+      if (!tunnelView) {
+        renderScene(gl, scene);
+        renderScene(gl, overlayScene, flatCamera);
+      }
       // Ajoneuvot liikkuvat koko ajan, joten kartta piirretään jatkuvasti (FRAME_INTERVAL). Kaukaa
       // katsottaessa liike on ruudulla hidasta, joten silloin riittää harvempi tahti.
       if (!ride.active && !Object.values(groupOn).some(Boolean) && !extrasAnimating()) return;
@@ -2315,6 +2411,19 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
         Math.max(0, interval - (performance.now() - lastRender)));
     },
   }, beforeLayer);
+  // Metron kyydissä tunnelissa kaikki muu peitetään: kallion värinen tausta ja tunnelin sisäpuoli
+  // piirretään viimeisenä, nimienkin päälle.
+  map.addLayer({
+    id: "joukkoliikenne-tunneli", type: "custom", renderingMode: "3d", onAdd,
+    render(gl) {
+      if (!tunnelView) return;
+      renderer.resetState();
+      renderer.setViewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+      renderer.setClearColor(ROCK, 1);
+      renderer.clear(true, true, false);
+      renderer.render(tunnelScene, camera);
+    },
+  });
 
   map.on("moveend", syncCells);
   document.addEventListener("visibilitychange", onVisibility);
@@ -2348,7 +2457,7 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
   setInterval(pollCharging, CHARGE_POLL);
 
   return {
-    vehicles, planes, ships, chargeCars, scene, // selaimen konsolia varten
+    vehicles, planes, ships, chargeCars, scene, tunnelScene, // selaimen konsolia varten
     setGroup(id, on) {
       groupOn[id] = on;
       if (selected?.kind && !groupOn[KINDS[selected.kind].group]) popup.remove();

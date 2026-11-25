@@ -268,7 +268,7 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
 Bussia, raitiovaunua, lähi- tai kaukojunaa, metroa tai matkustaja-alusta (lautat) klikkaamalla
 hypätään sen kyytiin (`public/ride.js`). Kamera lentää noin kahdessa sekunnissa kulkuneuvon
 keulaan kuljettajan silmien korkeudelle (bussi 2,5 m, raitiovaunu 2,7 m, lähijuna 3 m,
-kaukojuna 3,3 m tiestä tai kiskoista; alus aluksen pituuden mukaan) ja seuraa sen jälkeen
+kaukojuna 3,3 m ja metro 2,2 m tiestä tai kiskoista; alus aluksen pituuden mukaan) ja seuraa sen jälkeen
 kulkuneuvon sijaintia ja suuntaa. Tavarajunien, lentokoneiden ja latausautojen klikkaus avaa
 tiedot kuten ennenkin.
 
@@ -281,8 +281,18 @@ tiedot kuten ennenkin.
   Kulkusuunnan ja korkeuden muutokset pehmennetään, jotta sijaintien kohina ei heiluta näkymää.
   Kamera pidetään vähintään 1,2 m maaston yläpuolella; ilmakuvatilassa sillan ali kulkiessa
   kamera nousee hetkeksi kannen yläpuolelle, koska korkeusmalli on nostettu kannen tasolle.
-- Metro kulkee tunnelissa, joten sen kyydissä kamera seuraa 50 metrin korkeudella maanpinnan
-  yläpuolella ja katsoo alaspäin.
+- Metron kyydissä kamera on tunnelissa (`public/metrotunnel.js`). Kun kamera on maanpinnan
+  alla, kartan sijaan piirretään vain tunnelit, asemat ja metrot: tausta täytetään kallion
+  värillä, ja tunnelin sisäpuoli tummuu etäisyyden mukaan samaan väriin. Jokaisella raiteella on
+  oma putki (lattia, seinät, kaapelihyllyt, holvikatto, kiskot ja 30 metrin välein vuorotellen
+  seinävalot), joka seuraa raideverkkoa (`rails.js`) samoin kuin metro itse. Asemalla molemmat
+  raiteet ovat samassa valoisassa hallissa (oranssi raita, valonauhat katossa), ja niiden
+  välissä on laituri turvaviivoineen. Asemat tunnistetaan pysähtymispaikoista: vastakkaisiin
+  suuntiin kulkevat junat pysähtyvät laiturin eri päihin, joten asema on eri raiteiden
+  lähimpien pysähtymispaikkojen puolivälissä (Espoon 11 asemaa sekä Koivusaari ja Lauttasaari).
+  Tunnelissa metrot piirretään tavallisina malleina, joten vastaantuleva juna näkyy asemalla,
+  ja maanpäällisten ajoneuvojen linjanumerot piilotetaan. Kyytiin ja kyydistä kamera lentää
+  maan läpi. Tunnelit rakennetaan ensimmäisellä kerralla (noin 40 ms, 0,25 miljoonaa kärkeä).
 - Katsetta käännetään vetämällä hiirellä tai sormella (sivuttain enintään 120° kulkusuunnasta,
   pystysuunnassa 3–30° vaakatason alapuolelle) tai nuolinäppäimillä. Kaksoisnapautus tai
   -klikkaus kääntää katseen takaisin kulkusuuntaan. Kartan oma raahaus, zoomaus ja kierto sekä
@@ -296,8 +306,9 @@ tiedot kuten ennenkin.
 - MapLibre 4.7.1 asettaa näkymän keskipisteen korkeudeksi joka ruudussa maaston korkeuden
   siinä kohdassa. Kyydin ajaksi korkeus lukitaan (`_elevationFreeze`, jota MapLibre käyttää itse
   siirtymien aikana), ja keskipiste asetetaan katseen suuntaan niin, että kamera on halutussa
-  kohdassa. Zoomaus valitaan niin, että kameran lähitaso on 1,5 metrin päässä (metrossa
-  kauempana). Kallistuksen yläraja nostetaan kyydin ajaksi 87°:een (`setMaxPitch` sallii
+  kohdassa. MapLibre nostaisi maaston alle joutuvan kameran maan pinnalle, joten kyydin ajan
+  `transformCameraUpdate` palauttaa näkymän sellaisenaan. Zoomaus valitaan niin, että kameran
+  lähitaso on 1,5 metrin päässä. Kallistuksen yläraja nostetaan kyydin ajaksi 87°:een (`setMaxPitch` sallii
   85°) ja näkökenttä noin 70°:een vaakasuunnassa (pystysuunnassa 40–60°, kapealla näytöllä 60°).
 - Kapealla näytöllä paneeli painetaan alas kyydin ajaksi. Kun liikettä vähennetään
   (`prefers-reduced-motion`), kamera siirtyy kyytiin ja takaisin ilman lentoa.
@@ -612,6 +623,7 @@ korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä kev
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/ride.js`: kyytinäkymä: kamera kulkuneuvon keulassa, katseen kääntäminen ja kyytipalkki
+- `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli metron kyytiä varten
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio

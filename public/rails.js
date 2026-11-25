@@ -135,8 +135,8 @@ export function pathBehind(e, u, sign, total, step = 5) {
   return pts.reverse();
 }
 
-// Metroradat murtoviivoina (tunneleiden piirtämiseen).
+// Metroradat murtoviivoina (tunneleiden piirtämiseen): [x, y, pysähtymispaikka].
 export function metroLines() {
   if (!net) return [];
-  return net.ways.filter(([k]) => k === METRO).map(([, ...refs]) => refs.map((i) => [net.x[i], net.y[i]]));
+  return net.ways.filter(([k]) => k === METRO).map(([, ...refs]) => refs.map((i) => [net.x[i], net.y[i], net.stop[i] === 1]));
 }

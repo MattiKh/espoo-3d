@@ -8,6 +8,8 @@
 // keskipisteen korkeudeksi tulee joka ruudussa maaston korkeus siinä kohdassa. Kyydin ajaksi
 // korkeus lukitaan (_elevationFreeze, jota MapLibre käyttää itse siirtymien aikana), ja
 // keskipiste asetetaan katseen suuntaan niin, että kamera on halutussa kohdassa ja korkeudessa.
+// MapLibre nostaisi maaston alle joutuvan kameran (metrotunnelissa) maan pinnalle; kyydin ajan
+// transformCameraUpdate palauttaa näkymän sellaisenaan.
 
 const D2R = Math.PI / 180;
 const EC = 2 * Math.PI * 6371008.8; // MapLibren maapallon ympärysmitta (m)
@@ -43,14 +45,15 @@ const latOfMerc = (y) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) / D2R;
 // korostus mukana kuten MapLibren korkeuksissa) ja katseen suuntana. zoom määrää vain
 // keskipisteen etäisyyden kamerasta, eli lähitason ja ruutujen tarkkuuden.
 //
-// pose (transit.js): { lon, lat, z, heading, eye, pitch }: keulan kohta, maan tai kannen korkeus
-// (m, kuten alt), kulkusuunta (rad, myötäpäivään pohjoisesta), silmien korkeus maasta (m) ja
-// katseen oletuskallistus. null, kun kulkuneuvo on kadonnut datasta.
+// pose (transit.js): { lon, lat, z, heading, eye, pitch, underground }: keulan kohta, maan,
+// kannen tai kiskojen korkeus (m, kuten alt), kulkusuunta (rad, myötäpäivään pohjoisesta),
+// silmien korkeus siitä (m), katseen oletuskallistus ja kulkeeko kulkuneuvo maan alla. null, kun
+// kulkuneuvo on kadonnut datasta.
 export function createRide(map, { onEnd }) {
   const container = map.getContainer(), box = map.getCanvasContainer();
   let saved = null; // näkymä ja asetukset ennen kyytiä
   let look = null, smooth = null, anim = null, leaving = null;
-  let pose = null, cam = null, lastAt = 0, rideZoom = null, zoomHeight = null;
+  let pose = null, cam = null, want = null, lastAt = 0, rideZoom = null, zoomHeight = null;
   let drag = null, noteTimer = null;
 
   // Osoiterivin näkymä (hash: true) pysyy kyydin ajan siinä, josta kyytiin hypättiin, jottei
@@ -115,12 +118,13 @@ export function createRide(map, { onEnd }) {
     const cos = Math.cos(latOfMerc(c.y) * D2R);
     const dist = (t.cameraToCenterDistance * EC * cos) / (t.tileSize * 2 ** c.zoom);
     const p = c.pitch * D2R, b = c.bearing * D2R, h = (dist * Math.sin(p)) / (EC * cos);
-    t.elevation = c.alt - dist * Math.cos(p);
+    want = {
+      center: new maplibregl.LngLat(lonOfMerc(c.x + Math.sin(b) * h), latOfMerc(c.y - Math.cos(b) * h)),
+      zoom: c.zoom, pitch: c.pitch, bearing: wrap(c.bearing), elevation: c.alt - dist * Math.cos(p),
+    };
+    t.elevation = want.elevation;
     map._elevationFreeze = true;
-    map.jumpTo({
-      center: [lonOfMerc(c.x + Math.sin(b) * h), latOfMerc(c.y - Math.cos(b) * h)],
-      zoom: c.zoom, pitch: c.pitch, bearing: wrap(c.bearing),
-    }, { ride: true });
+    map.jumpTo({ center: want.center, zoom: want.zoom, pitch: want.pitch, bearing: want.bearing }, { ride: true });
     cam = c;
   }
 
@@ -139,7 +143,7 @@ export function createRide(map, { onEnd }) {
     }
     const fov = clamp((2 * Math.atan((Math.tan((H_FOV * D2R) / 2) * t.height) / t.width)) / D2R, 40, 60);
     return {
-      x: mercX(p.lon), y: mercY(p.lat), alt: Math.max(smooth.alt, groundAt([p.lon, p.lat]) + CLEARANCE),
+      x: mercX(p.lon), y: mercY(p.lat), alt: p.underground ? smooth.alt : Math.max(smooth.alt, groundAt([p.lon, p.lat]) + CLEARANCE),
       bearing: smooth.heading + look.yaw, pitch: look.pitch, zoom: rideZoom, fov,
     };
   }
@@ -190,7 +194,8 @@ export function createRide(map, { onEnd }) {
   // Kartan asetukset takaisin; view: näkymä, johon jäädään (muuten nykyinen).
   function restore(view, note = null) {
     const s = saved;
-    saved = leaving = anim = drag = smooth = pose = cam = null;
+    saved = leaving = anim = drag = smooth = pose = cam = want = null;
+    map.transformCameraUpdate = s.cameraUpdate;
     map._elevationFreeze = false;
     map.transform.fov = s.view.fov;
     if (updateHash) map.on("moveend", updateHash);
@@ -279,10 +284,12 @@ export function createRide(map, { onEnd }) {
       if (!saved) {
         saved = {
           view: currentView(), maxPitch: map.getMaxPitch(), handlers: HANDLERS.filter((h) => map[h]?.isEnabled()),
+          cameraUpdate: map.transformCameraUpdate,
           closedPanel: matchMedia("(max-width: 700px)").matches && !document.body.classList.contains("panel-closed"),
         };
         for (const h of saved.handlers) map[h].disable();
         if (updateHash) map.off("moveend", updateHash);
+        map.transformCameraUpdate = () => want ?? {};
         map.transform.maxPitch = MAX_PITCH;
         container.classList.add("riding");
         if (saved.closedPanel) document.body.classList.add("panel-closed"); // kapealla näytöllä paneeli peittäisi näkymän
