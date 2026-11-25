@@ -5,7 +5,7 @@
 // Samalle tasolle piirretään myös maamerkkien 3D-mallit (landmarks.js).
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
-import { deckHeightAt, rawElevationAt } from "./bridges.js";
+import { deckHeightAt, isGameMode, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
@@ -1895,7 +1895,8 @@ function groundAt(v, x, y, prev, centerElev, exag) {
   if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
   const from = prev ?? approachElevation(v, centerElev);
   if (Math.abs(from - top) >= Math.abs(from - raw)) return raw; // sillan alla
-  return rawM == null ? Math.max(dem, top) : dem; // kannella (nostettu maasto on kannen pinta)
+  // Kannella: nostettu maasto on kannen pinta; pelillisessä maastossa jänne on 3D-silta, ja maasto sen alla.
+  return rawM == null || isGameMode() ? Math.max(dem, top) : dem;
 }
 
 // Maanpinnan korkeus siinä reitin kohdassa, josta ajoneuvo tuli sillalle.

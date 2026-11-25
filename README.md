@@ -509,6 +509,17 @@ raitiovaunu, ei tunneleissa) piirretään sepelipohjana, ratapölkkyinä ja kaht
 1,5 metrin päässä toisistaan. Leveydet ovat metreinä, joten ne skaalautuvat zoomauksen mukana.
 Kokeilualueella kulkee Raide-Jokeri; rantarata on alueen pohjoispuolella ja metro tunnelissa.
 
+Sillat ovat pelillisessä maastossa 3D-malleja (`public/pelimaasto.js`): kansi (1 m paksu,
+pinnassa asfaltti, kevyen liikenteen sillalla vaalea ja raidesillalla sepeli), reunoilla 0,9 m
+kaiteet ja 24 metrin välein pilarit. Ne tehdään OpenStreetMapin siltaosuuksista
+(`public/data/pelimaasto_sillat.json`, alueella 23 siltaa); kannen leveys tulee kaistamäärästä
+(+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
+kannet) tai, jos se on alempana, suoraan sillan päiden välillä. Pelillisessä tilassa alueen
+korkeusmallin tiilet vaihdetaan versioon, jossa yli 2,5 metrin jänteet ovat auki ja niiden ympäriltä
+on poistettu noin 3,5 metrin täyttö (`public/tiles/korkeus/peli`, `build_data.py`); matalat kannet
+ja sillan päiden kuopat ovat yhä täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
+kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista).
+
 Metsiin sijoitellaan kartan keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää)
 matalapolygonisia 3D-puita (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti
 siirrettynä, puun korkeus puustoluokasta, matalammassa puustossa enimmäkseen lehtipuita (pyöreä

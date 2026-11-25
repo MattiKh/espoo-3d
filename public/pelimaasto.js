@@ -46,6 +46,80 @@ maplibregl.addProtocol("peli", async (params) => {
   return { data: (await ask({ type: "tile", z, x, y })).buffer };
 });
 
+// 3D-sillat (scripts/build_data.py, game_bridges): kansi, reunakaiteet ja pilarit matalapolygonisina.
+// Pelillisen maaston korkeusmallissa korkeat jänteet ovat auki, joten sillan alta kulkeva tie näkyy.
+const DECK = 1.0, RAIL_H = 0.9, RAIL_T = 0.25; // m: kannen paksuus, kaiteen korkeus ja paksuus
+const PIER_STEP = 24, PIER_DEPTH = 40, END_EXTRA = 2; // m: pilarien väli ja syvyys, kantta jatketaan päistä
+const BRIDGE_TOP = { tie: [0.3, 0.31, 0.34], kevyt: [0.68, 0.64, 0.56], raide: [0.42, 0.39, 0.35] };
+const CONCRETE = [0.74, 0.73, 0.7], RAILING = [0.5, 0.55, 0.6];
+
+function bridgeMesh(list, ref, exag) {
+  const pos = [], col = [];
+  const tri = (a, b, c, color) => {
+    pos.push(...a, ...b, ...c);
+    col.push(...color, ...color, ...color);
+  };
+  const quad = (a, b, c, d, color) => {
+    tri(a, b, c, color);
+    tri(a, c, d, color);
+  };
+  // Laatikko: pohjan nelikulmio [p0, p1, p2, p3] (x, y) ja korkeudet z0–z1.
+  const box = (ring, z0, z1, color) => {
+    const lo = ring.map(([x, y]) => [x, y, z0]), hi = ring.map(([x, y]) => [x, y, z1]);
+    quad(hi[0], hi[1], hi[2], hi[3], color);
+    quad(lo[0], lo[3], lo[2], lo[1], color);
+    for (let i = 0; i < 4; i++) quad(lo[i], lo[(i + 1) % 4], hi[(i + 1) % 4], hi[i], color);
+  };
+  for (const { p, w, k } of list) {
+    const P = [];
+    for (let i = 0; i < p.length; i += 3) {
+      P.push([(mercX(p[i]) - mercX(ref.lon)) * ref.unit, -(mercY(p[i + 1]) - mercY(ref.lat)) * ref.unit, p[i + 2] * exag + 0.15]);
+    }
+    if (P.length < 2) continue;
+    for (const [a, b] of [[0, 1], [P.length - 1, P.length - 2]]) { // päät hieman penkereen päälle
+      const dx = P[a][0] - P[b][0], dy = P[a][1] - P[b][1], ln = Math.hypot(dx, dy) || 1;
+      P[a] = [P[a][0] + (dx / ln) * END_EXTRA, P[a][1] + (dy / ln) * END_EXTRA, P[a][2]];
+    }
+    const N = P.map((_, i) => { // vasen normaali, kulmissa keskiarvo
+      const a = P[Math.max(0, i - 1)], b = P[Math.min(P.length - 1, i + 1)], dx = b[0] - a[0], dy = b[1] - a[1], ln = Math.hypot(dx, dy) || 1;
+      return [-dy / ln, dx / ln];
+    });
+    const at = (i, d, z) => [P[i][0] + N[i][0] * d, P[i][1] + N[i][1] * d, z];
+    const top = BRIDGE_TOP[k] ?? BRIDGE_TOP.tie;
+    for (let i = 0; i < P.length - 1; i++) {
+      const z0 = P[i][2], z1 = P[i + 1][2];
+      quad(at(i, w, z0), at(i, -w, z0), at(i + 1, -w, z1), at(i + 1, w, z1), top);
+      quad(at(i, w, z0 - DECK), at(i + 1, w, z1 - DECK), at(i + 1, -w, z1 - DECK), at(i, -w, z0 - DECK), CONCRETE);
+      for (const side of [w, -w]) {
+        quad(at(i, side, z0), at(i + 1, side, z1), at(i + 1, side, z1 - DECK), at(i, side, z0 - DECK), CONCRETE);
+        // Kaide reunalla: ulkopinta, sisäpinta ja yläpinta.
+        const inner = side - Math.sign(side) * RAIL_T;
+        quad(at(i, side, z0), at(i + 1, side, z1), at(i + 1, side, z1 + RAIL_H), at(i, side, z0 + RAIL_H), RAILING);
+        quad(at(i, inner, z0), at(i + 1, inner, z1), at(i + 1, inner, z1 + RAIL_H), at(i, inner, z0 + RAIL_H), RAILING);
+        quad(at(i, side, z0 + RAIL_H), at(i + 1, side, z1 + RAIL_H), at(i + 1, inner, z1 + RAIL_H), at(i, inner, z0 + RAIL_H), RAILING);
+      }
+    }
+    for (const i of [0, P.length - 1]) quad(at(i, w, P[i][2]), at(i, -w, P[i][2]), at(i, -w, P[i][2] - DECK), at(i, w, P[i][2] - DECK), CONCRETE);
+    // Pilarit tasavälein (ei päissä); maan alle jäävä osa peittyy maastoon.
+    let s = 0;
+    for (let i = 1; i < P.length - 1; i++) {
+      s += Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]);
+      if (s < PIER_STEP) continue;
+      s = 0;
+      const [x, y, z] = P[i], [nx, ny] = N[i], ax = -ny * 0.6, ay = nx * 0.6, cw = w * 0.7;
+      box([[x + nx * cw + ax, y + ny * cw + ay], [x - nx * cw + ax, y - ny * cw + ay], [x - nx * cw - ax, y - ny * cw - ay],
+        [x + nx * cw - ax, y + ny * cw - ay]], z - DECK - PIER_DEPTH, z - DECK, CONCRETE);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: true }));
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
 // Matalapolygoninen puu: runko ja latvus (pyöreä tai kartio) yksikkökokoisina, akseli pystyssä (z).
 function treeMeshes() {
   const up = (g) => g.rotateX(Math.PI / 2);
@@ -72,7 +146,8 @@ export async function createGameTerrain(map, { base, version }) {
     attribution: "Maanpeite © HSY",
   });
   map.addSource("pelimaasto-dem", {
-    type: "raster-dem", tiles: ["dem://{z}/{x}/{y}"], encoding: "terrarium", tileSize: 512, maxzoom: 15, bounds: info.alue,
+    // Pelillisen tilan korkeusmalli (sillat auki, bridges.js), sillä varjostus näkyy vain siinä.
+    type: "raster-dem", tiles: ["dem://{z}/{x}/{y}?peli"], encoding: "terrarium", tileSize: 512, maxzoom: 15, bounds: info.alue,
   });
   map.addLayer({ id: "pelimaasto", type: "raster", source: "pelimaasto", layout: { visibility: "none" }, paint: { "raster-fade-duration": 0 } }, before);
   map.addLayer({
@@ -151,11 +226,19 @@ export async function createGameTerrain(map, { base, version }) {
     paint: { "text-color": "#ffffff", "text-halo-color": "rgba(28, 38, 28, 0.85)", "text-halo-width": 1.4 },
   }, before);
 
-  const group = new THREE.Group();
-  group.matrixAutoUpdate = false;
+  const root = new THREE.Group(), group = new THREE.Group(), bridges = new THREE.Group();
+  group.matrixAutoUpdate = bridges.matrixAutoUpdate = false;
+  root.add(group, bridges);
   const meshes = treeMeshes();
   group.add(meshes.trunk, meshes.cone, meshes.round);
   const center = [(info.alue[0] + info.alue[2]) / 2, (info.alue[1] + info.alue[3]) / 2];
+  const bridgeRef = { lon: center[0], lat: center[1], unit: EARTH_CIRC * Math.cos(center[1] * D2R) };
+  fetch(`${base}data/pelimaasto_sillat.json?v=${version}`).then((r) => (r.ok ? r.json() : { sillat: [] }))
+    .then(({ sillat }) => {
+      bridges.add(bridgeMesh(sillat, bridgeRef, map.getTerrain()?.exaggeration ?? 1));
+      map.triggerRepaint();
+    })
+    .catch((err) => console.warn("Siltoja ei saatu ladattua", err));
   let visible = false, trees = null, ref = null, heights = null, next = 0, passAt = 0, passes = 0, asking = false;
 
   function inArea([lon, lat]) {
@@ -228,6 +311,12 @@ export async function createGameTerrain(map, { base, version }) {
   }
 
   function draw(_, ctx) {
+    bridges.visible = visible && ctx.zoom >= 14;
+    if (bridges.visible) {
+      const k = ctx.cosC / Math.cos(bridgeRef.lat * D2R);
+      const wx = (mercX(bridgeRef.lon) - ctx.cmx) / ctx.sc, wy = -(mercY(bridgeRef.lat) - ctx.cmy) / ctx.sc;
+      bridges.matrix.set(k, 0, 0, wx, 0, k, 0, wy, 0, 0, k, -ctx.centerElev * k, 0, 0, 0, 1);
+    }
     const on = visible && ctx.zoom >= TREE_MINZOOM;
     group.visible = on && !!ref;
     if (!on) return;
@@ -253,5 +342,5 @@ export async function createGameTerrain(map, { base, version }) {
   }
 
   const animating = () => visible && (asking || (heights != null && next < Math.min(heights.length, TREE_MAX)));
-  return { drawable: { object: group, draw, animating }, setVisible };
+  return { drawable: { object: root, draw, animating }, setVisible };
 }

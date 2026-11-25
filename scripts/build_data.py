@@ -1252,11 +1252,15 @@ def build_bridges():
     tiet, tiealat, reunat = road_cuts(viivat, edges, ways)
     log(f"  {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, {len(raiteet)} raidetta, "
         f"{len(tiet)} korjattavaa tienpintaa")
-    korkeus = build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat)
+    korkeus, korkeus_peli = build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, bridge_footprints())
     path = os.path.join(PUBLIC_DATA, "sillat.json")
+    (x0, y0, x1, y1), a = landcover_area(), 2 ** LANDCOVER_AREA_ZOOM
+    world = 2 * math.pi * R
+    alue = [*merc_to_lonlat(-world / 2 + x0 * world / a, world / 2 - (y1 + 1) * world / a),
+            *merc_to_lonlat(-world / 2 + (x1 + 1) * world / a, world / 2 - y0 * world / a)]
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla, Raide), tiet © OpenStreetMap",
-                   "viivat": viivat, "korkeus": korkeus}, fh, separators=(",", ":"))
+                   "viivat": viivat, "korkeus": korkeus, "korkeus_peli": korkeus_peli, "peli_alue": alue}, fh, separators=(",", ":"))
     log(f"  → sillat.json: {os.path.getsize(path) / 1e6:.2f} Mt")
 
 
@@ -1678,7 +1682,7 @@ def road_cuts(viivat, edges, ways):
     return edge_strips(edges, 0, osm, zone, lambda run: True, ROAD_DZ), areas, anchors
 
 
-def dem_decks(kannet, kaistat, raiteet, tiet, tiealat):
+def dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat=()):
     """Kannet ja kaistaleet korkeusmallin nostoa varten: reunat A ja B Web Mercator -yksiköissä
     samaan määrään pisteitä jaettuina (vastakkaiset osat) ja pitkät paloiksi."""
     import numpy as np
@@ -1689,7 +1693,8 @@ def dem_decks(kannet, kaistat, raiteet, tiet, tiealat):
         return np.stack([np.interp(t, s, P[:, c]) for c in range(3)], axis=1)
 
     out = []
-    for kind, decks in (("kansi", kannet), ("kaista", kaistat), ("raide", raiteet), ("tie", tiet), ("tieala", tiealat)):
+    for kind, decks in (("kansi", kannet), ("kaista", kaistat), ("raide", raiteet), ("tie", tiet), ("tieala", tiealat),
+                        ("siltaala", siltaalat)):
         for a, b in decks:
             A = np.array([(*merc_unit(a[i], a[i + 1]), a[i + 2]) for i in range(0, len(a), 3)])
             B = np.array([(*merc_unit(b[i], b[i + 1]), b[i + 2]) for i in range(0, len(b), 3)])
@@ -1768,10 +1773,10 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
         I, J, Z = anchors
         m = np.isnan(road[J, I])
         road[J[m], I[m]] = Z[m]
-    area = np.zeros((H, W), bool)
+    area, bridge_area = np.zeros((H, W), bool), np.zeros((H, W), bool)
     for d in decks:
-        if d["kind"] == "tieala" and (r := raster(d)):
-            area[r[1], r[0]] = True
+        if d["kind"] in ("tieala", "siltaala") and (r := raster(d)):
+            (area if d["kind"] == "tieala" else bridge_area)[r[1], r[0]] = True
     px = unit * size / W  # m pikseliä kohden
 
     def spread(zr, steps, where):  # arvot naapuripikseleihin (keskiarvo), askel kerrallaan
@@ -1797,7 +1802,7 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
             ground[m] = np.clip(ground[m], zr[m] - k * px * CUT_SLOPE, zr[m] + k * px * CUT_SLOPE)
 
     for d in decks:
-        if d["kind"] in ("tie", "tieala") or not (r := raster(d)):
+        if d["kind"] in ("tie", "tieala", "siltaala") or not (r := raster(d)):
             continue
         I, J, zd, da, db = r
         if d["kind"] == "kaista":  # korjatulla tienpinnalla kaistale on turha (ja reunapalkin korkuinen)
@@ -1839,15 +1844,17 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
             near |= core[dj:dj + H, di:di + W]
     lifted = ~np.isnan(surf) & (~strip | near)
     top = np.where(np.isnan(upper), surf, upper)
-    return np.where(lifted, top, ground), lifted, ground
+    return np.where(lifted, top, ground), lifted, ground, bridge_area
 
 
-def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
+def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
     """Korkeusmallin tiilet (DEM_ZOOMS), joissa tienpinnat on korjattu ja kannet ja kaistaleet
     nostettu maanpinnan yläpuolelle (dem_patch), kansioon public/tiles/korkeus/z/x/y.webp.
     Tarkimmista tiilistä tallennetaan nostettujen pikselien maanpinta (korkeus/maa/x/y.webp; muualla
     musta), jotta selain voi pitää sillan ali kulkevat ajoneuvot ja uomat alla olevalla pinnalla.
-    Palauttaa muutettujen tiilten luettelon {z: [x, y, ...]}."""
+    Pelillisen maaston alueelta tallennetaan lisäksi versio, jossa korkeat jänteet (GAME_SPAN) ovat
+    auki (korkeus/peli/z/x/y.webp). Palauttaa muutettujen tiilten luettelot {z: [x, y, ...]}:
+    tavallinen ja pelillinen."""
     import numpy as np
     from PIL import Image
 
@@ -1855,12 +1862,13 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
         v = h + 32768
         return np.stack([v // 256, np.floor(v) % 256, np.floor((v - np.floor(v)) * 256)], axis=-1).astype(np.uint8)
 
-    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat)
+    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat)
     pins = np.array(reunat, float).reshape(-1, 3)  # mitatut reunapisteet Web Mercator -yksiköissä
     pins[:, 0], pins[:, 1] = (pins[:, 0] + 180) / 360, (1 - np.log(np.tan(np.pi / 4 + np.radians(pins[:, 1]) / 2)) / np.pi) / 2
     out = os.path.join(TILES, "korkeus")
     shutil.rmtree(out, ignore_errors=True)
-    index, size = {}, 0
+    index, game_index, size = {}, {}, 0
+    gx0, gy0, gx1, gy1 = (v / 2 ** LANDCOVER_AREA_ZOOM for v in landcover_area())
     for z in DEM_ZOOMS:
         n = 2 ** z
         tiles = collections.defaultdict(list)
@@ -1871,7 +1879,7 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
                     tiles[(tx, ty)].append(d)
         with cf.ThreadPoolExecutor(max_workers=4) as ex:
             paths = dict(zip(tiles, ex.map(lambda k: dem_tile(z, *k), tiles)))
-        index[z] = []
+        index[z], game_index[z] = [], []
         pin_tiles = collections.defaultdict(list)
         for k, key in enumerate(map(tuple, np.floor(pins[:, :2] * n).astype(int))):
             pin_tiles[key].append(k)
@@ -1880,7 +1888,30 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
             p = pins[pin_tiles.get((tx, ty), [])]
             H, W = elev.shape
             anchors = ((p[:, 0] * n - tx) * W).astype(int), ((p[:, 1] * n - ty) * H).astype(int), p[:, 2]
-            new, lifted, ground = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
+            new, lifted, ground, bridge_area = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
+            if tx + 1 > gx0 * n and tx < (gx1 + 1) * n and ty + 1 > gy0 * n and ty < (gy1 + 1) * n:
+                # Pelillisen maaston korkeusmalli: korkeat jänteet auki siltojen kohdalla (siltaalat: OSM:n
+                # sillat, jotka ovat 3D-malleja), muualla täytettyinä kuten ennen. Avattua jännettä
+                # laajennetaan sillan alueella noin 3,5 m (z15: 3 pikseliä), jottei sen reunaan jää
+                # rosoista täytön seinämää.
+                opened = lifted & bridge_area & (new - ground > GAME_SPAN)
+                for _ in range({15: 3, 14: 2}.get(z, 1)):
+                    grown = opened.copy()
+                    grown[1:] |= opened[:-1]
+                    grown[:-1] |= opened[1:]
+                    grown[:, 1:] |= opened[:, :-1]
+                    grown[:, :-1] |= opened[:, 1:]
+                    opened = grown & lifted & bridge_area
+                game = np.where(opened, ground, new)
+                gch = np.abs(game - elev) > 1e-6
+                if gch.any():
+                    grgb = rgb.copy()
+                    grgb[gch] = terrarium(game[gch])
+                    path = os.path.join(out, "peli", str(z), str(tx), f"{ty}.webp")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    Image.fromarray(grgb).save(path, "WEBP", lossless=True, method=6)
+                    size += os.path.getsize(path)
+                    game_index[z] += [tx, ty]
             changed = np.abs(new - elev) > 1e-6
             if not changed.any():
                 continue
@@ -1897,9 +1928,9 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat):
             Image.fromarray(rgb).save(path, "WEBP", lossless=True, method=6)
             size += os.path.getsize(path)
             index[z] += [tx, ty]
-        log(f"  korkeusmalli z{z}: {len(index[z]) // 2}/{len(tiles)} tiiltä muutettu")
+        log(f"  korkeusmalli z{z}: {len(index[z]) // 2}/{len(tiles)} tiiltä muutettu, pelilliseen {len(game_index[z]) // 2}")
     log(f"  → tiles/korkeus: {size / 1e6:.1f} Mt")
-    return index
+    return index, game_index
 
 
 def read_positions_3d(el):
@@ -1966,6 +1997,15 @@ LANDCOVER_LAYERS = ["merialue"] + LANDCOVER_CLASSES
 LANDCOVER_BBOX = (24.80, 60.175, 24.85, 60.195)  # Otaniemi–Laajalahti
 LANDCOVER_AREA_ZOOM = 14  # alue koostuu kokonaisista tämän tason ruuduista (selaimen alin taso)
 LANDCOVER_ZOOM, LANDCOVER_PX = 16, 1024  # luokkaruudut: 1024 px, noin 0,3 m
+GAME_SPAN = 2.5  # m: tätä korkeammat jänteet ovat pelillisessä maastossa 3D-siltoja, matalammat täytetään
+
+
+def landcover_area():
+    """Pelillisen maaston alue LANDCOVER_AREA_ZOOM-tason ruutuina (x0, y0, x1, y1), reunat mukaan lukien."""
+    (w, s, e, n), a = LANDCOVER_BBOX, 2 ** LANDCOVER_AREA_ZOOM
+    x0, y1 = (int(v * a) for v in merc_unit(w, s))
+    x1, y0 = (int(v * a) for v in merc_unit(e, n))
+    return x0, y0, x1, y1
 
 
 def build_landcover():
@@ -1985,9 +2025,7 @@ def build_landcover():
         with open(http_get(HSY_WMS, params, dest), encoding="utf-8") as fh:
             fill = json.load(fh)["Legend"][0]["rules"][0]["symbolizers"][0]["Polygon"]["fill"]
         color[int(fill[1:], 16)] = LANDCOVER_CLASSES.index(name if name != "merialue" else "vesi") + 1
-    (w, s, e, n), a = LANDCOVER_BBOX, 2 ** LANDCOVER_AREA_ZOOM
-    x0, y1 = (int(v * a) for v in merc_unit(w, s))
-    x1, y0 = (int(v * a) for v in merc_unit(e, n))
+    (x0, y0, x1, y1), a = landcover_area(), 2 ** LANDCOVER_AREA_ZOOM
     f = 2 ** (LANDCOVER_ZOOM - LANDCOVER_AREA_ZOOM)
     tiles = [(x, y) for x in range(x0 * f, (x1 + 1) * f) for y in range(y0 * f, (y1 + 1) * f)]
     world, size = 2 * math.pi * R, 2 * math.pi * R / 2 ** LANDCOVER_ZOOM
@@ -2208,20 +2246,12 @@ def build_landcover_lines(bbox):
                         features.append({"type": "Feature", "properties": {"k": LANDCOVER_LINE_TYPES[type_name]},
                                          "geometry": {"type": "LineString", "coordinates": [to_ll(*pts[k]) for k in keep]}})
                 el.clear()
-    # OpenStreetMapista kaistaviivat ja raiteet (junat, raitiovaunut) samalta alueelta.
-    (w, s), (e, n) = merc_to_lonlat(x0, y0), merc_to_lonlat(x1, y1)
-    box = f"({s:.5f},{w:.5f},{n:.5f},{e:.5f})"
-    query = (f'[out:json][timeout:180];(way["highway"~"^({"|".join(VEHICLE_ROADS)})(_link)?$"]{box};'
-             f'way["railway"~"^(rail|tram|light_rail)$"]{box};way["footway"="crossing"]{box};'
-             f'way["cycleway"="crossing"]{box};node["highway"="crossing"]{box};);out geom;')
-    with open(overpass_post(query, os.path.join(CACHE, "pelimaasto", "osm2.json")), encoding="utf-8") as fh:
-        elements = json.load(fh)["elements"]
-    ways = [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]], el["nodes"])
-            for el in elements if el["type"] == "way"]
+    # OpenStreetMapista kaistaviivat, suojatiet ja raiteet (junat, raitiovaunut) samalta alueelta.
+    ways, nodes = landcover_osm()
     roads = [w for w in ways if w[0].get("highway", "").replace("_link", "") in VEHICLE_ROADS and not osm_covered(w[0])]
     local_ll = lambda x, y: [round(x / 55462.0 + 24.7, 6), round(y / 111415.0 + 60.2, 6)]
     rails = [(RAIL_KINDS[t["railway"]], p) for t, p, _ in ways if t.get("railway") in RAIL_KINDS and not osm_covered(t)]
-    marks = crossings(roads, ways, [el for el in elements if el["type"] == "node"])
+    marks = crossings(roads, ways, nodes)
     for k, pts in lane_lines(roads, road_junctions(roads)) + rails + marks:
         keep = simplify_indices(pts, 0.15)
         features.append({"type": "Feature", "properties": {"k": k},
@@ -2231,6 +2261,115 @@ def build_landcover_lines(bbox):
         json.dump({"type": "FeatureCollection", "features": features}, fh, ensure_ascii=False, separators=(",", ":"))
     count = collections.Counter(f["properties"].get("k", "nimi") for f in features)
     log(f"  → pelimaasto_kanta.geojson: {dict(count)}, {os.path.getsize(path) / 1e6:.1f} Mt")
+    bridges = game_bridges(ways)
+    with open(os.path.join(PUBLIC_DATA, "pelimaasto_sillat.json"), "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "Sillat © OpenStreetMap-tekijät (ODbL), korkeus Espoon kantakartasta", "sillat": bridges}, fh,
+                  ensure_ascii=False, separators=(",", ":"))
+    log(f"  → pelimaasto_sillat.json: {len(bridges)} siltaa")
+
+
+def landcover_osm():
+    """OpenStreetMapin ajotiet, raiteet, ylitykset ja sillat pelillisen maaston alueelta: väylät
+    [(tagit, [(x, y), ...] paikallisina metreinä, solmut)] ja ylityskohtien solmut."""
+    (x0, y0, x1, y1), a = landcover_area(), 2 ** LANDCOVER_AREA_ZOOM
+    lon = lambda x: x / a * 360 - 180
+    lat = lambda y: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / a))))
+    box = f"({lat(y1 + 1):.5f},{lon(x0):.5f},{lat(y0):.5f},{lon(x1 + 1):.5f})"
+    query = (f'[out:json][timeout:180];(way["highway"~"^({"|".join(VEHICLE_ROADS)})(_link)?$"]{box};'
+             f'way["railway"~"^(rail|tram|light_rail)$"]{box};way["footway"="crossing"]{box};'
+             f'way["cycleway"="crossing"]{box};node["highway"="crossing"]{box};way["bridge"]["bridge"!="no"]{box};);out geom;')
+    os.makedirs(os.path.join(CACHE, "pelimaasto"), exist_ok=True)
+    with open(overpass_post(query, os.path.join(CACHE, "pelimaasto", "osm3.json")), encoding="utf-8") as fh:
+        elements = json.load(fh)["elements"]
+    ways = [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]], el["nodes"])
+            for el in elements if el["type"] == "way"]
+    return ways, [el for el in elements if el["type"] == "node"]
+
+
+def bridge_kind(tags):
+    """OSM:n siltaosuuden laji ja kannen puolileveys (m), tai None."""
+    hw, rw = tags.get("highway", ""), tags.get("railway")
+    if tags.get("bridge") in (None, "no") or tags.get("layer", "0").startswith("-"):
+        return None
+    if rw in RAIL_KINDS:
+        return "raide", 2.2
+    if hw.replace("_link", "") in VEHICLE_ROADS:
+        return "tie", road_half(tags) + 1.0
+    if hw in ("footway", "cycleway", "path", "pedestrian", "steps", "bridleway"):
+        try:
+            return "kevyt", max(1.5, float(tags.get("width", "0")) / 2)
+        except ValueError:
+            return "kevyt", 1.5
+    return None
+
+
+def bridge_footprints():
+    """Pelillisen maaston siltojen alueet (kansi + 1,5 m kummallakin puolella) kannet kuten
+    bridge_decks: vain niiden kohdalta korkeusmallin jänteet avataan (build_dem)."""
+    to_ll = lambda x, y: [round(x / 55462.0 + 24.7, 7), round(y / 111415.0 + 60.2, 7), 0]
+    out = []
+    for tags, pts, _ in landcover_osm()[0]:
+        kind = bridge_kind(tags)
+        if kind and len(pts) > 1:
+            d = kind[1] + 1.5
+            out.append([[v for p in offset_line(pts, d) for v in to_ll(*p)], [v for p in offset_line(pts, -d) for v in to_ll(*p)]])
+    return out
+
+
+def resample_line(pts, step):
+    """Murtoviiva [(x, y, z), ...] tasavälein (noin step)."""
+    s = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    n = max(2, int(math.ceil(s[-1] / step)) + 1)
+    out, i = [], 0
+    for k in range(n):
+        t = s[-1] * k / (n - 1)
+        while i < len(pts) - 2 and s[i + 1] < t:
+            i += 1
+        f = (t - s[i]) / (s[i + 1] - s[i]) if s[i + 1] > s[i] else 0.0
+        out.append(tuple(pts[i][c] + (pts[i + 1][c] - pts[i][c]) * f for c in range(3)))
+    return out
+
+
+def game_bridges(ways):
+    """Pelillisen maaston 3D-sillat OSM:n siltaosuuksista [(tagit, [(x, y), ...], solmut)]. Kannen
+    korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
+    kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä (silta, jolle kansia ei
+    ole). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
+    Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide}]."""
+    cache = {}
+
+    def dem(x, y, lifted=True):
+        X, Y = merc_unit(x / 55462.0 + 24.7, y / 111415.0 + 60.2)
+        X, Y = X * 2 ** 15, Y * 2 ** 15
+        key = (int(X), int(Y), lifted)
+        if key not in cache:
+            path = os.path.join(TILES, "korkeus", "15", str(key[0]), f"{key[1]}.webp")
+            cache[key] = dem_read(path if lifted and os.path.exists(path) else dem_tile(15, key[0], key[1]))[1]
+        a = cache[key]
+        return float(a[int((Y - key[1]) * a.shape[0]), int((X - key[0]) * a.shape[1])])
+
+    out = []
+    for tags, pts, _ in ways:
+        if len(pts) < 2 or not (bk := bridge_kind(tags)):
+            continue
+        kind, half = bk
+        line = resample_line([(x, y, 0.0) for x, y in pts], 2.0)
+        s = [0.0]
+        for a, b in zip(line, line[1:]):
+            s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        zl = [dem(x, y) for x, y, _ in line]
+        zo = [dem(x, y, False) for x, y, _ in line]
+        z0, z1 = zl[0], zl[-1]
+        z = [max(h, z0 + (z1 - z0) * t / (s[-1] or 1)) for h, t in zip(zl, s)]
+        z = [sorted(z[max(0, i - 2):i + 3])[len(z[max(0, i - 2):i + 3]) // 2] for i in range(len(z))]  # mediaani
+        if max(a - b for a, b in zip(z, zo)) < 1.0:
+            continue
+        keep = sorted(set(simplify_indices([p[:2] for p in line], 0.3)) | set(simplify_indices(list(zip(s, z)), 0.05)))
+        out.append({"p": [v for i in keep for v in (round(line[i][0] / 55462.0 + 24.7, 6), round(line[i][1] / 111415.0 + 60.2, 6),
+                                                   round(z[i], 2))], "w": round(half, 1), "k": kind})
+    return out
 
 
 def build_district_labels():

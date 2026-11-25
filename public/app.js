@@ -3,7 +3,7 @@ import {
   KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
-import { liftedTileUrl } from "./bridges.js";
+import { liftedTileUrl, setGameMode } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -33,12 +33,14 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
 // kohdalla. Siltojen kohdalla haetaan valmiiksi kannen tasolle nostettu tiili (scripts/build_data.py,
 // bridges.js), muut suoraan Mapterhornista.
 maplibregl.addProtocol("dem", async (params, abortController) => {
-  const [z, x, y] = params.url.slice("dem://".length).split("/").map(Number);
+  const [z, x, y] = params.url.slice("dem://".length).split("?")[0].split("/").map(Number);
   const url = (await liftedTileUrl(z, x, y, TILE_VERSION)) ?? `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
   const res = await fetch(url, { signal: abortController.signal });
   if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
   return { data: await res.arrayBuffer() };
 });
+// Pelillisessä maastossa korkeusmallin tiilet haetaan eri osoitteella (bridges.js, setGameMode).
+const demTiles = (game) => `dem://{z}/{x}/{y}${game ? "?peli" : ""}`;
 
 // Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
 // mutta sallii vastausten tallentamisen selaimen välimuistiin. Ruudut haetaan oman protokollan
@@ -233,11 +235,12 @@ const state = {
   // Ilmakuva on oletuspohja, mutta sen voi ottaa pois. Osoite ?peli avaa pelillisen maaston
   // (kokeilu) ilmakuvan sijaan, joten ilmakuvaa ei silloin ladata alussakaan.
   ortho: !new URLSearchParams(location.search).has("peli"),
-  game: false,
+  game: new URLSearchParams(location.search).has("peli"),
   orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
 };
+setGameMode(state.game);
 
 // ------------------------------------------------------------ apufunktiot
 
@@ -278,7 +281,7 @@ function buildingColorExpr(mode) {
 function buildStyle() {
   const sources = {
     dem: {
-      type: "raster-dem", tiles: ["dem://{z}/{x}/{y}"],
+      type: "raster-dem", tiles: [demTiles(state.game)],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
     // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
@@ -486,6 +489,11 @@ async function setGameTerrain(on) {
       return;
     }
   }
+  // Pelillisen maaston alueella korkeusmallissa korkeat jänteet ovat auki (sillat ovat 3D-malleja);
+  // tiilet ladataan uudelleen eri osoitteella.
+  setGameMode(on);
+  const dem = map.getSource("dem");
+  if (dem.tiles?.[0] !== demTiles(on)) dem.setTiles([demTiles(on)]);
   gameTerrain?.setVisible(on);
   if (!on && !state.ortho) setOrtho(true);
 }
