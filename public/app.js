@@ -236,6 +236,7 @@ const state = {
   // (kokeilu) ilmakuvan sijaan, joten ilmakuvaa ei silloin ladata alussakaan.
   ortho: !new URLSearchParams(location.search).has("peli"),
   game: new URLSearchParams(location.search).has("peli"),
+  trees: new URLSearchParams(location.search).has("puut"), // pelillisen maaston 3D-puut (oletuksena pois)
   orthoIndex: 0,
   overlayOpacity: 0.75,
   buildingColor: "luokka",
@@ -494,7 +495,9 @@ async function setGameTerrain(on) {
   setGameMode(on);
   const dem = map.getSource("dem");
   if (dem.tiles?.[0] !== demTiles(on)) dem.setTiles([demTiles(on)]);
+  gameTerrain?.setTrees(state.trees);
   gameTerrain?.setVisible(on);
+  document.getElementById("pelimaasto-options").hidden = !on;
   if (!on && !state.ortho) setOrtho(true);
 }
 
@@ -604,6 +607,12 @@ function buildPanel() {
   document.getElementById("ortho-options").hidden = !state.ortho;
   const game = document.getElementById("pelimaasto");
   game.addEventListener("change", () => setGameTerrain(game.checked));
+  const trees = document.getElementById("pelimaasto-puut");
+  trees.checked = state.trees;
+  trees.addEventListener("change", () => {
+    state.trees = trees.checked;
+    gameTerrain?.setTrees(state.trees);
+  });
   document.getElementById("ortho-years").append(...ORTHO_YEARS.map(([year], i) => el("label", { class: "seg" },
     el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
     el("span", {}, String(year)))));

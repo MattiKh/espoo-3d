@@ -4,8 +4,9 @@
 // MapLibre levittää ne maaston päälle kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
 // Päällä ovat kantakartan teiden ja polkujen reunaviivat, kadunnimet kantakartan sijainnein ja
 // suunnin sekä OpenStreetMapista kaistaviivat, suojatiet ja raiteet (public/data/pelimaasto_kanta.geojson).
-// Metsiin sijoitellaan kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
-// (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio.
+// Metsiin voi valita kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
+// (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio. Puut ovat pelillisen maaston raskain
+// osa (korkeuskyselyt ja kymmenet tuhannet ilmentymät), joten ne ovat oletuksena pois.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 
 const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
@@ -260,8 +261,6 @@ export async function createGameTerrain(map, { base, version }) {
   const root = new THREE.Group(), group = new THREE.Group(), bridges = new THREE.Group();
   group.matrixAutoUpdate = bridges.matrixAutoUpdate = false;
   root.add(group, bridges);
-  const meshes = treeMeshes();
-  group.add(meshes.trunk, meshes.cone, meshes.round);
   const center = [(info.alue[0] + info.alue[2]) / 2, (info.alue[1] + info.alue[3]) / 2];
   const bridgeRef = { lon: center[0], lat: center[1], unit: EARTH_CIRC * Math.cos(center[1] * D2R) };
   fetch(`${base}data/pelimaasto_sillat.json?v=${version}`).then((r) => (r.ok ? r.json() : { sillat: [] }))
@@ -270,7 +269,8 @@ export async function createGameTerrain(map, { base, version }) {
       map.triggerRepaint();
     })
     .catch((err) => console.warn("Siltoja ei saatu ladattua", err));
-  let visible = false, trees = null, ref = null, heights = null, next = 0, passAt = 0, passes = 0, asking = false;
+  let visible = false, treesOn = false, meshes = null;
+  let trees = null, ref = null, heights = null, next = 0, passAt = 0, passes = 0, asking = false;
 
   function inArea([lon, lat]) {
     const [w, s, e, n] = info.alue;
@@ -282,6 +282,7 @@ export async function createGameTerrain(map, { base, version }) {
     asking = true;
     try {
       const { trees: t } = await ask({ type: "trees", x: mercX(c.lng), y: mercY(c.lat), radius: TREE_RADIUS });
+      if (!treesOn) return;
       trees = t;
       ref = { lon: c.lng, lat: c.lat, unit: EARTH_CIRC * Math.cos(c.lat * D2R) };
       heights = new Float32Array(trees.length / 5).fill(NaN);
@@ -348,7 +349,7 @@ export async function createGameTerrain(map, { base, version }) {
       const wx = (mercX(bridgeRef.lon) - ctx.cmx) / ctx.sc, wy = -(mercY(bridgeRef.lat) - ctx.cmy) / ctx.sc;
       bridges.matrix.set(k, 0, 0, wx, 0, k, 0, wy, 0, 0, k, -ctx.centerElev * k, 0, 0, 0, 1);
     }
-    const on = visible && ctx.zoom >= TREE_MINZOOM;
+    const on = visible && treesOn && ctx.zoom >= TREE_MINZOOM;
     group.visible = on && !!ref;
     if (!on) return;
     const c = map.getCenter();
@@ -372,6 +373,21 @@ export async function createGameTerrain(map, { base, version }) {
     map.triggerRepaint();
   }
 
-  const animating = () => visible && (asking || (heights != null && next < Math.min(heights.length, TREE_MAX)));
-  return { drawable: { object: root, draw, animating }, setVisible };
+  // Puut mukaan tai pois; mallit luodaan vasta, kun puut valitaan ensimmäisen kerran.
+  function setTrees(on) {
+    treesOn = on;
+    if (on && !meshes) {
+      meshes = treeMeshes();
+      group.add(meshes.trunk, meshes.cone, meshes.round);
+    }
+    if (!on) {
+      trees = ref = heights = null;
+      next = 0;
+      for (const mesh of Object.values(meshes ?? {})) mesh.count = 0;
+    }
+    map.triggerRepaint();
+  }
+
+  const animating = () => visible && treesOn && (asking || (heights != null && next < Math.min(heights.length, TREE_MAX)));
+  return { drawable: { object: root, draw, animating }, setVisible, setTrees };
 }

@@ -151,6 +151,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin: 4px 0 0;
 .stat { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .stat .count { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 #ortho-options { margin-top: 8px; }
+#pelimaasto-options { margin: 6px 0 0 24px; }
 
 select {
   font: inherit;
