@@ -19,3 +19,20 @@
   to = "https://opendata.adsb.fi/api/v2/:splat"
   status = 200
   force = true
+
+# Pelillisen maaston tiilet haetaan aina aineistoversion kanssa (?v=, build_data.py päivittää), joten
+# selain voi pitää ne välimuistissa tarkistamatta. Liikkuessa samat tiilet tulevat näin heti.
+[[headers]]
+  for = "/tiles/maanpeite/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/tiles/pelimaasto/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/tiles/pelisillat/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

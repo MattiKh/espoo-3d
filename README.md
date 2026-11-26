@@ -45,7 +45,7 @@ hypätä klikkaamalla, jolloin maisema näkyy kulkuneuvon keulasta.
   kuvan sijaan tai hylkää yhteydet hetkeksi. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin
   päästä; muuten ruutu jäisi virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva
   tarkentuisi.
-- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (Otaniemi–Laajalahti, ks. alla). Pohjana on
+- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (koko Espoo, ks. alla). Pohjana on
   joko ilmakuva tai pelillinen maasto: pelillisen maaston alle ei ladata ilmakuvaa.
 - Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
   ruutujen välissä vaaleana rakona. Ilmakuvan alla tausta on siksi ilmakuvan keskisävyinen
@@ -79,7 +79,11 @@ tiedostoon `public/data/lataus.json`. Rakennusten kaltevat katot tallentuvat kan
 Espoon 3D-mallin, noin 2,5 Gt). Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`) ja siltojen
 korkeusmallin tiiliin Pythonin numpy ja Pillow (`pip3 install numpy pillow`). Pelillisen
-maaston maanpeiteluokat haetaan komennolla `python3 scripts/build_data.py maanpeite`.
+maaston aineistot tehdään komennolla `python3 scripts/build_data.py sillat maanpeite` (sillat ensin,
+sillä viivat tarkistetaan pelillisen korkeusmallin pinnasta). Ensimmäinen ajo hakee HSY:ltä noin
+4 000 maanpeiteruutua (noin 30 min), Espoon WFS:stä kantakartan viivat ja OpenStreetMapista väylät
+(Overpass, ruuhkassa jopa tunti); välimuistista koko ajo vie noin 40 min. Pelkät viivat ja sillat
+(maanpeite valmiina) tekee `python3 scripts/build_data.py pelimaasto` (noin 2 min välimuistista).
 Jos haluat ladata aineistot uudelleen, poista ensin `cache/`. Yksittäisen
 aineiston voi päivittää nimellä, esim. `python3 scripts/build_data.py
 maankaytto tiilet`. Kansiot `cache/` ja `data/` eivät ole versionhallinnassa;
@@ -525,25 +529,32 @@ maanpinnalla, eikä rummuissa näytetä pulsseja.
 
 ## Pelillinen maasto (kokeilu)
 
-Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä: koko Espoo maanpeitteen mukaan
-väritettynä ja Otaniemen ja Laajalahden alue (noin 3,6 × 2,4 km) tarkkana. Valinta on
+Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä: koko Espoo tarkkana (maanpeite
+tekstuureina, tiet viivoineen ja 3D-sillat). Valinta on
 Ilmakuva-osiossa, tai pelillisen tilan saa suoraan osoitteella `?peli` (esim.
 http://localhost:8765/?peli). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
 maa, avokalliot, puusto neljässä korkeusluokassa (2–10, 10–15, 15–20 ja yli 20 m), muut päällystetyt
 pinnat, päällystämättömät ja päällystetyt tiet sekä rakennukset. `build_data.py` hakee luokat
 HSY:n karttapalvelusta yhtenä kuvana ruutua kohden ja tunnistaa luokan tyylin täyttöväristä
-(selite JSON-muodossa). Ne tallentuvat harmaasävyruutuina (arvo = luokka) kansioon
-`public/tiles/maanpeite` (taso 16, 1024 px eli noin 0,3 m; 96 ruutua, 3,7 Mt). Koko Espoo veisi
-samalla tarkkuudella arviolta 0,15–0,2 Gt ja 1 metrin tarkkuudella 30–40 Mt.
+(selite JSON-muodossa). Ne tallentuvat harmaasävyruutuina (arvo = luokka) häviöttöminä WebP-kuvina
+(noin 30 % pienempiä kuin PNG) kansioon `public/tiles/maanpeite` (taso 16, 1024 px eli noin 0,3 m).
+Tarvittavat ruudut valitaan yleiskuvasta (alla): maata sisältävät haetaan (4 039), pelkkää merta
+olevat ja muut yhden luokan ruudut ovat vain luettelossa `public/data/maanpeite.json` (`tasaiset`,
+6 407), ja Espoon ulkopuolella käytetään yleiskuvaa. Kuvia on 4 025 (141 Mt). Kaukaisempia
+ruutuja varten tarkoista kootaan ruudun yleisimmällä luokalla välitaso 14 (1024 px eli noin 1,2 m;
+416 kuvaa, 25 Mt), jolloin kaukaisen ruudun maalaukseen riittää yksi luokkaruutu kuudentoista sijaan.
+Espoon rajana on HSY:n seutukartan kuntaraja vesialueineen; rajan ulkopuolelta säilytetään vain meri
+(HSY:n merialue-taso haetaan rajan ruuduille erikseen), joten naapurikuntien maa ja järvet jäävät
+tyhjiksi. Kauniainen jää pois kuten muutkin naapurikunnat. Tilastokeskuksen 1:1 000 000 -raja
+(`espoo_raja.geojson`) seuraa rantaa niin karkeasti, että esim. Keilaniemi jäisi sen ulkopuolelle.
 
 Loitonnettua näkymää varten koko Espoosta on yleiskuva (`build_landcover_overview`): taso 12
 (1024 px eli noin 4,8 m) haetaan HSY:ltä ja taso 9 (noin 38 m) kootaan siitä ruudun yleisimmällä
 luokalla, sillä HSY:n palvelin ei ehdi piirtää niin laajaa kuvaa. Tiheät ruudut eivät ehdi
 palvelimen aikarajaan kokonaisina, joten ne haetaan neljänä palana. Karkeassa kuvassa pienimmät
-kuviot jäävät piirtymättä, ja raot täytetään viereisellä luokalla. Espoon rajan (rantaviiva)
-ulkopuolelta mukana on vain meri, jonka HSY:n merialue-taso antaa nopeasti yksinään, jottei
-rannikko katkea rajaan; tasolla 9 meri on koko ruudun alueelta. Naapurikuntien maa jää tyhjäksi
-(35 + 4 ruutua, 4,7 Mt).
+kuviot jäävät piirtymättä, ja raot täytetään viereisellä luokalla. Espoon rajan ulkopuolelta mukana
+on vain meri, jonka HSY:n merialue-taso antaa nopeasti yksinään, jottei rannikko katkea rajaan;
+tasolla 9 meri on koko ruudun alueelta. Naapurikuntien maa jää tyhjäksi (59 + 4 ruutua, 3,6 Mt).
 
 Selain maalaa luokista tekstuurit työsäikeessä (`public/pelimaasto_worker.js`): metsissä on
 latvuksia (korkeammassa puustossa suurempia ja tummempia), pelloilla vakoja, vedessä aaltoja, kalliossa
@@ -551,14 +562,16 @@ halkeamia, pihoilla laatoitus ja teillä asfaltti tai sora. Kuviot lasketaan maa
 koordinaateista, joten ne jatkuvat ruudusta toiseen, ja luokkarajat ovat hieman epäsäännöllisiä ja
 lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle kuten ilmakuvan
 (tasot 8–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
-Luokat tulevat tarkoista ruuduista niiden alueella ja muualla yleiskuvasta, jolloin luokkarajojen
-epäsäännöllisyys kasvaa ruudun karkeuden mukaan. Kauempaa katsottaessa (pikseli yli 3 m) luokat
+Lähellä (karttaruudun taso 16 ja tarkemmat) luokat tulevat tarkoista ruuduista, kauempana (14–15)
+välitasosta, jonka pikseli on enintään maalattavan pikselin kokoinen, ja loitonnettaessa ja Espoon
+ulkopuolella yleiskuvasta, jolloin luokkarajojen epäsäännöllisyys kasvaa yleiskuvan karkeuden
+mukaan. Kauempaa katsottaessa (pikseli yli 3 m) luokat
 väritetään tekstuurin keskivärillä, sillä hienot kuviot sekoittuisivat kohinaksi.
 Ruudun maalaus vie työsäikeessä 13–50 ms.
 
 Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja polkujen reunaviivat
 (myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
-(`public/data/pelimaasto_kanta.geojson`, 3 Mt). Nimet ovat maaston
+(vektoritiilet, ks. Laatat ja lataus). Nimet ovat maaston
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
 luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja Espoon ulkopuoli on maaston keskisävyä
 (rinnevarjostus on koko näkymässä). 3D-maastotilassa MapLibre (4.7) näyttää puuttuvan
@@ -566,8 +579,8 @@ rasteriruudun tilalla vain neljä alaruutua tai ladatun yläruudun ja piilottaa 
 loitonnettaessa maastoruutu jäi toisinaan yhdeksi kuvaksi ilman pintaa ja kartta välähti.
 Pelillisen maaston pinnalle ja varjostukselle pidetään siksi puuttuvan ruudun ladatut ylä- ja
 alaruudut näkyvissä myös MapLibren välimuistista (`keepLoadedTiles`), ja taustan sävy on sama kuin
-maaston, jottei harvinainen jäljelle jäävä aukko erotu. Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa
-samasta aineistosta. Viivat, sillat ja puut ovat vain tarkalla alueella.
+maaston, jottei harvinainen jäljelle jäävä aukko erotu. Sama säilytys on viivojen vektoritiilillä,
+sillä ne tulevat verkosta. Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa samasta aineistosta.
 
 Lisäksi OpenStreetMapista ovat kaistaviivat, suojatiet ja raiteet. Pääteille (moottori-, valta-,
 kanta-, seutu- ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan)
@@ -580,7 +593,10 @@ tehdään ajoradan poikki tien leveydeltä; merkitsemättömät jätetään pois
 (3 m leveä, 0,5 m raidat ajoradan suuntaisina), ja pyörätien jatkeet kahtena rivinä 0,5 m neliöitä. Raiteet (juna ja
 raitiovaunu, ei tunneleissa) piirretään sepelipohjana, ratapölkkyinä ja kahtena kiskona noin
 1,5 metrin päässä toisistaan. Leveydet ovat metreinä, joten ne skaalautuvat zoomauksen mukana.
-Kokeilualueella kulkee Raide-Jokeri; rantarata on alueen pohjoispuolella ja metro tunnelissa.
+Metro on tunnelissa, joten sen raiteita ei piirretä. OpenStreetMapin väylät haetaan Overpassista
+12 palana (koko Espoo yhtenä kyselynä ei ehdi palvelinten aikarajaan), ja mukaan otetaan Espoon
+väylät (HSY:n kuntaraja vesialueineen, 60 m:n vara), joten esim. lahden ylittävä silta on mukana mutta
+naapurikunnan (myös Kauniaisten) silta ei.
 
 Sillat ovat pelillisessä maastossa 3D-malleja (`public/pelimaasto.js`): kansi (1 m paksu,
 pinnassa asfaltti, kevyen liikenteen sillalla vaalea ja raidesillalla sepeli), reunoilla 0,9 m
@@ -589,13 +605,16 @@ keskiviivat samoilla siirroilla kuin maassa (sama laskenta, `lane_offsets`). Ajo
 ajoradan reunaviivat jatkavat maanpinnan reunaviivoja: niiden sivusijainti otetaan kantakartan
 reunaviivoista enintään 8 m sillan päiden ulkopuolelta, ja jos se on päissä eri, se vaihtuu
 tasaisesti (ilman niitä reuna on metrin päässä kannen reunasta). Ne tehdään OpenStreetMapin siltaosuuksista
-(`public/data/pelimaasto_sillat.json`, alueella 23 siltaa); kannen leveys tulee kaistamäärästä
+(616 siltaa, ks. Laatat ja lataus); kannen leveys tulee kaistamäärästä
 (+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
 kannet) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien pinnasta
 4 m sillan ulkopuolelta (esim. Kehä I:n alikulun kohdalla kantakartan kansi on mitattu 1–1,7 m
-ajorataa alempaa). Pelillisessä tilassa alueen korkeusmallin tiilet vaihdetaan versioon, jossa
+ajorataa alempaa). Pelillisessä tilassa korkeusmallin tiilet vaihdetaan siltojen kohdalla versioon, jossa
 OSM:n siltojen kohdalla kaikki nostot ovat auki ja niiden ympäriltä on poistettu noin 3,5 metrin
-täyttö (`public/tiles/korkeus/peli`, `build_data.py`); muualla kannet ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
+täyttö (`public/tiles/korkeus/peli`, `build_data.py`; 304 tiiltä, 20,5 Mt). Pelillinen tiili
+tallennetaan vain, jos siinä avataan jotain; muuten käytetään tavallista nostettua tiiltä, ja jos
+kaikki nostot avataan, alkuperäistä (`korkeus_peli_alkup` tiedostossa `sillat.json`). Muualla kannet
+ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
 kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista). Sillan kannella kulkevat viivat
 (kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
 siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois, samoin
@@ -614,6 +633,51 @@ jottei metsä välähdä liikkuessa. Puut piirretään instansseina joukkoliiken
 kolmiota joka kuvassa, noin 10 Mt ilmentymätietoja ja 150 metrin siirron jälkeen uudet
 korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä keventää puhelinkäyttöä.
 
+### Laatat ja lataus
+
+Koko Espoon tarkka malli on noin 200 Mt, joten selain lataa siitä vain näkymän ympäriltä ja vapauttaa
+kaukaiset osat. Kallistetussa näkymässä (esim. kyytinäkymä, jossa näköala ulottuu horisonttiin)
+MapLibre hakee ruudut sitä karkeampina, mitä kauempana ne ovat kamerasta (maaston korkeusmallin
+kanssa MapLibre 4.7: lähteen tarkimmat ruudut noin kahden ruudun päähän, ja jokainen seuraava taso
+kaksinkertaiseen etäisyyteen, kauimpana lähteen alin taso). Tarkkuus seuraa siis etäisyyttä:
+
+- Pinta: MapLibre pyytää näkyvät ruudut (`peli://`) ja pitää omaa välimuistiaan. Työsäie hakee
+  maalaukseen luokkaruudut (lähellä yksi tarkka, kauempana yksi välitason ruutu) ja pitää
+  viimeksi käytettyjä muistissa enintään 40 Mt (tarkka ruutu purettuna 1 Mt). Jos MapLibre ei enää
+  tarvitse ruutua (kartta siirtyi), maalaus perutaan ennen kuin se alkaa.
+- Viivat ja nimet: vektoritiilet `public/tiles/pelimaasto` (tippecanoe; tasot 12–15, 1 360 tiiltä,
+  10 Mt, tasolla 15 tarkkuus noin 7 cm). Karkeammissa tiilissä on vähemmän kohteita: tasoilla 12–13
+  vain raiteet (näkyvät kauas), tasolla 14 lisäksi ajoradat, kevyen liikenteen väylät ja
+  kaistaviivat (noin 2,4 km:n päähän) ja tasolla 15 kaikki (polut, suojatiet ja nimet). Lähteen alin
+  taso on 12, jottei horisonttiin ulottuvassa näkymässä haeta kaukaista aluetta tason 14 tiilinä.
+- Sillat: `public/tiles/pelisillat` tason 14 ruuduittain (noin 1,2 km; 616 siltaa 121 ruudussa,
+  luettelo `public/data/pelimaasto_sillat.json`). Ruudut ladataan kameran ympäriltä 6 km:n päähän:
+  alle 1,5 km:n päässä täysi malli (kaiteet, viivat ja pilarit), kauempana pelkkä kansi. Malleja
+  rakennetaan enintään kaksi piirtokertaa kohden lähimmästä alkaen, ja ruutu vapautetaan, kun se on
+  25 % rajaa kauempana (täysi malli vasta, kun kansi on valmis, jottei silta katoa välillä).
+- Korkeusmalli: pelillisen tilan tiilet koko Espoosta vain siltojen kohdalla (ks. yllä).
+- Välimuisti: tiiliosoitteissa on aineistoversio (`?v=`), joten Netlify antaa pelillisen maaston
+  tiilille pitkän välimuistiajan (`netlify.toml`), ja selain ottaa jo haetut tiilet välimuistista
+  kysymättä palvelimelta.
+
+Mittaukset (headless Chrome samalla koneella, 1280 × 800; puhelin: 390 × 844, kolminkertainen
+tarkkuus ja nelinkertaisesti hidastettu suoritin; kyyti: zoomaus 18,6, kallistus 84°, 20 s;
+keko: sivu ja työsäikeet yhteensä):
+
+| | ennen (vain Otaniemi–Laajalahti) | jälkeen (koko Espoo) |
+|---|---|---|
+| Alkulataus `?peli` (siirretty) | 14,6 Mt (puhelin 13,4 Mt) | 8,7 Mt (puhelin 7,6 Mt) |
+| JS-keko alussa | 168 Mt (puhelin 176 Mt) | 86 Mt (puhelin 84 Mt) |
+| Otaniemen kyyti, ms/kuva (toistot) | 17,6–26,8 (puhelin 36) | 19,5–26,2 (puhelin 40) |
+| Otaniemen kyyti, työsäikeiden keko | 126 Mt (puhelin 120 Mt) | 29 Mt (puhelin 41 Mt) |
+| Espoonlahden kyyti, ms/kuva | 17,1–17,5 (ei tarkkaa mallia) | 20,9–21,4 (puhelin 37 → 49) |
+| 40 s:n kyyti Espoonlahdesta Leppävaaraan | ladattu 16 Mt | ladattu 31 Mt; siltaruutuja enintään 60, luokkaruutuja 38 (40 Mt) |
+
+Samalla alueella piirto on yhtä raskas kuin ennen, mutta muistia kuluu selvästi vähemmän, koska
+viivoja ja tarkkoja luokkaruutuja ei ladata kerralla. Uusilla alueilla tarkka malli maksaa noin 4 ms
+kuvaa kohden. Kustannus tulee viivoista ja nimistä (piilotettuina 17,2 ms), kuten Otaniemessä ennenkin;
+siltoja on lähellä noin 10 000–20 000 kolmiota.
+
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
@@ -624,7 +688,7 @@ korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä kev
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/ride.js`: kyytinäkymä: kamera kulkuneuvon keulassa, katseen kääntäminen ja kyytipalkki
 - `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli metron kyytiä varten
-- `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina ja 3D-puut
+- `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)

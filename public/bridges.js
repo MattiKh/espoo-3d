@@ -19,18 +19,18 @@ const cellKey = (cx, cy) => (cx + 10000) * 20000 + (cy + 10000);
 let edgeGrid = null;
 const lifted = new Set(); // nostetut tiilet "z/x/y"
 const gameTiles = new Set(); // pelillisen maaston tiilet (korkeat jänteet auki, sillat 3D-malleina)
-let gameArea = null, gameMode = false;
+const gameOriginal = new Set(); // pelillisessä maastossa alkuperäiset (kaikki nostot avattu)
+let gameMode = false;
 let version = 0;
 
 const ready = fetch("data/sillat.json").then((r) => r.json())
-  .then(({ viivat, korkeus = {}, korkeus_peli = {}, peli_alue = null }) => {
+  .then(({ viivat, korkeus = {}, korkeus_peli = {}, korkeus_peli_alkup = {} }) => {
     edgeGrid = buildEdgeGrid(viivat);
-    for (const [set, index] of [[lifted, korkeus], [gameTiles, korkeus_peli]]) {
+    for (const [set, index] of [[lifted, korkeus], [gameTiles, korkeus_peli], [gameOriginal, korkeus_peli_alkup]]) {
       for (const [z, xy] of Object.entries(index)) {
         for (let i = 0; i < xy.length; i += 2) set.add(`${z}/${xy[i]}/${xy[i + 1]}`);
       }
     }
-    gameArea = peli_alue;
   })
   .catch((err) => console.warn("Siltoja ei saatu ladattua", err));
 
@@ -55,27 +55,22 @@ function buildEdgeGrid(viivat) {
   return grid;
 }
 
-// Pelillisessä maastossa (pelimaasto.js) sillat ovat 3D-malleja, joten sen alueella käytetään
-// korkeusmallia, jossa korkeat jänteet ovat auki. Kannella kulkeva ajoneuvo pidetään silloin
-// kannen tasolla (transit.js).
+// Pelillisessä maastossa (pelimaasto.js) sillat ovat 3D-malleja, joten käytetään korkeusmallia,
+// jossa korkeat jänteet ovat auki. Kannella kulkeva ajoneuvo pidetään silloin kannen tasolla (transit.js).
 export function setGameMode(on) {
   gameMode = on;
 }
 export const isGameMode = () => gameMode;
 
-function inGameArea(z, x, y) {
-  if (!gameArea) return false;
-  const n = 2 ** z, lon0 = (x / n) * 360 - 180, lon1 = ((x + 1) / n) * 360 - 180;
-  const lat = (t) => Math.atan(Math.sinh(Math.PI * (1 - (2 * t) / n))) * 180 / Math.PI;
-  return lon1 > gameArea[0] && lon0 < gameArea[2] && lat(y) > gameArea[1] && lat(y + 1) < gameArea[3];
-}
-
 // Valmiiksi nostetun korkeusmallin tiilen osoite, tai null, jos tiilessä ei ole siltaa (silloin
 // käytetään alkuperäistä). version: aineistoversio, jotta selain ei käytä vanhoja tiiliä.
+// Pelillisessä maastossa avattujen siltojen tiilet ovat erikseen; muut ovat kuten tavallisesti.
 export async function liftedTileUrl(z, x, y, v) {
   await ready;
-  if (gameMode && inGameArea(z, x, y)) return gameTiles.has(`${z}/${x}/${y}`) ? `tiles/korkeus/peli/${z}/${x}/${y}.webp?v=${v}` : null;
-  if (!lifted.has(`${z}/${x}/${y}`)) return null;
+  const key = `${z}/${x}/${y}`;
+  if (gameMode && gameTiles.has(key)) return `tiles/korkeus/peli/${key}.webp?v=${v}`;
+  if (gameMode && gameOriginal.has(key)) return null;
+  if (!lifted.has(key)) return null;
   version = v;
   if (z === RAW_ZOOM) loadRaw(x, y);
   return `tiles/korkeus/${z}/${x}/${y}.webp?v=${v}`;

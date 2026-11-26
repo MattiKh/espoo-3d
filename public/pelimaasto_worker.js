@@ -2,14 +2,17 @@
 // karttaruutujen pintakuvat: jokaisella luokalla on oma tekstuurinsa (metsissä latvukset, pelloilla
 // vaot, vedessä aallot), ja kuviot lasketaan maailman koordinaateista, joten ne jatkuvat ruudusta
 // toiseen. Lisäksi metsiin sijoitellaan puut tasavälisestä ruudukosta satunnaisesti siirtäen.
-// Tarkat luokkaruudut (0,3 m) ovat vain kokeilualueelta; muualla Espoossa ja loitonnettaessa
-// käytetään yleiskuvan karkeampia luokkaruutuja (maanpeite.json: yleiskuva).
+// Luokkaruutujen tasot (maanpeite.json: tasot): tarkat 0,3 m (16) koko Espoosta, niistä koottu
+// välitaso 1,2 m (14) kauempana näkyville ruuduille ja yleiskuva (12 ja 9) loitonnettaessa ja Espoon
+// ulkopuolella. Yhden luokan ruudut ovat vain luettelossa (tasaiset). Ruutuja haetaan vain
+// maalattavien karttaruutujen kohdalta, ja muistissa pidetään viimeksi käytetyt (CACHE_BYTES).
 
 const LC_ZOOM = 16; // tarkkojen luokkaruutujen taso
+const MID_ZOOM = 14; // välitaso: maalataan karttaruudut tasoilla 14–15
 const EARTH_CIRC = 40075016.686;
 const M = EARTH_CIRC * Math.cos((60.18 * Math.PI) / 180); // m Web Mercator -yksikköä kohden Espoossa
 const TILE_PX = 512;
-const CACHE = 64; // luokkaruutuja muistissa
+const CACHE_BYTES = 40e6; // purettuja luokkaruutuja muistissa (tarkka ruutu 1 Mt)
 const TREE_STEP = 4.5; // m: puiden ruudukko
 // Luokat kuten maanpeite.json (arvo = indeksi + 1): 1 vesi, 2 pellot, 3 matala kasvillisuus, 4 paljas maa,
 // 5 avokalliot, 6–9 puusto 2–10, 10–15, 15–20 ja yli 20 m, 10 muu päällystetty, 11 päällystämätön tie,
@@ -17,13 +20,28 @@ const TREE_STEP = 4.5; // m: puiden ruudukko
 const TREE_HEIGHT = [0, 0, 0, 0, 0, 0, 6, 12, 17, 22]; // m luokittain
 
 let base = "", version = 0;
-let detail = null; // tarkkojen ruutujen alue [x0, y0, x1, y1] tasolla LC_ZOOM
-let overview = new Map(); // yleiskuvan taso → Set("x/y")
-const tiles = new Map(); // "z/x/y" → Promise<{ px, data } | null>
+let levels = []; // luokkaruutujen tasot tarkimmasta alkaen
+let fine = []; // tarkoista luokista tehdyt tasot (16, 14); muut ovat yleiskuvaa
+const index = new Map(); // "z/x/y" → true (kuva) tai luokka (tasainen ruutu)
+const tiles = new Map(); // "z/x/y" → Promise<{ px, data } | null>, viimeksi käytetty viimeisenä
+const sizes = new Map(); // "z/x/y" → purettu koko (tavua)
+let cached = 0;
+const cancelled = new Set(); // perutut maalaukset (MapLibre ei enää tarvitse ruutua)
 
-function hasTile(z, x, y) {
-  if (z === LC_ZOOM) return !!detail && x >= detail[0] && x <= detail[2] && y >= detail[1] && y <= detail[3];
-  return !!overview.get(z)?.has(`${x}/${y}`);
+// Viimeksi käytetyt luokkaruudut muistiin enintään CACHE_BYTES; vanhimmat pois.
+function remember(key, p) {
+  tiles.set(key, p);
+  p.then((t) => {
+    if (tiles.get(key) !== p || !t) return;
+    sizes.set(key, t.data.length);
+    cached += t.data.length;
+    for (const old of tiles.keys()) {
+      if (cached <= CACHE_BYTES || old === key) break;
+      tiles.delete(old);
+      cached -= sizes.get(old) ?? 0;
+      sizes.delete(old);
+    }
+  });
 }
 
 function classTile(z, x, y) {
@@ -34,8 +52,10 @@ function classTile(z, x, y) {
     tiles.set(key, p);
     return p;
   }
-  if (!hasTile(z, x, y)) return Promise.resolve(null);
-  p = fetch(`${base}tiles/maanpeite/${z}/${x}/${y}.png?v=${version}`)
+  const entry = index.get(key);
+  if (entry === undefined) return Promise.resolve(null);
+  if (entry !== true) return Promise.resolve({ px: 1, data: Uint8Array.of(entry) });
+  p = fetch(`${base}tiles/maanpeite/${z}/${x}/${y}.webp?v=${version}`)
     .then((r) => (r.ok ? r.blob() : null))
     .then((blob) => blob && createImageBitmap(blob, { colorSpaceConversion: "none", premultiplyAlpha: "none" }))
     .then((bmp) => {
@@ -47,8 +67,7 @@ function classTile(z, x, y) {
       return { px: bmp.width, data };
     })
     .catch(() => null);
-  tiles.set(key, p);
-  if (tiles.size > CACHE) tiles.delete(tiles.keys().next().value);
+  remember(key, p);
   return p;
 }
 
@@ -164,23 +183,28 @@ const MEAN = Array.from({ length: 14 }, (_, c) => {
   return sum.map((v) => v / 4000);
 });
 
-// Luokkaruutujen tasot maalattavan tason mukaan tarkimmasta alkaen: lähellä tarkat ruudut, niiden
-// ulkopuolella yleiskuva ja kauempaa yleiskuvan tasot, joista tarkin kattaa ruudun enintään
-// neljällä luokkaruudulla. Karkein taso on viimeisenä, sillä sen meri ulottuu laajimmalle.
+// Luokkaruutujen tasot maalattavan tason mukaan tarkimmasta alkaen: lähellä (16–) tarkat ruudut,
+// kauempana (14–15) välitaso, jolloin ruudun maalaukseen riittää yksi luokkaruutu, ja niiden
+// ulkopuolella (Espoon ulkopuolella luokka 0) yleiskuva. Loitonnettaessa yleiskuvan tasot, joista
+// tarkin kattaa ruudun enintään neljällä luokkaruudulla. Karkein taso on viimeisenä, sillä sen meri
+// ulottuu laajimmalle.
 function levelsFor(z) {
-  const levels = [...overview.keys()].sort((a, b) => b - a);
-  if (z >= LC_ZOOM - 2 || !levels.length) return [LC_ZOOM, ...levels];
-  const i = levels.findIndex((l) => l <= z + 1);
-  return levels.slice(i < 0 ? -1 : i);
+  const coarse = levels.filter((l) => !fine.includes(l));
+  if (z >= LC_ZOOM) return [LC_ZOOM, ...coarse];
+  if (z >= MID_ZOOM) return [MID_ZOOM, ...coarse];
+  const i = coarse.findIndex((l) => l <= z + 1);
+  return coarse.slice(i < 0 ? -1 : i);
 }
 
 // Ruudun pintakuva pakkaamattomana 24-bittisenä BMP:nä (PNG:n pakkaus olisi hidasta).
-async function paintTile(z, x, y) {
+async function paintTile(z, x, y, id) {
   const n = 2 ** z, span = 1 / n, X0 = x / n, Y0 = y / n, S = TILE_PX;
-  // Luokkarajojen epäsäännöllisyys (r) kasvaa luokkaruudun pikselin koon mukaan (tarkoissa noin 0,3 m).
+  // Luokkarajojen epäsäännöllisyys (r) kasvaa yleiskuvan pikselin koon mukaan. Tarkoissa (0,3 m) ja
+  // välitasolla, jota käytetään vain, kun sen pikseli (1,2 m) on enintään maalattavan kokoinen, se on 1.
   const samplers = await Promise.all(levelsFor(z).map(async (l) => ({
-    at: await classSampler(l, X0, Y0, X0 + span, Y0 + span), r: Math.max(1, M / 2 ** l / 1024 / 0.3),
+    at: await classSampler(l, X0, Y0, X0 + span, Y0 + span), r: fine.includes(l) ? 1 : Math.max(1, M / 2 ** l / 1024 / 0.3),
   })));
+  if (cancelled.delete(id)) return null; // ruutua ei enää tarvita (karttaa siirretty)
   const pxM = (span * M) / S, outline = pxM < 0.7, flat = pxM > 3, d = 0.35 / M;
   const row = Math.ceil((S * 3) / 4) * 4, size = 54 + row * S, buf = new ArrayBuffer(size), dv = new DataView(buf), px = new Uint8Array(buf);
   dv.setUint16(0, 0x4d42, true);
@@ -253,18 +277,24 @@ self.onmessage = async ({ data: msg }) => {
   try {
     if (msg.type === "init") {
       ({ base, version } = msg);
-      const [w, s, e, nb] = msg.info.alue, k = 2 ** LC_ZOOM;
-      const tx = (lon) => Math.floor(((lon + 180) / 360) * k);
-      const ty = (lat) => Math.floor(((1 - Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) / Math.PI) / 2) * k);
-      detail = [tx(w + 1e-9), ty(nb - 1e-9), tx(e - 1e-9), ty(s + 1e-9)];
-      overview = new Map(Object.entries(msg.info.yleiskuva?.tasot ?? {}).map(([l, xy]) =>
-        [Number(l), new Set(xy.flatMap((v, i) => (i % 2 ? [] : [`${v}/${xy[i + 1]}`])))]));
+      const { tasot = {}, tasaiset = {}, tarkat = [] } = msg.info;
+      for (const [l, xy] of Object.entries(tasot)) for (let i = 0; i < xy.length; i += 2) index.set(`${l}/${xy[i]}/${xy[i + 1]}`, true);
+      for (const [l, xyc] of Object.entries(tasaiset)) for (let i = 0; i < xyc.length; i += 3) index.set(`${l}/${xyc[i]}/${xyc[i + 1]}`, xyc[i + 2]);
+      levels = Object.keys(tasot).map(Number).sort((a, b) => b - a);
+      fine = tarkat;
+    } else if (msg.type === "cancel") {
+      if (cancelled.size > 500) cancelled.clear(); // jo valmiiksi maalattujen perumiset
+      cancelled.add(msg.cancel);
     } else if (msg.type === "tile") {
-      const buffer = await paintTile(msg.z, msg.x, msg.y);
-      self.postMessage({ id: msg.id, buffer }, [buffer]);
+      const buffer = await paintTile(msg.z, msg.x, msg.y, msg.id);
+      cancelled.delete(msg.id);
+      if (!buffer) self.postMessage({ id: msg.id, error: "peruttu" });
+      else self.postMessage({ id: msg.id, buffer }, [buffer]);
     } else if (msg.type === "trees") {
       const trees = await plantTrees(msg.x, msg.y, msg.radius);
       self.postMessage({ id: msg.id, trees }, [trees.buffer]);
+    } else if (msg.type === "stats") {
+      self.postMessage({ id: msg.id, luokkaruutuja: tiles.size, muisti_Mt: Math.round(cached / 1e5) / 10 });
     }
   } catch (err) {
     self.postMessage({ id: msg.id, error: String(err) });

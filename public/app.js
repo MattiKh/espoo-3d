@@ -496,6 +496,7 @@ async function setGameTerrain(on) {
     try {
       const [{ createGameTerrain }, { addExtra }] = await Promise.all([import("./pelimaasto.js"), import("./transit.js")]);
       gameTerrain = await createGameTerrain(map, { base: BASE, version: TILE_VERSION });
+      window.espooGame = gameTerrain; // selaimen konsolia varten (esim. espooGame.stats())
       addExtra(gameTerrain.drawable);
     } catch (err) {
       console.warn("Pelillistä maastoa ei saatu ladattua", err);
