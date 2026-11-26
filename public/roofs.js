@@ -253,7 +253,7 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
       shown = on;
       update();
     },
-    // Väritys tai suodatus (ilmakuvan vuosi) muuttui: verkot tehdään uudelleen.
+    // Väritys tai suodatus muuttui: verkot tehdään uudelleen.
     refresh() {
       for (const t of tiles.values()) if (t.buildings.length) buildMesh(t);
       map.triggerRepaint();

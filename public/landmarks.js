@@ -128,7 +128,7 @@ const ROOF_SHADE = 0.78;
 const lod2Landmarks = [];
 let landmarkStyle = { colorOf: () => "#bdbdbd", isVisible: () => true };
 
-// Väritys ja näkyvyys (esim. ilmakuvan vuosi) samoin kuin muissa rakennuksissa.
+// Väritys ja näkyvyys samoin kuin muissa rakennuksissa.
 export function setLandmarkStyle(style) {
   landmarkStyle = style;
   for (const l of lod2Landmarks) paintLandmark(l);

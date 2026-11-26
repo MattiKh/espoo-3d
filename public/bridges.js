@@ -1,5 +1,5 @@
-// Sillat. Maaston korkeusmallista (Maanmittauslaitos 2 m) sillat on poistettu, joten ilmakuvan
-// tie notkahtaisi sillan kohdalla alla olevan tien tai joen tasolle. scripts/build_data.py nostaa
+// Sillat. Maaston korkeusmallista (Maanmittauslaitos 2 m) sillat on poistettu, joten tie
+// notkahtaisi sillan kohdalla alla olevan tien tai joen tasolle. scripts/build_data.py nostaa
 // korkeusmallin tiilet kansien kohdalla valmiiksi kannen tasolle ja korjaa korkeusmallia uudempien
 // teiden pinnan (public/tiles/korkeus), ja selain hakee näiden kohdalla nämä tiilet (app.js).
 // Tarkimmista tiilistä on tallennettu myös nostettujen kohtien maanpinta, jotta sillan ali kulkeva
@@ -20,7 +20,6 @@ let edgeGrid = null;
 const lifted = new Set(); // nostetut tiilet "z/x/y"
 const gameTiles = new Set(); // pelillisen maaston tiilet (korkeat jänteet auki, sillat 3D-malleina)
 const gameOriginal = new Set(); // pelillisessä maastossa alkuperäiset (kaikki nostot avattu)
-let gameMode = false;
 let version = 0;
 
 const ready = fetch("data/sillat.json").then((r) => r.json())
@@ -55,26 +54,29 @@ function buildEdgeGrid(viivat) {
   return grid;
 }
 
-// Pelillisessä maastossa (pelimaasto.js) sillat ovat 3D-malleja, joten käytetään korkeusmallia,
-// jossa korkeat jänteet ovat auki. Kannella kulkeva ajoneuvo pidetään silloin kannen tasolla (transit.js).
-export function setGameMode(on) {
-  gameMode = on;
-}
-export const isGameMode = () => gameMode;
-
-// Valmiiksi nostetun korkeusmallin tiilen osoite, tai null, jos tiilessä ei ole siltaa (silloin
+// Valmiiksi muokatun korkeusmallin tiilen osoite, tai null, jos tiilessä ei ole siltaa (silloin
 // käytetään alkuperäistä). version: aineistoversio, jotta selain ei käytä vanhoja tiiliä.
-// Pelillisessä maastossa avattujen siltojen tiilet ovat erikseen; muut ovat kuten tavallisesti.
+// Sillat ovat 3D-malleja (pelimaasto.js), joten niiden kohdalla korkeat jänteet ovat auki
+// (tiles/korkeus/peli); muiden siltojen kannet on nostettu (tiles/korkeus).
 export async function liftedTileUrl(z, x, y, v) {
   await ready;
   const key = `${z}/${x}/${y}`;
-  if (gameMode && gameTiles.has(key)) return `tiles/korkeus/peli/${key}.webp?v=${v}`;
-  if (gameMode && gameOriginal.has(key)) return null;
+  if (gameTiles.has(key)) return `tiles/korkeus/peli/${key}.webp?v=${v}`;
+  if (gameOriginal.has(key)) return null;
   if (!lifted.has(key)) return null;
   version = v;
   if (z === RAW_ZOOM) loadRaw(x, y);
   return `tiles/korkeus/${z}/${x}/${y}.webp?v=${v}`;
 }
+
+// 3D-siltojen kannet (pelimaasto.js): funktio (lon, lat) → [{ z: kannen korkeus (m), k: tie | kevyt | raide }]
+// ladatuista siltaruuduista. Sillan kohdalla korkeusmallin jänne on auki, joten ajoneuvo pidetään
+// kannella näiden mukaan (transit.js).
+let gameDecks = () => [];
+export function setGameDecks(fn) {
+  gameDecks = fn;
+}
+export const gameDecksAt = (lon, lat) => gameDecks(lon, lat);
 
 // Alkuperäinen maanpinta nostetuissa pikseleissä (muualla musta): avain x/y → { W, idx, raw },
 // idx: nostettujen pikselien indeksit järjestyksessä, raw: niiden maanpinnan korkeus.

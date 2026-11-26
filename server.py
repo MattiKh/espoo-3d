@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Paikallinen palvelin Espoo 3D -kartalle.
 
-Jakaa public/-kansion ja välittää HSY:n WMS-kuvat ja adsb.fi:n lentokonesijainnit, koska
-näiden palvelimet eivät salli selaimen suoria hakuja muista osoitteista (CORS).
+Jakaa public/-kansion ja välittää adsb.fi:n lentokonesijainnit, koska palvelu ei salli selaimen
+suoria hakuja muista osoitteista (CORS).
 
 Käyttö:  python3 server.py [--port 8765]
 """
@@ -14,7 +14,6 @@ import urllib.parse
 import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
-PROXIES = {"/proxy/hsy/wms": "https://kartta.hsy.fi/geoserver/wms"}
 # Polun loppuosa siirtyy mukana: /proxy/adsb/lat/60.2/lon/24.7/dist/25 → .../api/v2/lat/60.2/...
 PREFIX_PROXIES = {"/proxy/adsb/": "https://opendata.adsb.fi/api/v2/"}
 
@@ -27,9 +26,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*a, directory=ROOT, **kw)
 
     def do_GET(self):
-        path, _, query = self.path.partition("?")
-        if path in PROXIES:
-            return self.proxy(PROXIES[path] + "?" + query)
+        path = self.path.partition("?")[0]
         for prefix, target in PREFIX_PROXIES.items():
             if path.startswith(prefix):
                 # Lentokoneiden sijainnit ovat reaaliaikaisia, joten niitä ei tallenneta välimuistiin.

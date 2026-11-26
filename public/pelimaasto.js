@@ -1,15 +1,16 @@
-// Pelillinen maasto (kokeilu). HSY:n maanpeiteaineiston luokat (metsät korkeusluokittain, pellot,
+// Maaston pinta (pelillinen maasto). HSY:n maanpeiteaineiston luokat (metsät korkeusluokittain, pellot,
 // tiet, vesi, ...) ovat valmiina rasteriruutuina (scripts/build_data.py, public/tiles/maanpeite):
 // koko Espoo tarkkoina (0,3 m), niistä koottuna välitasona (1,2 m) ja yleiskuvana (noin 5 ja 38 m).
 // Selain maalaa niistä työsäikeessä (pelimaasto_worker.js) tekstuurit, ja MapLibre levittää ne
-// maaston päälle kuten ilmakuvan; rinnevarjostus antaa maastolle muodot.
+// maaston päälle rasteriruutuina; rinnevarjostus antaa maastolle muodot.
 // Päällä ovat kantakartan teiden ja polkujen reunaviivat, kadunnimet kantakartan sijainnein ja
 // suunnin sekä OpenStreetMapista kaistaviivat, suojatiet ja raiteet (vektoritiilet public/tiles/pelimaasto)
 // ja 3D-sillat (public/tiles/pelisillat). Kaikki ladataan ruuduittain vain näkymän ympäriltä.
-// Metsiin voi valita kameran ympärille matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolle
-// (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio. Puut ovat pelillisen maaston raskain
-// osa (korkeuskyselyt ja kymmenet tuhannet ilmentymät), joten ne ovat oletuksena pois.
+// Metsissä on kameran ympärillä matalapolygonisia 3D-puita joukkoliikenteen 3D-tasolla
+// (transit.js): lehtipuilla pyöreä latvus, havupuilla kartio. Puut ovat maaston raskain osa
+// (korkeuskyselyt ja kymmenet tuhannet ilmentymät), joten ne voi ottaa paneelista pois.
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
+import { setGameDecks } from "./bridges.js";
 
 const D2R = Math.PI / 180, EARTH_CIRC = 40075016.686;
 const TREE_MINZOOM = 15;
@@ -61,6 +62,7 @@ const BRIDGE_FAR = 6000; // m: kansi näin kauas (kauempana jänne näkyy maasto
 const BRIDGE_RELEASE = 1.25; // malli vapautetaan, kun ruutu on näin paljon rajaa kauempana
 const BRIDGE_CHECK = 300; // ms: tarvittavat ruudut tarkistetaan näin usein
 const BRIDGE_BUILDS = 2; // malleja rakennetaan enintään näin monta piirtokertaa kohden
+const DECK_REACH = 1.0; // m: ajoneuvo on kannella näin kaukana kannen reunasta (sijainnin epätarkkuus)
 const DECK = 1.0, RAIL_H = 0.9, RAIL_T = 0.25; // m: kannen paksuus, kaiteen korkeus ja paksuus
 const PIER_STEP = 24, PIER_DEPTH = 40, END_EXTRA = 2; // m: pilarien väli ja syvyys, kantta jatketaan päistä
 // Värit ovat tummia, sillä 3D-tason valaistus on kirkas (kannen pinta vastaa maaston asfalttia).
@@ -89,7 +91,7 @@ function bridgeMesh(list, ref, exag, full) {
     quad(lo[0], lo[3], lo[2], lo[1], color);
     for (let i = 0; i < 4; i++) quad(lo[i], lo[(i + 1) % 4], hi[(i + 1) % 4], hi[i], color);
   };
-  for (const { p, w, k, v, r } of list) {
+  for (const { p, w, k, v, r, ka, tu } of list) {
     const P = [];
     for (let i = 0; i < p.length; i += 3) {
       P.push([(mercX(p[i]) - mercX(ref.lon)) * ref.unit, -(mercY(p[i + 1]) - mercY(ref.lat)) * ref.unit, p[i + 2] * exag + 0.15]);
@@ -111,8 +113,8 @@ function bridgeMesh(list, ref, exag, full) {
       quad(at(i, w, z0 - DECK), at(i + 1, w, z1 - DECK), at(i + 1, -w, z1 - DECK), at(i, -w, z0 - DECK), CONCRETE);
       for (const side of [w, -w]) {
         quad(at(i, side, z0), at(i + 1, side, z1), at(i + 1, side, z1 - DECK), at(i, side, z0 - DECK), CONCRETE);
-        if (!full) continue;
-        // Kaide reunalla: ulkopinta, sisäpinta ja yläpinta.
+        // Kaide reunalla: ulkopinta, sisäpinta ja yläpinta. Ei toisen sillan kannella (ka: bitti 1 vasen, 2 oikea).
+        if (!full || (ka && !(+ka[i] & (side > 0 ? 1 : 2)))) continue;
         const inner = side - Math.sign(side) * RAIL_T;
         quad(at(i, side, z0), at(i + 1, side, z1), at(i + 1, side, z1 + RAIL_H), at(i, side, z0 + RAIL_H), RAILING);
         quad(at(i, inner, z0), at(i + 1, inner, z1), at(i + 1, inner, z1 + RAIL_H), at(i, inner, z0 + RAIL_H), RAILING);
@@ -120,6 +122,14 @@ function bridgeMesh(list, ref, exag, full) {
       }
     }
     for (const i of [0, P.length - 1]) quad(at(i, w, P[i][2]), at(i, -w, P[i][2]), at(i, -w, P[i][2] - DECK), at(i, w, P[i][2] - DECK), CONCRETE);
+    // Päätytuet vapaisiin päihin, jotka ovat maaston yläpuolella (tu, build_data.py): esim. portaisiin
+    // tai rakennukseen päättyvä kevyen liikenteen silta ei jää ilmaan.
+    for (const [i, j] of [[0, 1], [P.length - 1, P.length - 2]].filter((_, e) => tu?.[e])) {
+      const dx = P[j][0] - P[i][0], dy = P[j][1] - P[i][1], ln = Math.hypot(dx, dy) || 1, ux = dx / ln, uy = dy / ln;
+      const x = P[i][0] + ux * (END_EXTRA + 0.6), y = P[i][1] + uy * (END_EXTRA + 0.6), z = P[i][2], [nx, ny] = N[i], cw = w * 0.9;
+      box([[x + nx * cw - ux * 0.6, y + ny * cw - uy * 0.6], [x - nx * cw - ux * 0.6, y - ny * cw - uy * 0.6],
+        [x - nx * cw + ux * 0.6, y - ny * cw + uy * 0.6], [x + nx * cw + ux * 0.6, y + ny * cw + uy * 0.6]], z - DECK - PIER_DEPTH, z - DECK, CONCRETE);
+    }
     if (!full) continue;
     // Kaistaviivat kannen pintaan (v: siirrot oikealle kulkusuuntaan nähden, m).
     const S = [0];
@@ -223,7 +233,7 @@ function keepLoadedTiles(map, ids) {
 export async function createGameTerrain(map, { base, version }) {
   const info = await fetch(`${base}data/maanpeite.json?v=${version}`).then((r) => r.json());
   worker.postMessage({ type: "init", base, version, info });
-  const layers = map.getStyle().layers, before = layers[layers.findIndex((l) => l.id === "ortho") + 1]?.id;
+  const layers = map.getStyle().layers, before = layers[layers.findIndex((l) => l.id === "tausta") + 1]?.id;
   // Yleiskuvan ansiosta pinta näkyy myös loitonnettaessa koko Espoon näkymään asti.
   const bounds = info.alue;
   map.addSource("pelimaasto", {
@@ -443,6 +453,7 @@ export async function createGameTerrain(map, { base, version }) {
         fetch(`${base}tiles/pelisillat/${bridgeZoom}/${x}/${y}.json?v=${version}`).then((r) => (r.ok ? r.json() : { sillat: [] }))
           .then(({ sillat }) => {
             chunk.list = sillat;
+            chunk.decks = sillat.map(deckOf);
             map.triggerRepaint();
           })
           .catch((err) => console.warn("Siltaruutua ei saatu ladattua", key, err));
@@ -457,6 +468,34 @@ export async function createGameTerrain(map, { base, version }) {
       }
     }
   }
+
+  // Ajoneuvot kannelle (bridges.js, transit.js): kannet paikallisina metreinä kuten transit.js.
+  const local = (lon, lat) => [(lon - 24.7) * 55462, (lat - 60.2) * 111415];
+  function deckOf({ p, w, k }) {
+    const pts = [];
+    for (let i = 0; i < p.length; i += 3) pts.push([...local(p[i], p[i + 1]), p[i + 2]]);
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]), m = w + DECK_REACH;
+    return { pts, w, k, box: [Math.min(...xs) - m, Math.min(...ys) - m, Math.max(...xs) + m, Math.max(...ys) + m] };
+  }
+  setGameDecks((lon, lat) => {
+    const n = 2 ** bridgeZoom, cx = Math.floor(mercX(lon) * n), cy = Math.floor(mercY(lat) * n), [x, y] = local(lon, lat), out = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (const d of chunks.get(`${cx + dx}/${cy + dy}`)?.decks ?? []) {
+          if (x < d.box[0] || y < d.box[1] || x > d.box[2] || y > d.box[3]) continue;
+          let best = Infinity, z = null;
+          for (let i = 1; i < d.pts.length; i++) {
+            const [ax, ay, az] = d.pts[i - 1], [bx, by, bz] = d.pts[i], ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+            const t = l2 ? Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0;
+            const dist = Math.hypot(ax + ex * t - x, ay + ey * t - y);
+            if (dist < best) { best = dist; z = az + (bz - az) * t; }
+          }
+          if (best <= d.w + DECK_REACH) out.push({ z, k: d.k });
+        }
+      }
+    }
+    return out;
+  });
 
   function dropMesh(c, lod) {
     if (!c[lod]) return;

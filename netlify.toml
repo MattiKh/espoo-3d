@@ -4,15 +4,7 @@
   publish = "public"
   command = ""
 
-# HSY:n WMS ei salli selaimen suoria hakuja (CORS), joten Netlify välittää ne.
-# Vastaa paikallisen server.py:n reittiä /proxy/hsy/wms; kyselyparametrit siirtyvät mukana.
-[[redirects]]
-  from = "/proxy/hsy/wms"
-  to = "https://kartta.hsy.fi/geoserver/wms"
-  status = 200
-  force = true
-
-# Lentokoneiden sijainnit (adsb.fi) eivät myöskään salli selaimen suoria hakuja.
+# Lentokoneiden sijainnit (adsb.fi) eivät salli selaimen suoria hakuja, joten Netlify välittää ne.
 # Vastaa server.py:n reittiä /proxy/adsb/...
 [[redirects]]
   from = "/proxy/adsb/*"

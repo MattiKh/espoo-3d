@@ -1,9 +1,9 @@
 import {
   BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
-  KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, ORTHO_YEARS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
+  KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
-import { liftedTileUrl, setGameMode } from "./bridges.js";
+import { liftedTileUrl } from "./bridges.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -29,9 +29,9 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
   return { data };
 });
 
-// Korkeusmallin tiilet. Sillat puuttuvat korkeusmallista, joten ilmakuvan tie notkahtaisi sillan
-// kohdalla. Siltojen kohdalla haetaan valmiiksi kannen tasolle nostettu tiili (scripts/build_data.py,
-// bridges.js), muut suoraan Mapterhornista.
+// Korkeusmallin tiilet. Sillat puuttuvat korkeusmallista, joten tie notkahtaisi sillan kohdalla.
+// Siltojen kohdalla haetaan valmiiksi muokattu tiili (scripts/build_data.py, bridges.js: 3D-siltojen
+// jänteet auki, muut kannet nostettu), muut suoraan Mapterhornista.
 maplibregl.addProtocol("dem", async (params, abortController) => {
   const [z, x, y] = params.url.slice("dem://".length).split("?")[0].split("/").map(Number);
   const url = (await liftedTileUrl(z, x, y, TILE_VERSION)) ?? `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
@@ -39,159 +39,11 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
   if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
   return { data: await res.arrayBuffer() };
 });
-// Pelillisessä maastossa korkeusmallin tiilet haetaan eri osoitteella (bridges.js, setGameMode).
-const demTiles = (game) => `dem://{z}/{x}/{y}${game ? "?peli" : ""}`;
 
-// Ilmakuva: Espoon karttapalvelu tekee jokaisen ruudun erikseen (PNG, noin 0,7 Mt, noin sekunti),
-// mutta sallii vastausten tallentamisen selaimen välimuistiin. Ruudut haetaan oman protokollan
-// kautta (ortho://taso/z/x/y), jolloin ruudun osoite on tiedossa. Kartan pysähdyttyä haetaan
-// valmiiksi ruudut, jotka näkyisivät, jos karttaa siirtäisi kuudesosan tai kolmanneksen näkymästä
-// mihin tahansa suuntaan; karttaa siirrettäessä ne tulevat välimuistista heti. Kallistetussa
-// näkymässä ruudun taso riippuu etäisyydestä kamerasta, joten siirto vaihtaa muitakin kuin reunan
-// ruutuja. Siirron jälkeistä keskipistettä ei tiedä tarkasti (maasto), joten se lasketaan kahdella
-// tavalla: maaston pinnalta ja keskipisteen korkeuden tasolta.
-const ORTHO_PREFETCH_SHIFTS = [1 / 6, 1 / 3];
-// Ruutuja haetaan enintään kuusi kerrallaan, jottei karttapalvelu ruuhkaudu (MapLibre pyytäisi
-// jopa 16 kerrallaan ja ennakkohaku lisäisi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa,
-// ja ennakkohaku käyttää enintään kahta paikkaa.
-const ORTHO_PARALLEL = 6, ORTHO_PREFETCH_PARALLEL = 2;
-// Oletuksena olevan vuoden 2024 ilmakuvan maastoresoluutio on 0,30 m, ja tason 17 ruudussa pikseli
-// on juuri 0,30 m, joten lähempänä tason 17 ruutuja suurennetaan. Tarkemmat ruudut eivät toisi
-// lisää yksityiskohtia, mutta kallistetussa näkymässä niitä vaihtuisi karttaa siirrettäessä
-// moninkertaisesti (ruudun taso riippuu etäisyydestä kamerasta), ja kuva sumenisi latauksen ajan.
-// Vanhemmissa (2015: 0,20 m, 2005: 0,25 m) menetetään hieman tarkkuutta.
-const ORTHO_MAXZOOM = 17;
-// Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (ServiceException, HTTP 200) kuvan
-// sijaan. Ruutua yritetään silloin uudelleen hetken päästä; muuten MapLibre jättäisi sen
-// virheelliseksi ja näyttäisi tilalla karkeamman ruudun, eikä kuva tarkentuisi.
-const ORTHO_RETRY = [1000, 3000, 8000]; // ms
-// Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin. Ilmakuvan alla tausta on
-// siksi ilmakuvan keskisävyinen harmaa, jottei rako näy vaaleana (myös kuvauksen ulkopuoliset alueet).
-const ORTHO_BACKGROUND = "#868b84";
-// Pelillisessä maastossa tausta on maaston keskisävy samasta syystä: 3D-maastotilassa MapLibre
-// jättää loitonnettaessa maastoruudun toisinaan yhdeksi kuvaksi ilman pintaa (pelimaasto.js), ja
-// vaalea tausta välähti. Sama sävy on Espoon ulkopuolella (pelimaasto_worker.js).
-const GAME_BACKGROUND = "#6f8a5a";
-const orthoInflight = new Map();
-const orthoPrefetched = new Set();
-let orthoQueue = [], orthoActive = 0;
-const orthoWaiting = { high: [], low: [] };
-let orthoRunning = 0;
-const orthoDone = new Set(); // haetut ruudut: selaimen välimuistissa, joten ne eivät jonota
-
-function tileBBox(z, x, y) {
-  const world = 2 * Math.PI * 6378137, size = world / 2 ** z, x0 = -world / 2 + x * size, y1 = world / 2 - y * size;
-  return `${x0},${y1 - size},${x0 + size},${y1}`;
-}
-
-function orthoUrl(layer, z, x, y) {
-  const params = new URLSearchParams({
-    SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layer, STYLES: "", SRS: "EPSG:3857",
-    WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: "TRUE", BBOX: tileBBox(z, x, y),
-  });
-  return `${WMS_SERVICES.espoo}?${params}`;
-}
-
-// Vuoro karttapalvelulle (ORTHO_PARALLEL); näkyvät ruudut ennen ennakkohakua.
-function orthoSlot(priority) {
-  if (orthoRunning < ORTHO_PARALLEL) {
-    orthoRunning++;
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => orthoWaiting[priority].push(resolve));
-}
-
-function orthoRelease() {
-  const next = orthoWaiting.high.shift() ?? orthoWaiting.low.shift();
-  if (next) next();
-  else orthoRunning--;
-}
-
-// signal: kartan peruma ruutu (esim. näkymästä jo poistunut) jätetään hakematta, jos se on vielä jonossa.
-async function loadOrtho(url, priority, signal) {
-  if (orthoDone.has(url)) {
-    const r = await fetch(url, { priority }).catch(() => null);
-    if (r?.ok && r.headers.get("content-type")?.startsWith("image/")) return r.arrayBuffer();
-    orthoDone.delete(url);
-  }
-  for (let i = 0; ; i++) {
-    await orthoSlot(priority);
-    let r, data;
-    try {
-      if (signal?.aborted) throw new DOMException("Ruutua ei enää tarvita", "AbortError");
-      // Verkkovirhe (palvelu hylkää toisinaan yhteydet hetkeksi) yritetään uudelleen kuten virhevastaus.
-      r = await fetch(url, { priority, cache: i ? "no-cache" : "default" }).catch(() => null);
-      if (r?.ok && r.headers.get("content-type")?.startsWith("image/")) data = await r.arrayBuffer();
-    } finally {
-      orthoRelease();
-    }
-    if (data) {
-      if (orthoDone.size > 5000) orthoDone.clear();
-      orthoDone.add(url);
-      return data;
-    }
-    if (i === ORTHO_RETRY.length) throw new Error(`Ilmakuvaruutua ei saatu (${r?.status ?? "verkkovirhe"})`);
-    await new Promise((resolve) => setTimeout(resolve, ORTHO_RETRY[i]));
-  }
-}
-
-// Sama ruutu haetaan vain kerran, vaikka ennakkohaku ja kartta pyytäisivät sitä yhtä aikaa.
-function fetchOrtho(url, priority, signal) {
-  let p = orthoInflight.get(url);
-  if (!p) {
-    p = loadOrtho(url, priority, signal).finally(() => orthoInflight.delete(url));
-    orthoInflight.set(url, p);
-  }
-  return p;
-}
-
-maplibregl.addProtocol("ortho", async (params, abortController) => {
-  const [layer, z, x, y] = params.url.slice("ortho://".length).split("/");
-  return { data: await fetchOrtho(orthoUrl(layer, +z, +x, +y), "high", abortController.signal) };
-});
-
-function prefetchOrtho() {
-  orthoQueue = [];
-  if (!state.ortho) return;
-  const layer = ORTHO_YEARS[state.orthoIndex][1], { width, height } = map.transform, wanted = new Set();
-  const options = { tileSize: 512, minzoom: 0, maxzoom: ORTHO_MAXZOOM, roundZoom: true, terrain: map.terrain };
-  const centers = [map.getCenter()];
-  for (const f of ORTHO_PREFETCH_SHIFTS) {
-    for (const [dx, dy] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
-      const p = map.transform.centerPoint.clone();
-      p.x += dx * width * f;
-      p.y += dy * height * f;
-      for (const locate of [() => map.unproject(p), () => map.transform.pointLocation(p)]) {
-        try {
-          centers.push(locate());
-        } catch { // piste horisontin yläpuolella (jyrkkä kallistus)
-        }
-      }
-    }
-  }
-  for (const center of centers) {
-    const t = map.transform.clone();
-    t.center = center;
-    for (const { canonical: { z, x, y } } of t.coveringTiles(options)) { // keskeltä alkaen
-      const url = orthoUrl(layer, z, x, y);
-      if (!orthoPrefetched.has(url) && !orthoDone.has(url) && !orthoInflight.has(url)) wanted.add(url);
-    }
-  }
-  orthoQueue = [...wanted];
-  pumpOrtho();
-}
-
-// Ennakkohaut matalalla prioriteetilla, jottei näkyvien ruutujen lataus hidastu.
-function pumpOrtho() {
-  while (orthoActive < ORTHO_PREFETCH_PARALLEL && orthoQueue.length) {
-    const url = orthoQueue.shift();
-    orthoPrefetched.add(url);
-    orthoActive++;
-    fetchOrtho(url, "low").catch(() => orthoPrefetched.delete(url)).finally(() => { orthoActive--; pumpOrtho(); });
-  }
-}
-
-const orthoTiles = (layer) => [`ortho://${layer}/{z}/{x}/{y}`];
+// Maaston pinta on pelillinen maasto (pelimaasto.js). 3D-maastotilassa MapLibre jättää loitonnettaessa
+// maastoruudun toisinaan yhdeksi kuvaksi ilman pintaa, joten tausta on maaston keskisävy, jottei
+// aukko erotu vaaleana. Sama sävy on Espoon ulkopuolella (pelimaasto_worker.js).
+const GROUND_BACKGROUND = "#6f8a5a";
 
 // Sadetutka: Ilmatieteen laitoksen sateen voimakkuus (mm/h). Uusin kuva-aika luetaan tason
 // ominaisuuksista viiden minuutin välein; aika on tiiliosoitteessa, joten selain ei näytä vanhaa kuvaa
@@ -235,16 +87,10 @@ async function refreshRadar() {
 let detail = null; // { lon, lat, radius }: 3D-rakennusten ja kattojen alue lähikuvassa (updateDetail)
 
 const state = {
-  // Ilmakuva on oletuspohja, mutta sen voi ottaa pois. Osoite ?peli avaa pelillisen maaston
-  // (kokeilu) ilmakuvan sijaan, joten ilmakuvaa ei silloin ladata alussakaan.
-  ortho: !new URLSearchParams(location.search).has("peli"),
-  game: new URLSearchParams(location.search).has("peli"),
-  trees: new URLSearchParams(location.search).has("puut"), // pelillisen maaston 3D-puut (oletuksena pois)
-  orthoIndex: 0,
+  trees: new URLSearchParams(location.search).get("puut") !== "0", // 3D-puut metsissä (pois: ?puut=0)
   overlayOpacity: 0.75,
   buildingColor: "luokka",
 };
-setGameMode(state.game);
 
 // ------------------------------------------------------------ apufunktiot
 
@@ -285,11 +131,9 @@ function buildingColorExpr(mode) {
 function buildStyle() {
   const sources = {
     dem: {
-      type: "raster-dem", tiles: [demTiles(state.game)],
+      type: "raster-dem", tiles: ["dem://{z}/{x}/{y}"],
       encoding: "terrarium", tileSize: 512, maxzoom: 15, attribution: ATTR_DEM,
     },
-    // Läpinäkyvä tausta: kuvauksen ulkopuoliset alueet eivät näy valkoisina.
-    ortho: { type: "raster", tiles: orthoTiles(ORTHO_YEARS[state.orthoIndex][1]), tileSize: 512, maxzoom: ORTHO_MAXZOOM, attribution: ATTR_ESPOO },
     kohteet: {
       type: "vector", tiles: [`gz://${BASE}tiles/kohteet/{z}/{x}/{y}.pbf?v=${TILE_VERSION}`],
       minzoom: 8, maxzoom: 15, attribution: ATTR_ESPOO + " · " + ATTR_HSY,
@@ -302,8 +146,7 @@ function buildStyle() {
 
   const visibility = (on) => (on ? "visible" : "none");
   const layers = [
-    { id: "tausta", type: "background", paint: { "background-color": state.ortho ? ORTHO_BACKGROUND : "#dfe6e9" } },
-    { id: "ortho", type: "raster", source: "ortho", layout: { visibility: visibility(state.ortho) }, paint: { "raster-fade-duration": 150 } },
+    { id: "tausta", type: "background", paint: { "background-color": GROUND_BACKGROUND } },
   ];
 
   // Aineistot: ensin karttakuvat listan järjestyksessä (alimmaiseksi), sitten alueet, viivat ja 3D.
@@ -313,15 +156,14 @@ function buildStyle() {
     if (def.radar) continue; // lisätään, kun uusin kuva-aika tiedetään (refreshRadar)
     if (def.labels) continue; // nimet lisätään kaiken päälle (alla)
     if (def.streams) continue; // lisätään, kun uomat on ladattu (initStreams)
+    if (def.cameras) continue; // lisätään, kun kamerat on haettu (initCameras)
     if (def.wms) {
       sources[def.id] = {
         type: "raster", tiles: wmsTiles(def.wms, { service: def.service, extra: def.params }), tileSize: 512,
-        attribution: def.service === "hsy" ? ATTR_HSY : ATTR_ESPOO,
+        attribution: ATTR_ESPOO,
       };
       overlay.push({
-        // Pelillisessä tilassa piilotettava taso (hideInGame) on piilossa jo alussa, jottei sen
-        // kuvia haeta turhaan ennen kuin pelillinen maasto on ladattu.
-        id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on && !(def.hideInGame && state.game)) },
+        id: def.id, type: "raster", source: def.id, layout: { visibility: visibility(def.on) },
         paint: { "raster-opacity": state.overlayOpacity, ...def.paint },
       });
       continue;
@@ -425,21 +267,10 @@ map.on("load", () => {
   initTransit();
   initStreams();
   initRoofs();
+  initGround();
+  initCameras();
   refreshRadar();
   setInterval(refreshRadar, 120000);
-  prefetchOrtho();
-  // Osoite ?peli avaa kartan pelillinen maasto päällä (kokeilu).
-  if (new URLSearchParams(location.search).has("peli")) {
-    document.getElementById("pelimaasto").checked = true;
-    setGameTerrain(true);
-  }
-});
-// Ennakkohaku vasta, kun kartta on pysähtynyt: kyytinäkymässä (ride.js) kamera asetetaan joka
-// ruudussa, ja jokainen asetus päättyy moveend-tapahtumaan.
-let prefetchTimer = null;
-map.on("moveend", () => {
-  clearTimeout(prefetchTimer);
-  prefetchTimer = setTimeout(prefetchOrtho, 400);
 });
 map.on("moveend", updateDetail);
 
@@ -455,10 +286,12 @@ map.on("idle", () => busy.classList.remove("on"));
 function setVisible(def, on) {
   if (def.streams) {
     streams?.setVisible(on);
+  } else if (def.cameras) {
+    cameras?.setVisible(on);
   } else if (def.radar || def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else if (def.wms) {
-    map.setLayoutProperty(def.id, "visibility", on && !(def.hideInGame && state.game) ? "visible" : "none");
+    map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else {
     for (const l of map.getStyle().layers) {
       if (l.id.startsWith(def.id + "__")) map.setLayoutProperty(l.id, "visibility", on ? "visible" : "none");
@@ -468,77 +301,28 @@ function setVisible(def, on) {
   renderLegends();
 }
 
-function setOrtho(on) {
-  state.ortho = on;
-  document.getElementById("ortho").checked = on;
-  map.setLayoutProperty("ortho", "visibility", on ? "visible" : "none");
-  updateBackground();
-  prefetchOrtho();
-  document.getElementById("ortho-options").hidden = !on;
-  applyTimeFilter();
-}
+// Maaston pinta (pelimaasto.js): maanpeite tekstuureina, tiet viivoineen, 3D-sillat ja -puut.
+let ground = null;
 
-function updateBackground() {
-  map.setPaintProperty("tausta", "background-color", state.ortho ? ORTHO_BACKGROUND : state.game ? GAME_BACKGROUND : "#dfe6e9");
-}
-
-// Pelillinen maasto (kokeilu, pelimaasto.js) ladataan vasta, kun se valitaan. Pohjana on joko
-// ilmakuva tai pelillinen maasto, joten pelillisen maaston alle ei ladata ilmakuvaa.
-let gameTerrain = null;
-
-async function setGameTerrain(on) {
-  state.game = on;
-  document.getElementById("pelimaasto").checked = on;
-  for (const def of LAYERS.filter((d) => d.hideInGame)) setVisible(def, def.on);
-  if (on && state.ortho) setOrtho(false);
-  updateBackground();
-  if (on && !gameTerrain) {
-    try {
-      const [{ createGameTerrain }, { addExtra }] = await Promise.all([import("./pelimaasto.js"), import("./transit.js")]);
-      gameTerrain = await createGameTerrain(map, { base: BASE, version: TILE_VERSION });
-      window.espooGame = gameTerrain; // selaimen konsolia varten (esim. espooGame.stats())
-      addExtra(gameTerrain.drawable);
-    } catch (err) {
-      console.warn("Pelillistä maastoa ei saatu ladattua", err);
-      return;
-    }
+async function initGround() {
+  try {
+    const [{ createGameTerrain }, { addExtra }] = await Promise.all([import("./pelimaasto.js"), import("./transit.js")]);
+    ground = await createGameTerrain(map, { base: BASE, version: TILE_VERSION });
+    window.espooGame = ground; // selaimen konsolia varten (esim. espooGame.stats())
+    addExtra(ground.drawable);
+    ground.setTrees(state.trees);
+    ground.setVisible(true);
+  } catch (err) {
+    console.warn("Maastoa ei saatu ladattua", err);
   }
-  // Pelillisen maaston alueella korkeusmallissa korkeat jänteet ovat auki (sillat ovat 3D-malleja);
-  // tiilet ladataan uudelleen eri osoitteella.
-  setGameMode(on);
-  const dem = map.getSource("dem");
-  if (dem.tiles?.[0] !== demTiles(on)) dem.setTiles([demTiles(on)]);
-  gameTerrain?.setTrees(state.trees);
-  gameTerrain?.setVisible(on);
-  document.getElementById("pelimaasto-options").hidden = !on;
-  if (!on && !state.ortho) setOrtho(true);
 }
 
-function setOrthoYear(index) {
-  state.orthoIndex = index;
-  map.getSource("ortho").setTiles(orthoTiles(ORTHO_YEARS[index][1]));
-  prefetchOrtho();
-  applyTimeFilter();
-}
-
-// Kun ilmakuva on näkyvissä, rakennuksista näytetään ne, jotka olivat valmiina ilmakuvan
-// vuonna. Uusimmalla vuodella ja ilman ilmakuvaa näytetään kaikki; vanhemmilla vuosilla
-// rakennukset, joiden valmistumisvuotta ei tiedetä, jätetään pois. Maamerkkien rakennukset
-// piilotetaan aina, koska niiden tilalla on oma 3D-malli.
+// Maamerkkien rakennukset piilotetaan aina, koska niiden tilalla on oma 3D-malli.
 function buildingFilter() {
-  const year = ORTHO_YEARS[state.orthoIndex][0];
-  const latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
   // Tunnus on tiilissä numero tai merkkijono, joten verrataan merkkijonoina.
   const filter = ["all", ...LANDMARKS.flatMap((l) => [l.building].flat().map((id) => ["!=", ["to-string", ["get", "tunnus"]], String(id)]))];
-  if (state.ortho && year < latest) filter.push(["has", "vuosi"], ["<=", ["get", "vuosi"], year]);
   if (detail) filter.push(["<", ["distance", { type: "Point", coordinates: [detail.lon, detail.lat] }], detail.radius]);
   return filter;
-}
-
-function applyTimeFilter() {
-  map.setFilter("rakennukset", buildingFilter());
-  roofs?.refresh();
-  refreshLandmarks();
 }
 
 // Lähikuvassa 3D-rakennukset ja katot vain näkymän keskipisteen ympäriltä (layers.js, detailRadius).
@@ -608,6 +392,9 @@ function renderLegends() {
       slot.append(el("p", { class: "hint" }, `Sateen voimakkuus (mm/h), tutkakuva klo ${t}. Ilmatieteen laitos.`));
     }
     if (def.legend === "streams") slot.append(el("p", { class: "hint" }, streams?.legendText() ?? "Ladataan uomia…"));
+    if (def.legend === "cameras") {
+      slot.append(el("p", { class: "hint" }, cameras ? `${cameras.count} kameraa (Fintraffic). Klikkaa kameraa nähdäksesi kuvat.` : "Haetaan kameroita…"));
+    }
   }
 }
 
@@ -615,21 +402,12 @@ function buildPanel() {
   document.getElementById("places").append(...PLACES.map(([name, place]) =>
     el("button", { type: "button", class: "chip", onclick: () => flyTo(place) }, name)));
 
-  const ortho = document.getElementById("ortho");
-  ortho.checked = state.ortho;
-  ortho.addEventListener("change", () => (ortho.checked && state.game ? setGameTerrain(false) : setOrtho(ortho.checked)));
-  document.getElementById("ortho-options").hidden = !state.ortho;
-  const game = document.getElementById("pelimaasto");
-  game.addEventListener("change", () => setGameTerrain(game.checked));
   const trees = document.getElementById("pelimaasto-puut");
   trees.checked = state.trees;
   trees.addEventListener("change", () => {
     state.trees = trees.checked;
-    gameTerrain?.setTrees(state.trees);
+    ground?.setTrees(state.trees);
   });
-  document.getElementById("ortho-years").append(...ORTHO_YEARS.map(([year], i) => el("label", { class: "seg" },
-    el("input", { type: "radio", name: "ortho-year", value: year, checked: i === state.orthoIndex, onchange: () => setOrthoYear(i) }),
-    el("span", {}, String(year)))));
 
   document.getElementById("buildings").addEventListener("change", (e) => {
     map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none");
@@ -713,6 +491,23 @@ async function initStreams() {
   }
 }
 
+// ------------------------------------------------------------ kelikamerat
+
+let cameras = null;
+
+// Kelikamerat (kelikamerat.js): sijainnit Digitrafficista, kuvat vasta klikkauksesta.
+async function initCameras() {
+  const def = LAYERS.find((d) => d.cameras);
+  if (!def) return;
+  try {
+    const { createCameras } = await import("./kelikamerat.js");
+    cameras = await createCameras(map, { boundaryUrl: "data/espoo_raja.geojson", visible: def.on });
+    renderLegends();
+  } catch (err) {
+    console.warn("Kelikameroita ei saatu haettua", err);
+  }
+}
+
 // ------------------------------------------------------------ katot
 
 let roofs = null;
@@ -737,12 +532,8 @@ function interpolateColor(stops, v) {
   return stops[stops.length - 1][1];
 }
 
-// Sama ehto kuin buildingFilter: maamerkit piiloon, vanhoilla ilmakuvilla vain silloin valmiit.
-function buildingShown(b) {
-  if (LANDMARKS.some((l) => [l.building].flat().map(String).includes(b.tunnus))) return false;
-  const year = ORTHO_YEARS[state.orthoIndex][0], latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
-  return !(state.ortho && year < latest) || (b.vuosi != null && b.vuosi <= year);
-}
+// Sama ehto kuin buildingFilter: maamerkit piiloon.
+const buildingShown = (b) => !LANDMARKS.some((l) => [l.building].flat().map(String).includes(b.tunnus));
 
 // Katot 3D-mallista (roofs.js), piirretään joukkoliikenteen 3D-tasolla (transit.js).
 async function initRoofs() {
@@ -769,11 +560,7 @@ function pickRoof(point) {
 // (landmarks.js). Ne piilotetaan myös, kun 3D-rakennukset otetaan pois.
 let landmarkModels = null;
 
-function landmarkShown(b) {
-  const year = ORTHO_YEARS[state.orthoIndex][0], latest = Math.max(...ORTHO_YEARS.map(([y]) => y));
-  return document.getElementById("buildings").checked
-    && (!(state.ortho && year < latest) || (b.vuosi != null && b.vuosi <= year));
-}
+const landmarkShown = () => document.getElementById("buildings").checked;
 
 function refreshLandmarks() {
   landmarkModels?.setLandmarkStyle({ colorOf: buildingColor, isVisible: landmarkShown });
@@ -900,6 +687,8 @@ map.on("click", (e) => {
   if (transit?.click(e.point)) { popup.remove(); return; }
   const landmark = transit?.pickLandmark(e.point);
   if (landmark) { showLandmark(e.lngLat, landmark); return; }
+  const camera = cameras?.pick(e.point);
+  if (camera) { popup.setLngLat(camera.lngLat).setDOMContent(camera.content).addTo(map); return; }
   const queryable = map.getStyle().layers
     .filter((l) => (l.id === "rakennukset" || l.id.includes("__")) && map.getLayoutProperty(l.id, "visibility") !== "none")
     .map((l) => l.id);
@@ -920,7 +709,7 @@ map.on("click", (e) => {
 });
 
 map.on("mousemove", (e) => {
-  const ids = ["rakennukset"].filter((id) => map.getLayer(id));
+  const ids = ["rakennukset", "kelikamerat"].filter((id) => map.getLayer(id));
   map.getCanvas().style.cursor = map.queryRenderedFeatures(e.point, { layers: ids }).length ? "pointer" : "";
 });
 

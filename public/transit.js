@@ -5,7 +5,7 @@
 // Samalle tasolle piirretään myös maamerkkien 3D-mallit (landmarks.js).
 import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.js";
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
-import { deckHeightAt, isGameMode, rawElevationAt } from "./bridges.js";
+import { deckHeightAt, gameDecksAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
 import { buildTunnelInterior } from "./metrotunnel.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
@@ -37,7 +37,6 @@ const LIFT = 0.15; // m maanpinnan yläpuolella
 const METRO_TUNNEL_Z = -15; // m (N2000)
 const METRO_DELAY = 7000; // metron sijainti päivittyy noin 50 metrin askelin 2,5–3 s välein
 const DOT_MAXZOOM = 14.8; // tätä lähempää ajoneuvot näytetään vain malleina
-const RIDE_AHEAD = 0.5; // m: kyytinäkymän kamera keulan edessä, jottei oma malli peitä näkymää
 const ELEV_SMOOTH_MS = 250; // korkeuden muutosten pehmennys
 // Jatkuvan piirron tahti: noin 30 kertaa sekunnissa riittää tasaiseen liikkeeseen ja puolittaa
 // näytönohjaimen kuorman. Karttaa liikutettaessa MapLibre piirtää silti täydellä nopeudella.
@@ -62,8 +61,8 @@ const COLORS = {
 // sama malli käännettynä, joten molemmissa päissä on keula. height on katon korkeus (m),
 // jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), stops,
 // pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä, ja grade radan suurimman
-// kaltevuuden (korkeuden muutos metriä metrillä). eye on kyytinäkymän kameran korkeus maasta
-// (m, ride.js); ajoneuvoihin, joilta se puuttuu (tavarajunat), ei voi hypätä kyytiin.
+// kaltevuuden (korkeuden muutos metriä metrillä). eye on kuljettajan silmien korkeus maasta (m);
+// ajoneuvoihin, joilta se puuttuu (tavarajunat), ei voi hypätä kyytiin (ride.js).
 const KINDS = {
   bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3, eye: 2.5 },
   tram: {
@@ -74,7 +73,7 @@ const KINDS = {
     group: "junat", label: "Lähijuna", gap: 0.6, height: 4.4, eye: 3.0, rail: RAIL, stops: true, grade: 0.025,
     cars: [["flirtCab", 19.6], ["flirtMid", 17.2], ["flirtMid", 17.2], ["flirtCab", 19.6, true]],
   },
-  // Metron kyydissä kamera on tunnelissa (metrotunnel.js).
+  // Metrotunnelien sisäpuoli (metrotunnel.js) piirretään, kun kamera on metron kyydissä maan alla.
   metro: {
     group: "metro", label: "Metro", gap: 0.6, height: 3.6, eye: 2.2, underground: true, delay: METRO_DELAY, rail: METRO, stops: true,
     cars: [["metroCab", 22.6], ["metroMid", 21.8], ["metroMid", 21.8], ["metroCab", 22.6, true]],
@@ -1985,30 +1984,39 @@ function anchorOf(sel, now) {
 
 const pts = new Float64Array(64), ptsZ = new Float64Array(32);
 
-// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. Sillan kohdalla
-// korkeusmalli on nostettu kannen tasolle (bridges.js). Ajoneuvo pysyy kannella, jos se tuli
-// sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo pysyy
-// alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
+// Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. 3D-siltojen (pelimaasto.js)
+// kohdalla korkeusmallin jänne on auki, joten kannen korkeus tulee sillasta; muiden siltojen kohdalla
+// korkeusmalli on nostettu kannen tasolle ja kannen korkeus tulee kantakartan siltaviivoista
+// (bridges.js). Raidesillalla juna tai raitiovaunu on aina kannella. Muuten ajoneuvo pysyy kannella,
+// jos se tuli sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo
+// pysyy alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
 function groundAt(v, x, y, prev, centerElev, exag) {
   const lon = lonOf(x), lat = latOf(y);
   const dem = (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
-  if (KINDS[v.kind].underground) return dem;
-  const deck = deckHeightAt(lon, lat);
+  const kind = KINDS[v.kind];
+  if (kind.underground) return dem;
+  const decks = gameDecksAt(lon, lat);
+  const nearest = (list, h) => list.reduce((a, d) => (a == null || Math.abs(d.z * exag - h) < Math.abs(a * exag - h) ? d.z : a), null);
+  const rails = kind.rail != null && decks.filter((d) => d.k === "raide");
+  if (rails?.length) return Math.max(dem, nearest(rails, prev ?? dem) * exag);
+  let approach = null;
+  const from = () => (approach ??= prev ?? approachElevation(v, centerElev));
+  const deck = decks.length ? nearest(decks, from()) : deckHeightAt(lon, lat);
   if (deck == null) return dem;
   const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag, top = deck * exag;
   if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
-  const from = prev ?? approachElevation(v, centerElev);
-  if (Math.abs(from - top) >= Math.abs(from - raw)) return raw; // sillan alla
-  // Kannella: nostettu maasto on kannen pinta; pelillisessä maastossa jänne on 3D-silta, ja maasto sen alla.
-  return rawM == null || isGameMode() ? Math.max(dem, top) : dem;
+  if (Math.abs(from() - top) >= Math.abs(from() - raw)) return raw; // sillan alla
+  // Kannella: jänne on 3D-silta (pelimaasto.js), ja maasto on sen alla.
+  return Math.max(dem, top);
 }
 
 // Maanpinnan korkeus siinä reitin kohdassa, josta ajoneuvo tuli sillalle.
 function approachElevation(v, centerElev) {
   const T = v.trail;
   for (let i = T.length - 1; i >= 0; i--) {
-    if (deckHeightAt(lonOf(T[i][0]), latOf(T[i][1])) == null || i === 0) {
-      return (mapRef.queryTerrainElevation([lonOf(T[i][0]), latOf(T[i][1])]) ?? 0) + centerElev;
+    const lon = lonOf(T[i][0]), lat = latOf(T[i][1]);
+    if ((!gameDecksAt(lon, lat).length && deckHeightAt(lon, lat) == null) || i === 0) {
+      return (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
     }
   }
   return (mapRef.queryTerrainElevation([lonOf(v.x), latOf(v.y)]) ?? 0) + centerElev;
@@ -2315,24 +2323,12 @@ let riding = null; // kulkuneuvo, jonka kyydissä ollaan
 // metro ja matkustaja-alukset.
 const rideable = (v) => (v.isShip ? shipDims(v).cls === "passenger" : !v.isPlane && !v.isCharge && KINDS[v.kind]?.eye != null);
 
-// Kyytinäkymän kameran paikka (ride.js): keulan kohta, maan, kannen tai meren pinnan korkeus ja
-// kulkusuunta. null, kun kulkuneuvo on kadonnut datasta.
+// Seurattavan kulkuneuvon kohta ja kulkusuunta (ride.js). null, kun kulkuneuvo on kadonnut datasta.
 function poseOf(v) {
-  if (v.isShip) {
-    if (ships.get(v.id) !== v || v.x == null) return null;
-    const dim = shipDims(v), fx = Math.sin(v.heading), fy = Math.cos(v.heading), ahead = dim.ahead + dim.L / 2 + 1;
-    const x = v.x + fx * ahead + fy * dim.right, y = v.y + fy * ahead - fx * dim.right;
-    return { lon: lonOf(x), lat: latOf(y), z: 0, heading: v.heading, eye: Math.min(10, Math.max(2.5, dim.L * 0.12)) };
-  }
+  if (v.isShip) return ships.get(v.id) !== v || v.x == null ? null : { lon: lonOf(v.x), lat: latOf(v.y), heading: v.heading };
   if (vehicles.get(v.id) !== v || v.x == null) return null;
-  const kind = KINDS[v.kind], h = v.heading ?? v.dir ?? [0, 1], x = v.x + h[0] * RIDE_AHEAD, y = v.y + h[1] * RIDE_AHEAD;
-  const exag = mapRef.getTerrain()?.exaggeration ?? 1;
-  const pose = { lon: lonOf(x), lat: latOf(y), heading: Math.atan2(h[0], h[1]), eye: kind.eye, pitch: kind.ridePitch };
-  if (kind.underground) return { ...pose, z: METRO_TUNNEL_Z * exag, underground: true }; // metron raiteiden taso
-  // Juuri piirretyn ajoneuvon korkeus (sillat ja raiteiden tasainen profiili mukana); muuten
-  // haetaan maastosta.
-  const drawn = v.elevShown && performance.now() - v.drawnAt < 500;
-  return { ...pose, z: drawn ? v.elevShown[0] : groundAt(v, v.x, v.y, v.elevShown?.[0], mapRef.transform.elevation ?? 0, exag) };
+  const h = v.heading ?? v.dir ?? [0, 1];
+  return { lon: lonOf(v.x), lat: latOf(v.y), heading: Math.atan2(h[0], h[1]) };
 }
 
 // Kyytipalkin tiedot: laji, linja ja määränpää sekä nopeus ja aikataulu.
@@ -2360,8 +2356,8 @@ function board(v) {
   ride.start(p, rideInfo(v));
 }
 
-// Kyydissä ajoneuvot siirretään ja kamera asetetaan ennen ruudun piirtoa, jotta kamera ja
-// ajoneuvot ovat samassa kohdassa.
+// Seurannassa ajoneuvot siirretään ja näkymä asetetaan ennen ruudun piirtoa, jotta seurattava
+// kulkuneuvo pysyy paikallaan näkymässä.
 function rideFrame() {
   tick();
   ride.update(riding && poseOf(riding));
@@ -2469,12 +2465,12 @@ export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, cha
     // Pois kyydistä heti, esimerkiksi ennen kuin kartta lennätetään toiseen paikkaan.
     leaveRide() { ride.stop(); },
     // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai alukseen (ja tiedot avattiin
-    // tai kulkuneuvon kyytiin hypättiin). Kyydissä klikkaus vaihtaa toisen kulkuneuvon kyytiin
-    // eikä avaa muita tietoja.
+    // tai kulkuneuvon kyytiin hypättiin). Kyydissä toisen julkisen kulkuneuvon klikkaus vaihtaa sen
+    // kyytiin, ja muut kohteet (rakennukset ym., app.js) avautuvat kuten muutenkin.
     click(point) {
       const v = pick(point);
-      if (ride.active) {
-        if (v && v !== riding && rideable(v)) board(v);
+      if (ride.active && v && rideable(v)) {
+        if (v !== riding) board(v);
         return true;
       }
       if (!v) { popup.remove(); return false; }

@@ -1,29 +1,20 @@
 // Karttatasojen määrittelyt. Vektoritasot tulevat paikallisista tiilistä
-// (scripts/build_data.py), WMS-tasot suoraan Espoon tai HSY:n palvelimelta.
+// (scripts/build_data.py), WMS-tasot suoraan Espoon palvelimelta.
 
 // Kaikki tässä käytetyt WMS-tasot on tarkistettu avoimiksi; osa Espoon tasoista
 // (esim. maaperäkartta, yleiskaava, johtokartta) vaatii tunnukset eikä ole mukana.
 // GTK:n palvelua ei tällä hetkellä käytetä.
 export const WMS_SERVICES = {
   espoo: "https://kartat.espoo.fi/teklaogcweb/wms.ashx",
-  hsy: "proxy/hsy/wms", // välityspalvelin (server.py tai julkaisualusta), koska HSY ei salli CORSia
   gtk: "https://gtkdata.gtk.fi/arcgis/services/Rajapinnat/GTK_Maapera_WMS/MapServer/WMSServer",
 };
 export const ESPOO_WMS = WMS_SERVICES.espoo;
-
-// Pohjana on oletuksena vuoden 2024 ilmakuva; sen voi ottaa pois. Ensimmäinen vuosi on oletus.
-// Espoon WMS:ssä on myös vuodet 1950, 1969, 2001, 2007–2013 ja 2017–2023 (tasot Ortokartta_VVVV)
-// sekä uusin kuva (Ortokartta).
-export const ORTHO_YEARS = [
-  [2024, "Ortokartta_2024"], [2015, "Ortokartta_2015"], [2005, "Ortokartta_2005"], [1996, "Ortokartta_1996"],
-  [1976, "Ortokartta_1976"],
-];
 
 // Maaston korostus; korkeusmalli on aina käytössä ilman rinnevarjostusta.
 export const TERRAIN_EXAGGERATION = 1.5;
 
 // Lähikuvassa 3D-rakennukset, katot ja latausten salamat piirretään vain näkymän keskipisteen
-// ympäriltä, jotta kartta pysyy sujuvana; kauempana näkyy ilmakuva. Säde (m) zoomaustason
+// ympäriltä, jotta kartta pysyy sujuvana; kauempana näkyy vain maaston pinta. Säde (m) zoomaustason
 // mukaan: 4 km tasolla 14, 2,8 km tasolla 15 ja 2 km lähempää; null = ei rajausta.
 export const DETAIL_MINZOOM = 14;
 export const detailRadius = (zoom) => (zoom < DETAIL_MINZOOM ? null : Math.max(2000, 4000 * 2 ** ((DETAIL_MINZOOM - zoom) / 2)));
@@ -95,7 +86,7 @@ const trafficVolume = ["max",
 //
 // Vektoritaso: { id, title, vector: [MapLibre-tasomäärittelyt ilman id:tä ja lähdettä] }
 //   source-layer on oletuksena id.
-// WMS-taso:   { id, title, wms: "TASO", service: "espoo" | "hsy", params: {...}, paint: {...} }
+// WMS-taso:   { id, title, wms: "TASO", service: "espoo", params: {...}, paint: {...} }
 //   service on oletuksena Espoon karttapalvelu; params lisää kyselyyn palvelukohtaisia
 //   parametreja, ja paint täydentää karttakuvan tyyliä.
 // Nimitaso:   { id, title, labels: "data/TIEDOSTO.geojson" }
@@ -120,17 +111,6 @@ export const LAYERS = [
   },
   { id: "wms_ajantasa", title: "Ajantasa-asemakaava", wms: "Ajantasa_asemakaava_vektori" },
   { id: "wms_maankayttokartta", title: "Maankäyttökartta", wms: "Maankayttokartta" },
-  // Espoon omista vesiaineistoista (WFS GIS:Vesialueet ja WMS Vesistot) puuttuu paloja
-  // merialueesta, esim. Haukilahden lahdelta. HSY:n maanpeiteaineistossa meri ja sisävedet ovat
-  // kokonaisina. HSY:n oletussininen vaalennetaan, ja reunojen pehmennys otetaan pois, jottei
-  // karttaruutujen rajoille jää vaaleita saumoja. Pelillisessä maastossa vedet ovat jo pinnassa
-  // samasta aineistosta, joten taso piilotetaan (hideInGame).
-  {
-    id: "wms_vesialueet", title: "Vesialueet", on: true, service: "hsy", hideInGame: true,
-    wms: "asuminen_ja_maankaytto:maanpeite_merialue_2024,asuminen_ja_maankaytto:maanpeite_vesi_2024",
-    params: { FORMAT_OPTIONS: "antialias:none" },
-    paint: { "raster-brightness-min": 0.3, "raster-saturation": -0.15 },
-  },
   // Purot ja joet (streams.js, data/purot.json): uomat maaston pinnalla ja lähikuvassa alavirtaan
   // liikkuva virtaus. Virtaama mitataan Espoonjoesta; muiden uomien virtaama on arvio.
   { id: "purot", title: "Purot ja joet", streams: true, on: true, legend: "streams" },
@@ -163,6 +143,8 @@ export const LAYERS = [
   { id: "wms_kantakartta", title: "Kantakartan maastotiedot", wms: "KantakartanMaastotiedot" },
   // Ilmatieteen laitoksen sadetutka: sateen voimakkuus (mm/h), päivittyy viiden minuutin välein.
   { id: "sadetutka", title: "Sadetutka", radar: "suomi_rr_eureffin", on: true, legend: "radar" },
+  // Tieliikenteen kelikamerat (kelikamerat.js, Fintraffic / Digitraffic): kuvat aukeavat kameraa klikkaamalla.
+  { id: "kelikamerat", title: "Kelikamerat", cameras: true, on: true, legend: "cameras" },
 ];
 
 // Kauniainen on oma kaupunkinsa Espoon sisällä. Sen raja (HSY:n seutukartta), läpikuultava

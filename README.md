@@ -5,16 +5,17 @@ kaavoitus, vedet, väestö ja liikenne, ja kaikki tieto tulee avoimista lähteis
 Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset sekä Espoon
 yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina, ja latauksessa olevat
 sähköautot näkyvät latauspaikoillaan. Bussin, raitiovaunun, junan, metron tai lautan kyytiin voi
-hypätä klikkaamalla, jolloin maisema näkyy kulkuneuvon keulasta.
+hypätä klikkaamalla, jolloin kartta seuraa kulkuneuvoa yläpuolelta menosuunta ylöspäin.
 
 ## Paneeli
 
 - Liikenne näkyy aina; paneelissa näkyy ajoneuvojen ja lentokoneiden määrä lajeittain.
 - Aineistoja on neljätoista: kaupunginosien nimet, asemakaavan käyttötarkoitukset, vireillä
-  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, vesialueet, purot ja joet, asukkaat
-  250 m ruuduissa (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat,
-  kantakartan maastotiedot sekä sadetutka. Oletuksena päällä ovat kaupunginosien nimet,
-  vesialueet, purot ja joet sekä sadetutka.
+  olevat kaavat, ajantasa-asemakaava, maankäyttökartta, purot ja joet, asukkaat 250 m ruuduissa
+  (3D), autoliikenne, tie- ja raideliikenteen melu, kiinteistörajat, kantakartan maastotiedot,
+  sadetutka ja kelikamerat. Oletuksena päällä ovat kaupunginosien nimet, purot ja joet, sadetutka
+  ja kelikamerat.
+  Vedet ovat maaston pinnassa (HSY:n maanpeite), joten erillistä vesialuetasoa ei ole.
   Määrittelyt ovat tiedostossa `public/layers.js` (`LAYERS`).
 - Kaupunginosan nimi on alueen rakennusten keskellä, koska kaupunginosien rajat ulottuvat
   usein merelle (`kaupunginosat_nimet.geojson`, `build_data.py kaupunginosat`).
@@ -23,34 +24,10 @@ hypätä klikkaamalla, jolloin maisema näkyy kulkuneuvon keulasta.
   `build_data.py kauniainen`). Raja on HSY:n seutukartasta, koska Tilastokeskuksen
   1:1 000 000 -raja on karkea; Kauniaisesta ei ole 3D-rakennuksia, koska ne tulevat Espoon
   aineistoista.
-- Pohjana on oletuksena vuoden 2024 ilmakuva, jonka voi ottaa pois. Vuoden voi vaihtaa
-  (2024, 2015, 2005, 1996, 1976), ja rakennuksista näytetään ne, jotka olivat silloin valmiina.
-- Ilmakuvaruudut ovat raskaita (Espoon karttapalvelu tekee jokaisen 512 px:n ruudun erikseen,
-  PNG noin 0,7 Mt, noin sekunti). Ne haetaan oman protokollan kautta (`ortho://`). Kartan
-  pysähdyttyä haetaan valmiiksi selaimen välimuistiin ruudut, jotka näkyisivät, jos karttaa
-  siirtäisi kuudesosan tai kolmanneksen näkymästä mihin tahansa suuntaan. Kallistetussa
-  näkymässä ruudun tarkkuustaso riippuu etäisyydestä kamerasta, joten pienikin siirto vaihtaa
-  suurimman osan ruuduista, ja kuva sumeni latauksen ajaksi. Nyt pieni siirto ei yleensä tarvitse
-  palvelimelta mitään (200 px:n siirrossa kolmeen suuntaan ei mitään, kameraa kohti yksi ruutu
-  16:sta). Jo haetut ruudut tulevat välimuistista muutamassa millisekunnissa.
-- Karttapalvelulle on enintään kuusi pyyntöä kerrallaan (MapLibre pyytäisi jopa 16, ja
-  ennakkohaku lisäsi omansa). Näkyvät ruudut ohittavat ennakkohaun jonossa, ennakkohaku käyttää
-  enintään kahta paikkaa, ja kartan perumat ruudut jätetään hakematta, jos ne ovat vielä jonossa.
-  Jo kerran haetut ruudut eivät jonota, koska ne tulevat selaimen välimuistista.
-- Vuoden 2024 ilmakuvan maastoresoluutio on 0,30 m, joten ruutuja haetaan enintään tasolta 17
-  (pikseli 0,30 m); lähempänä niitä suurennetaan. Tarkemmat ruudut eivät toisi lisää
-  yksityiskohtia, mutta niitä olisi moninkertaisesti. Vanhemmissa (2015: 0,20 m, 2005: 0,25 m)
-  menetetään hieman tarkkuutta.
-- Kuormitettu karttapalvelu vastaa toisinaan virheilmoituksella (`ServiceException`, HTTP 200)
-  kuvan sijaan tai hylkää yhteydet hetkeksi. Ruutua yritetään silloin uudelleen 1, 3 ja 8 sekunnin
-  päästä; muuten ruutu jäisi virheelliseksi ja sen tilalla näkyisi karkeampi ruutu, eikä kuva
-  tarkentuisi.
-- Ilmakuvan sijaan voi kokeilla pelillistä maastoa (koko Espoo, ks. alla). Pohjana on
-  joko ilmakuva tai pelillinen maasto: pelillisen maaston alle ei ladata ilmakuvaa.
-- Karttapalvelu jättää toisinaan ruudun reunaan läpinäkyvän pikselirivin, joka näkyi
-  ruutujen välissä vaaleana rakona. Ilmakuvan alla tausta on siksi ilmakuvan keskisävyinen
-  harmaa, joten raot ja kuvauksen reunat eivät erotu. (Ruutujen haku suurempana ja reunojen
-  leikkaus selaimessa poisti raot kokonaan, mutta hidasti kuvien latautumista.)
+- Pohjana on pelillinen maasto (ks. Pelillinen maasto): maanpeite tekstuureina, tiet viivoineen,
+  3D-sillat ja metsissä 3D-puut. Puut voi ottaa pois (Maasto → 3D-puut metsissä tai osoite
+  `?puut=0`). Aiemmin pohjana oli Espoon ilmakuva (vuodet 1976–2024); se poistettiin, kun
+  pelillinen maasto kattoi koko Espoon.
 - Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h). Uusin kuva-aika luetaan
   kahden minuutin välein, ja aika on tiiliosoitteessa, jottei selain näytä vanhaa kuvaa.
 
@@ -61,7 +38,7 @@ python3 server.py
 ```
 
 Avaa sitten http://localhost:8765. Kartta tarvitsee verkkoyhteyden, koska
-ilmakuvat, karttakuvat ja korkeusmalli (siltojen kohtia lukuun ottamatta) haetaan suoraan
+karttakuvat ja korkeusmalli (siltojen kohtia lukuun ottamatta) haetaan suoraan
 lähdepalveluista.
 
 ## Aineistojen päivitys
@@ -94,10 +71,9 @@ valmiit tiilet ovat.
 Netlify julkaisee `public/`-kansion sellaisenaan aina, kun GitHubin `main`-haaraan
 tulee muutos. Asetukset ovat tiedostossa `netlify.toml`: build-komentoa ei ole.
 Lentokoneiden sijainnit (adsb.fi) välitetään reitin `/proxy/adsb/...` kautta, koska palvelu ei
-salli selaimen suoria hakuja; `server.py` tekee saman paikallisesti. Samasta syystä HSY:n
-karttakuvat (vesialueet) välitetään reitin `/proxy/hsy/wms` kautta. Jos kartta julkaistaan
-palvelussa, jossa välitystä ei ole (esim. GitHub Pages), vesialueita ja lentokoneita ei näy,
-mutta muu kartta toimii.
+salli selaimen suoria hakuja; `server.py` tekee saman paikallisesti. Jos kartta julkaistaan
+palvelussa, jossa välitystä ei ole (esim. GitHub Pages), lentokoneita ei näy, mutta muu kartta
+toimii.
 
 Vektoritiilet ovat gzip-pakattuja, ja selain purkaa ne itse (`app.js`), joten
 palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
@@ -111,8 +87,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Puuttuvat rakennukset (pohja, kerrosluku) | Espoo WFS `GIS:Rakennukset` |
 | Rakennuksen lisätiedot (kerrosala, tilavuus, lämmitys ym.) klikattaessa | Espoo WFS `GIS:Rakennukset` |
 | Asemakaavan käyttötarkoitukset, vireillä olevat kaavat, autoliikennemäärät | Espoo WFS `GIS:*` |
-| Ilmakuvat, ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
-| Vesialueet (meri ja sisävedet) | HSY:n maanpeite 2024, WMS (palvelimen välityksellä) |
+| Ajantasa-asemakaava, maankäyttökartta, melu, kiinteistörajat, kantakartta | Espoo WMS |
 | Sadetutka, sateen voimakkuus (mm/h) | Ilmatieteen laitos, avoin WMS (CC BY 4.0) |
 | Purot ja joet, virtaussuunnat ja rummut | © OpenStreetMap-tekijät (ODbL), Overpass API |
 | Purojen sijainnin tarkistus (vesialueiden keskilinja) | HSY:n maanpeite 2024, WFS |
@@ -136,6 +111,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Otaniemen vesitornin muoto | Otaniemen vesitornin rakennushistoriaselvitys (ark-byroo 2017), Espoon LOD2-malli |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
 | Sähköautojen latauspaikat ja latauspisteiden tila | Fintraffic / Digitraffic AFIR (REST, CC BY 4.0) |
+| Tieliikenteen kelikamerat (sijainnit ja kuvat) | Fintraffic / Digitraffic weathercam (REST, CC BY 4.0) |
 | Latausasemien sijainnit, pysäköintialueet, -ruudut ja tiet latauspaikkojen ympärillä | © OpenStreetMap-tekijät (ODbL), Overpass API |
 
 Espoon rajapinnoissa on myös tunnuksia vaativia aineistoja, joita ei käytetä:
@@ -164,8 +140,8 @@ rakennusvalvonnan aineistot sekä rakennusten kattoviivat.
 - Espoon avoimesta vesialueaineistosta (WFS `GIS:Vesialueet`) puuttuu suuri osa
   merialueesta (noin 100 km² Espoon noin 216 km²:n vesialueista), ja myös Espoon
   Vesistöt-karttakuvasta (WMS `Vesistot`) puuttuu paloja, esimerkiksi suorakulmainen alue
-  Haukilahden lahdelta ja venesataman altaat. Vesialueet näytetään siksi HSY:n
-  maanpeiteaineistosta (meri- ja vesialueet 2024), jossa meri ja sisävedet ovat kokonaisina.
+  Haukilahden lahdelta ja venesataman altaat. Vedet tulevat siksi HSY:n maanpeiteaineistosta
+  (pelillinen maasto), jossa meri ja sisävedet ovat kokonaisina.
 
 - Espoon WFS tulkitsee BBOX-rajauksen samassa koordinaatistossa kuin `srsName`-tulosteen.
 - Kun tuloste pyydetään EPSG:3857:nä, osa rakennusten kärkipisteistä jää ETRS-GK25-
@@ -206,7 +182,7 @@ kuin MapLibre nostaa 3D-rakennuksen, ja vielä 25 cm, jottei 3D-rakennuksen tasa
 pistä räystäiden kohdalla katon läpi. Piirrettyjen kattojen rakennusten seinät lasketaan
 räystään korkeuteen MapLibren feature-state-tilalla (`katto`), joten rakennus, jonka kattoa ei
 piirretä, näkyy LOD0-korkeudessaan. Katon väri seuraa rakennusten väritystä hieman tummempana,
-ilmakuvavuoden suodatus koskee myös kattoja, ja kattoa klikkaamalla saa rakennuksen tiedot.
+ja kattoa klikkaamalla saa rakennuksen tiedot.
 
 Tiedostossa pinnan kolmiot jakavat kärkipisteitä, ja noin 6 000 rakennuksen kattopinnoissa on
 pieniä vinoja tai alaspäin osoittavia kolmioita. Selain antaa siksi jokaiselle kolmiolle omat
@@ -220,7 +196,7 @@ Lähikuvassa (zoom ≥ 14) 3D-rakennukset piirretään vain näkymän keskipiste
 pienenee liukuvasti 4 km:stä zoomaustasolla 14 (2,8 km tasolla 15) 2 km:iin tasolla 16 ja
 lähempänä (`layers.js`, `detailRadius`). Katot piirretään enintään 2,5 km:n päähän, koska
 kauempana ne eivät juuri erotu; kauempana rakennukset näkyvät LOD0-korkeudessaan, ja säteen
-ulkopuolella näkyy ilmakuva. Rakennusten suodatin
+ulkopuolella näkyy vain maaston pinta. Rakennusten suodatin
 (MapLibren `distance`-lauseke) vaihdetaan vasta, kun näkymä on siirtynyt neljänneksen säteestä,
 koska MapLibre käsittelee rakennustiilet silloin uudelleen. Liikkuvat ajoneuvot ja virtaus
 piirretään noin 30 kertaa sekunnissa; karttaa liikutettaessa MapLibre piirtää täydellä
@@ -270,54 +246,48 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
 ### Kyytinäkymä
 
 Bussia, raitiovaunua, lähi- tai kaukojunaa, metroa tai matkustaja-alusta (lautat) klikkaamalla
-hypätään sen kyytiin (`public/ride.js`). Kamera lentää noin kahdessa sekunnissa kulkuneuvon
-keulaan kuljettajan silmien korkeudelle (bussi 2,5 m, raitiovaunu 2,7 m, lähijuna 3 m,
-kaukojuna 3,3 m ja metro 2,2 m tiestä tai kiskoista; alus aluksen pituuden mukaan) ja seuraa sen jälkeen
-kulkuneuvon sijaintia ja suuntaa. Tavarajunien, lentokoneiden ja latausautojen klikkaus avaa
-tiedot kuten ennenkin.
+hypätään sen kyytiin (`public/ride.js`): kartta siirtyy noin puolessatoista sekunnissa
+seuraamaan kulkuneuvoa yläpuolelta. Kulkuneuvo pysyy näkymässä paikallaan hieman keskikohdan
+alapuolella (yläreunassa täyte 30 % näkymän korkeudesta, joten edessä näkyy enemmän), menosuunta on
+aina ylöspäin ja kallistus 45°. Zoomaus on alussa 17 (noin 350 m näkymän leveydeltä). Tavarajunien,
+lentokoneiden ja latausautojen klikkaus avaa tiedot kuten ennenkin.
 
-- Kamerana on MapLibren oma kamera (`jumpTo`), joten maasto, rakennukset, katot, pelillinen
-  maasto ja muut kulkuneuvot näkyvät kuten muutenkin. Kamera on puoli metriä keulan edessä,
-  jottei oma malli peitä näkymää.
-- Ajoneuvot siirretään ja kamera asetetaan samassa vaiheessa ennen ruudun piirtoa, joten kamera
-  ja kulkuneuvo eivät heilu toistensa suhteen. Korkeus tulee samasta laskusta kuin piirretyllä
-  kulkuneuvolla: sillat ja kannet (`bridges.js`, `groundAt`) sekä raiteiden tasainen profiili.
-  Kulkusuunnan ja korkeuden muutokset pehmennetään, jotta sijaintien kohina ei heiluta näkymää.
-  Kamera pidetään vähintään 1,2 m maaston yläpuolella; ilmakuvatilassa sillan ali kulkiessa
-  kamera nousee hetkeksi kannen yläpuolelle, koska korkeusmalli on nostettu kannen tasolle.
-- Metron kyydissä kamera on tunnelissa (`public/metrotunnel.js`). Kun kamera on maanpinnan
-  alla, kartan sijaan piirretään vain tunnelit, asemat ja metrot: tausta täytetään kallion
-  värillä, ja tunnelin sisäpuoli tummuu etäisyyden mukaan samaan väriin. Jokaisella raiteella on
-  oma putki (lattia, seinät, kaapelihyllyt, holvikatto, kiskot ja 30 metrin välein vuorotellen
-  seinävalot), joka seuraa raideverkkoa (`rails.js`) samoin kuin metro itse. Asemalla molemmat
-  raiteet ovat samassa valoisassa hallissa (oranssi raita, valonauhat katossa), ja niiden
-  välissä on laituri turvaviivoineen. Asemat tunnistetaan pysähtymispaikoista: vastakkaisiin
-  suuntiin kulkevat junat pysähtyvät laiturin eri päihin, joten asema on eri raiteiden
-  lähimpien pysähtymispaikkojen puolivälissä (Espoon 11 asemaa sekä Koivusaari ja Lauttasaari).
-  Tunnelissa metrot piirretään tavallisina malleina, joten vastaantuleva juna näkyy asemalla,
-  ja maanpäällisten ajoneuvojen linjanumerot piilotetaan. Kyytiin ja kyydistä kamera lentää
-  maan läpi. Tunnelit rakennetaan ensimmäisellä kerralla (noin 40 ms, 0,25 miljoonaa kärkeä).
-- Katsetta käännetään vetämällä hiirellä tai sormella (sivuttain enintään 120° kulkusuunnasta,
-  pystysuunnassa 3–30° vaakatason alapuolelle) tai nuolinäppäimillä. Kaksoisnapautus tai
-  -klikkaus kääntää katseen takaisin kulkusuuntaan. Kartan oma raahaus, zoomaus ja kierto sekä
-  navigointinapit ovat kyydin ajan pois päältä, ja vedon päättävä klikkaus ei valitse kohdetta.
-- Kyydissä toisen kulkuneuvon klikkaus vaihtaa sen kyytiin. "Poistu kyydistä" tai Esc palauttaa
-  näkymän, josta kyytiin hypättiin; osoiterivin näkymä pysyy kyydin ajan siinä. Paneelin
-  paikkanapit päättävät kyydin heti. Jos kulkuneuvo katoaa datasta (vuoro päättyy, ajoneuvo
-  ajaa Espoon ulkopuolelle tai sijainti ei päivity), kamera nousee sen viimeisen sijainnin
-  yläpuolelle ja palkki kertoo kyydin päättyneen. Kyydissä olevan ajoneuvon HFP-ruutu pysyy
-  tilattuna, vaikka kamera siirtyisi toiseen ruutuun.
-- MapLibre 4.7.1 asettaa näkymän keskipisteen korkeudeksi joka ruudussa maaston korkeuden
-  siinä kohdassa. Kyydin ajaksi korkeus lukitaan (`_elevationFreeze`, jota MapLibre käyttää itse
-  siirtymien aikana), ja keskipiste asetetaan katseen suuntaan niin, että kamera on halutussa
-  kohdassa. MapLibre nostaisi maaston alle joutuvan kameran maan pinnalle, joten kyydin ajan
-  `transformCameraUpdate` palauttaa näkymän sellaisenaan. Zoomaus valitaan niin, että kameran
-  lähitaso on 1,5 metrin päässä. Kallistuksen yläraja nostetaan kyydin ajaksi 87°:een (`setMaxPitch` sallii
-  85°) ja näkökenttä noin 70°:een vaakasuunnassa (pystysuunnassa 40–60°, kapealla näytöllä 60°).
-- Kapealla näytöllä paneeli painetaan alas kyydin ajaksi. Kun liikettä vähennetään
-  (`prefers-reduced-motion`), kamera siirtyy kyytiin ja takaisin ilman lentoa.
-- Ilmakuvan ennakkohaku tehdään vasta, kun kartta on pysähtynyt, koska kyydissä jokainen
-  kameran asetus päättyy `moveend`-tapahtumaan.
+- Kartan kohteet ovat seurannan aikana klikattavissa kuten muutenkin: rakennusten tiedot,
+  aineistojen kohteet, purot ja muiden kulkuneuvojen tiedot. Toisen julkisen kulkuneuvon klikkaus
+  vaihtaa seurattavaa.
+- Näkymä asetetaan joka ruudussa (`jumpTo`) samassa vaiheessa, kun ajoneuvot siirretään, joten
+  kulkuneuvo ei heilu näkymässä. Kulkusuunnan muutokset pehmennetään, jotta sijaintien kohina ei
+  käännä karttaa. Leveällä näytöllä avoin paneeli otetaan huomioon, ja kulkuneuvo pidetään
+  näkyvän osan keskellä.
+- Zoomataan hiiren rullalla, kahden sormen nipistyksellä tai +/− -näppäimillä (14,5–19). Kartan omat
+  eleet pysäyttäisivät joka ruudussa asetettavan näkymän, joten raahaus, kierto, kallistus,
+  kartan oma zoomaus ja navigointinapit ovat seurannan ajan pois päältä, ja zoomaus tehdään
+  `ride.js`:ssä.
+- Metro kulkee maan alla, ja se näkyy läpikuultavana kuten muutenkin. Metrotunnelien sisäpuoli
+  (`public/metrotunnel.js`) piirretään vain, jos kamera on maan alla; se on jäänyt aiemmasta
+  katutason kyytinäkymästä, eikä seurannassa kamera ole koskaan maan alla.
+- "Lopeta seuranta" tai Esc palauttaa näkymän, josta kyytiin hypättiin; osoiterivin näkymä pysyy
+  seurannan ajan siinä. Paneelin paikkanapit päättävät seurannan heti. Jos kulkuneuvo katoaa
+  datasta (vuoro päättyy, ajoneuvo ajaa Espoon ulkopuolelle tai sijainti ei päivity), näkymä jää
+  sen viimeiseen sijaintiin ja palkki kertoo seurannan päättyneen. Seurattavan ajoneuvon HFP-ruutu
+  pysyy tilattuna, vaikka näkymä siirtyisi toiseen ruutuun.
+- Kapealla näytöllä paneeli painetaan alas seurannan ajaksi. Kun liikettä vähennetään
+  (`prefers-reduced-motion`), kartta siirtyy seurantaan ja takaisin ilman siirtymää.
+
+## Kelikamerat
+
+Fintrafficin tieliikenteen kelikamerat näkyvät kartalla kameramerkkeinä zoomaustasolta 10 alkaen
+(`public/kelikamerat.js`, taso Kelikamerat). Sijainnit haetaan kerran Digitrafficin asemaluettelosta
+(`https://tie.digitraffic.fi/api/weathercam/v1/stations`, koko Suomi noin 40 kt), ja mukaan otetaan
+keruussa olevat kamerat Espoon rajan sisältä (sama raja kuin ajoneuvoilla, `espoo_raja.geojson`;
+44 kameraa, joista kaksi aivan rajalla). Kuvia ei ladata etukäteen: kameraa klikkaamalla aukeaa
+ikkuna, johon haetaan aseman nimi ja kuvasuuntien nimet (`/stations/{id}`) sekä kuvausajat
+(`/stations/{id}/data`), ja kuvasuunnat näytetään pikkukuvina
+(`https://weathercam.digitraffic.fi/{kuvasuunta}.jpg?thumbnail=true`). Pikkukuvasta aukeaa
+täysikokoinen kuva (1280 × 720) koko näkymän päälle; Esc, taustan klikkaus tai sulkunappi sulkee
+sen. Kamerat ottavat kuvan noin 10 minuutin välein, joten avoinna olevat kuvat päivitetään samassa
+tahdissa. Rajapinnat sallivat selaimen suorat haut (CORS), ja pyynnöissä on Digitrafficin
+suosittelema `Digitraffic-User`-otsake. Kamerat toimivat myös kyytinäkymän seurannassa.
 
 ## Lentokoneet
 
@@ -400,7 +370,7 @@ Mahlamäki, 2013), Keilaniemen torni eli Accountor Tower (1976) ja Tapiolan kirk
 Ruusuvuori, 1965). `build_data.py maamerkit` poimii rakennukset välimuistissa olevasta
 3D-mallista (`LANDMARK_BUILDINGS`) tiedostoiksi `public/data/maamerkit/<id>.json`. Mallit
 väritetään kuten muut rakennukset (luokka, vuosi tai korkeus; katot hieman tummempina), ne
-noudattavat ilmakuvavuoden suodatusta ja 3D-rakennusten valintaa, ja klikkaus avaa rakennuksen
+noudattavat 3D-rakennusten valintaa, ja klikkaus avaa rakennuksen
 tiedot kuten muissakin rakennuksissa, lisänä maamerkin omat tiedot. Espoon 3D-mallissa on
 myös valokuvatekstuurit, mutta niillä rakennukset erottuivat liikaa muista. Lisää maamerkkejä
 saa lisäämällä rakennustunnukset `LANDMARK_BUILDINGS`-luetteloon ja määrittelyn `layers.js`:n
@@ -419,7 +389,7 @@ rakennusvalvonnan aineistot (`rakval:*`) ja kattoviivat (`GIS:RakennustenKatot`)
 
 ## Sillat
 
-Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten ilmakuvan tie notkahti sillan
+Maanmittauslaitoksen korkeusmallista sillat on poistettu, joten tie notkahti sillan
 kohdalla alla olevan tien tai joen tasolle, ja ajoneuvot sukelsivat mukana. Siltojen päistä on
 usein poistettu myös penkereen pää, jolloin tiehen tuli kuoppa juuri ennen siltaa. Siksi
 korkeusmalli nostetaan siltojen kohdalla kannen tasolle. Nosto lasketaan valmiiksi
@@ -456,14 +426,14 @@ pikseliä vain, jos maanpinta on sen alapuolella (kaistale vähintään 0,5 metr
 on myös tasaisella maalla tien kohdalla). Päällekkäiset kannet ja kaistaleet kuvaavat samaa
 ajorataa (alempi on ajoradan tai raiteen pinta, ylempi esim. siltaviivan reunapalkki), joten pinta
 on alin niistä. Yli 3 metriä ylempänä oleva pinta on oma tasonsa (silta toisen yllä), ja silloin
-pinnaksi tulee ylempi taso kuten ilmakuvassa. Kaistaleiden pikselit siistitään avauksella
+pinnaksi tulee ylempi taso, kuten ylhäältä katsottuna näkyisi. Kaistaleiden pikselit siistitään avauksella
 (3 × 3): tukimuurin tai luiskan yläreunalle osuvat 1–2 pikselin kaistat jäävät pois, jottei niistä
 tule piikkejä, mutta kansi säilyy.
 
 **Korkeusmallia uudemmat tiet.** Korkeusmalli on paikoin vanhempi kuin tie. Esimerkiksi Kehä I:tä
 on parannettu Laajalahden kohdalla (liittymiä on korvattu silloilla ja eritasoliittymillä), ja
-Turuntien liittymän kohdalla tie kulkee nyt 2–6 metriä korkeusmallin maanpintaa alempana. Ilmakuvan
-ajorata aaltoili vanhan maanpinnan mukaan. `build_data.py` vertaa kantakartan ajoväylien reunojen
+Turuntien liittymän kohdalla tie kulkee nyt 2–6 metriä korkeusmallin maanpintaa alempana. Tien
+pinta aaltoili vanhan maanpinnan mukaan. `build_data.py` vertaa kantakartan ajoväylien reunojen
 mitattua korkeutta korkeusmalliin 20 metrin ruuduittain; siltojen ja tunnelien läheltä (20 m) ei
 verrata, koska silta puuttuu korkeusmallista ja tunnelin päällä on maata. Jos reunat ovat ruudussa
 mediaanina vähintään metrin korkeusmallia alempana yhtenäisellä, vähintään kolmen ruudun alueella,
@@ -474,7 +444,7 @@ mitatut reunapisteet pidetään omalla korkeudellaan, ja kaistaleiden väliin j�
 (esim. rampin erkanemiskohta) levitetään mitattu pinta OpenStreetMapin tiealueella (leveys tien
 tyypin ja kaistojen mukaan). Tien ulkopuolella maasto liittyy uuteen pintaan luiskana (1:1,5,
 enintään 15 m). Yli 3 metriä ylempänä oleva tienpinta on oma tasonsa, esimerkiksi uusi silta, jota
-ei vielä ole siltaviivoissa, ja se jää pinnalle kuten ilmakuvassa. Kannet nostetaan korjatun
+ei vielä ole siltaviivoissa, ja se jää pinnalle. Kannet nostetaan korjatun
 maanpinnan yläpuolelle, mutta korjatulla tienpinnalla ajoväylien kaistaleita ei nosteta. Korjattujen
 tiilten mitatuista reunapisteistä, joiden korkeus muuttui, 93 % on nyt 0,3 metrin päässä mitatusta
 (ennen 6 %).
@@ -527,12 +497,10 @@ virtaama, sitä nopeampia ja leveämpiä pulssit ovat. Isossa uomassa pulssin ke
 reunoja edellä kuten virtaus. Sillan kohdalla nauha kulkee kannen alta alkuperäisellä
 maanpinnalla, eikä rummuissa näytetä pulsseja.
 
-## Pelillinen maasto (kokeilu)
+## Pelillinen maasto
 
-Ilmakuvan sijaan maaston pinnan voi piirtää pelillisenä: koko Espoo tarkkana (maanpeite
-tekstuureina, tiet viivoineen ja 3D-sillat). Valinta on
-Ilmakuva-osiossa, tai pelillisen tilan saa suoraan osoitteella `?peli` (esim.
-http://localhost:8765/?peli). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
+Maaston pinta piirretään pelillisenä: koko Espoo tarkkana (maanpeite tekstuureina, tiet viivoineen,
+3D-sillat ja metsissä 3D-puut). Pohjana on HSY:n maanpeiteaineisto 2024: vesi, pellot, matala kasvillisuus, paljas
 maa, avokalliot, puusto neljässä korkeusluokassa (2–10, 10–15, 15–20 ja yli 20 m), muut päällystetyt
 pinnat, päällystämättömät ja päällystetyt tiet sekä rakennukset. `build_data.py` hakee luokat
 HSY:n karttapalvelusta yhtenä kuvana ruutua kohden ja tunnistaa luokan tyylin täyttöväristä
@@ -560,7 +528,7 @@ Selain maalaa luokista tekstuurit työsäikeessä (`public/pelimaasto_worker.js`
 latvuksia (korkeammassa puustossa suurempia ja tummempia), pelloilla vakoja, vedessä aaltoja, kalliossa
 halkeamia, pihoilla laatoitus ja teillä asfaltti tai sora. Kuviot lasketaan maailman
 koordinaateista, joten ne jatkuvat ruudusta toiseen, ja luokkarajat ovat hieman epäsäännöllisiä ja
-lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle kuten ilmakuvan
+lähikuvassa tummalla ääriviivalla. MapLibre levittää ruudut maaston päälle rasteriruutuina
 (tasot 8–19, joten tekstuuri pysyy terävänä lähelläkin), ja rinnevarjostus antaa maastolle muodot.
 Lähellä (karttaruudun taso 16 ja tarkemmat) luokat tulevat tarkoista ruuduista, kauempana (14–15)
 välitasosta, jonka pikseli on enintään maalattavan pikselin kokoinen, ja loitonnettaessa ja Espoon
@@ -573,14 +541,14 @@ Maaston päällä ovat kantakartan ajoratojen, kevyen liikenteen väylien ja pol
 (myös ajoradan merkinnät, kuten nuolet) sekä kadunnimet kantakartan sijainnein ja suunnin
 (vektoritiilet, ks. Laatat ja lataus). Nimet ovat maaston
 pinnassa kuten kantakartassa, ja suunta (kantakartassa suuntakulma pohjoisesta) käännetään
-luettavaksi. Pelillisessä tilassa ilmakuvaa ei ladata, ja Espoon ulkopuoli on maaston keskisävyä
+luettavaksi. Espoon ulkopuoli on maaston keskisävyä
 (rinnevarjostus on koko näkymässä). 3D-maastotilassa MapLibre (4.7) näyttää puuttuvan
 rasteriruudun tilalla vain neljä alaruutua tai ladatun yläruudun ja piilottaa muut, joten
 loitonnettaessa maastoruutu jäi toisinaan yhdeksi kuvaksi ilman pintaa ja kartta välähti.
 Pelillisen maaston pinnalle ja varjostukselle pidetään siksi puuttuvan ruudun ladatut ylä- ja
 alaruudut näkyvissä myös MapLibren välimuistista (`keepLoadedTiles`), ja taustan sävy on sama kuin
 maaston, jottei harvinainen jäljelle jäävä aukko erotu. Sama säilytys on viivojen vektoritiilillä,
-sillä ne tulevat verkosta. Vesialueet-taso piilotetaan, sillä vedet ovat jo pinnassa samasta aineistosta.
+sillä ne tulevat verkosta.
 
 Lisäksi OpenStreetMapista ovat kaistaviivat, suojatiet ja raiteet. Pääteille (moottori-, valta-,
 kanta-, seutu- ja yhdystiet) tehdään kaistamäärän (`lanes`, oletuksena yksi kumpaankin suuntaan)
@@ -589,12 +557,19 @@ valkoisia (kaista 3,25–3,75 m, 3 m viiva ja 9 m väli); asuntokaduilla ei ole 
 katkaistaan risteysalueilla: risteys on solmu, johon yhtyy vähintään kolme ajotien osaa, ja viivat
 jätetään pois leveimmän risteävän tien puolikkaan ja 3 metrin säteeltä. Suojatiet ovat ylitysväyliä
 (`footway=crossing`) tai ylityskohtia (`highway=crossing`), joille väylää ei ole, jolloin ylitys
-tehdään ajoradan poikki tien leveydeltä; merkitsemättömät jätetään pois. Ne piirretään seepraksi
+tehdään ajoradan poikki; merkitsemättömät jätetään pois. Ylitysväylä rajataan ajoradan leveydelle
+(kaistamäärästä, `carriageway_half`, vinossa ylityksessä pidemmälle) niistä kohdista, joissa se ylittää
+ajotien keskilinjan: OSM:ssä ylitysväylä jatkuu usein jalkakäytävälle asti, ja joskus koko pyörätie on
+merkitty ylitykseksi (pisimmillään 280 m), jolloin pyörätien jatke näkyi pitkänä katkoviivana tien
+vieressä. Rajattuna ylitys on mediaaniltaan 6 m ja enintään 14 m. Ne piirretään seepraksi
 (3 m leveä, 0,5 m raidat ajoradan suuntaisina), ja pyörätien jatkeet kahtena rivinä 0,5 m neliöitä. Raiteet (juna ja
 raitiovaunu, ei tunneleissa) piirretään sepelipohjana, ratapölkkyinä ja kahtena kiskona noin
 1,5 metrin päässä toisistaan. Leveydet ovat metreinä, joten ne skaalautuvat zoomauksen mukana.
 Metro on tunnelissa, joten sen raiteita ei piirretä. OpenStreetMapin väylät haetaan Overpassista
-12 palana (koko Espoo yhtenä kyselynä ei ehdi palvelinten aikarajaan), ja mukaan otetaan Espoon
+12 palana (koko Espoo yhtenä kyselynä ei ehdi palvelinten aikarajaan). Kantakartan WFS vastaa
+ruuhkassa toisinaan tyhjällä kohdejoukolla (HTTP 200), joten tyhjä vastaus haetaan vielä kahdesti
+väliaikaiseen tiedostoon (epäonnistunut haku ei vie edellistä), ja kolmesti tyhjä ruutu merkitään
+(`.tyhja`), jottei sitä tarkisteta joka ajossa uudelleen. Mukaan otetaan Espoon
 väylät (HSY:n kuntaraja vesialueineen, 60 m:n vara), joten esim. lahden ylittävä silta on mukana mutta
 naapurikunnan (myös Kauniaisten) silta ei.
 
@@ -604,39 +579,53 @@ kaiteet ja 24 metrin välein pilarit. Pääteiden silloilla kannen pinnassa jatk
 keskiviivat samoilla siirroilla kuin maassa (sama laskenta, `lane_offsets`). Ajotiesilloilla
 ajoradan reunaviivat jatkavat maanpinnan reunaviivoja: niiden sivusijainti otetaan kantakartan
 reunaviivoista enintään 8 m sillan päiden ulkopuolelta, ja jos se on päissä eri, se vaihtuu
-tasaisesti (ilman niitä reuna on metrin päässä kannen reunasta). Ne tehdään OpenStreetMapin siltaosuuksista
-(616 siltaa, ks. Laatat ja lataus); kannen leveys tulee kaistamäärästä
+tasaisesti (ilman niitä reuna on metrin päässä kannen reunasta). Reunaviivoiksi kelpaavat vain sillan
+suuntaiset (enintään 25°) viivat kannen pään korkeudelta (±1,5 m, `EDGE_DZ`), ja jos niitä on enemmän
+kuin kaksi, uloimmat; muuten kannelle tuli jopa 12 viivaa esim. sillan alta poikittain kulkevan tien
+reunoista. Ne tehdään OpenStreetMapin siltaosuuksista
+(618 siltaa, ks. Laatat ja lataus); kannen leveys tulee kaistamäärästä
 (+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
 kannet) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien pinnasta
 4 m sillan ulkopuolelta (esim. Kehä I:n alikulun kohdalla kantakartan kansi on mitattu 1–1,7 m
-ajorataa alempaa). Pelillisessä tilassa korkeusmallin tiilet vaihdetaan siltojen kohdalla versioon, jossa
+ajorataa alempaa). Jos sillan pää jatkuu toisena siltaosuutena (yhteinen OSM-solmu, esim. liittymä
+sillalla), pää on viereisen osuuden kannen korkeudella; muuten lyhyt osuus kallistui maahan ja kansi
+loppui ilmaan. Kaiteita ei piirretä sellaisen janan sivulle, jonka jokin kohta (2 m välein) on toisen
+sillan kannella (`ka`: kaiteet janoittain), jottei liittymän keskelle jää kaiteita. Vapaaseen päähän,
+joka on yli metrin maaston yläpuolella (esim. portaisiin tai rakennukseen päättyvä kevyen liikenteen
+silta), tulee päätuki (`tu`; 35 päätä), jottei kansi jää ilmaan.
+Pelillisessä tilassa korkeusmallin tiilet vaihdetaan siltojen kohdalla versioon, jossa
 OSM:n siltojen kohdalla kaikki nostot ovat auki ja niiden ympäriltä on poistettu noin 3,5 metrin
 täyttö (`public/tiles/korkeus/peli`, `build_data.py`; 304 tiiltä, 20,5 Mt). Pelillinen tiili
 tallennetaan vain, jos siinä avataan jotain; muuten käytetään tavallista nostettua tiiltä, ja jos
 kaikki nostot avataan, alkuperäistä (`korkeus_peli_alkup` tiedostossa `sillat.json`). Muualla kannet
 ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
-kannella kulkeva ajoneuvo pidetään kannen tasolla (siltaviivoista). Sillan kannella kulkevat viivat
+kannella kulkeva ajoneuvo pidetään kannen tasolla: 3D-siltojen kohdalla ladattujen siltaruutujen
+kansista (`bridges.js`, `gameDecksAt`; enintään 1 m kannen reunan ulkopuolelle), muualla
+kantakartan siltaviivoista. Raidesillalla juna ja raitiovaunu ovat aina kannella; muuten ajoneuvo on
+kannella, jos se tuli sillalle kannen korkeudelta. Aiemmin juna laskeutui avatun jänteen pohjalle,
+jos rautatiesillan kohdalla ei ollut kantakartan siltaviivoja. Sillan kannella kulkevat viivat
 (kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
 siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois, samoin
 kantakartan viivat, jotka ovat yli 2 m pelillisen maaston pinnan alapuolella (penkereen sisällä).
 Viivat tarkistetaan 2 metrin välein, sillä esim. kävelysillan ääriviivan sivu voi olla yksi suora
 jana, jonka molemmat päät ovat maan tasolla.
 
-Metsiin voi valita (Pelillinen maasto → 3D-puut metsissä tai osoitteella `?peli&puut`) kartan
-keskipisteen ympärille (600 m, zoomaustaso 15 ja lähempää) matalapolygonisia 3D-puita
+Metsissä on kartan keskipisteen ympärillä (600 m, zoomaustaso 15 ja lähempää) matalapolygonisia
+3D-puita (oletuksena; pois paneelista Maasto → 3D-puut metsissä tai osoitteella `?puut=0`)
 (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti siirrettynä, puun korkeus puustoluokasta, matalammassa puustossa enimmäkseen lehtipuita (pyöreä
 latvus) ja korkeammassa havupuita (kartio). Puita on noin 10 000, ja niiden korkeus haetaan
 maastosta vähitellen. Kun keskipiste siirtyy 150 m, puut sijoitellaan uudelleen; edelliseltä
 kerralta tutut puut (sama ruudukon kohta) pysyvät paikallaan, ja korkeus haetaan vain uusille,
 jottei metsä välähdä liikkuessa. Puut piirretään instansseina joukkoliikenteen 3D-tasolle; piirto vie noin
-4 ms. Puut ovat oletuksena pois, sillä ne ovat pelillisen maaston raskain osa: noin 0,7 miljoonaa
+4 ms. Puut ovat maaston raskain osa: noin 0,7 miljoonaa
 kolmiota joka kuvassa, noin 10 Mt ilmentymätietoja ja 150 metrin siirron jälkeen uudet
-korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä keventää puhelinkäyttöä.
+korkeuskyselyt; ilman niitä metsät näkyvät pelkkänä tekstuurina, mikä keventää hitaan puhelimen
+käyttöä.
 
 ### Laatat ja lataus
 
 Koko Espoon tarkka malli on noin 200 Mt, joten selain lataa siitä vain näkymän ympäriltä ja vapauttaa
-kaukaiset osat. Kallistetussa näkymässä (esim. kyytinäkymä, jossa näköala ulottuu horisonttiin)
+kaukaiset osat. Kallistetussa näkymässä (esim. katutasolla, jossa näköala ulottuu horisonttiin)
 MapLibre hakee ruudut sitä karkeampina, mitä kauempana ne ovat kamerasta (maaston korkeusmallin
 kanssa MapLibre 4.7: lähteen tarkimmat ruudut noin kahden ruudun päähän, ja jokainen seuraava taso
 kaksinkertaiseen etäisyyteen, kauimpana lähteen alin taso). Tarkkuus seuraa siis etäisyyttä:
@@ -650,7 +639,7 @@ kaksinkertaiseen etäisyyteen, kauimpana lähteen alin taso). Tarkkuus seuraa si
   vain raiteet (näkyvät kauas), tasolla 14 lisäksi ajoradat, kevyen liikenteen väylät ja
   kaistaviivat (noin 2,4 km:n päähän) ja tasolla 15 kaikki (polut, suojatiet ja nimet). Lähteen alin
   taso on 12, jottei horisonttiin ulottuvassa näkymässä haeta kaukaista aluetta tason 14 tiilinä.
-- Sillat: `public/tiles/pelisillat` tason 14 ruuduittain (noin 1,2 km; 616 siltaa 121 ruudussa,
+- Sillat: `public/tiles/pelisillat` tason 14 ruuduittain (noin 1,2 km; 618 siltaa 121 ruudussa,
   luettelo `public/data/pelimaasto_sillat.json`). Ruudut ladataan kameran ympäriltä 6 km:n päähän:
   alle 1,5 km:n päässä täysi malli (kaiteet, viivat ja pilarit), kauempana pelkkä kansi. Malleja
   rakennetaan enintään kaksi piirtokertaa kohden lähimmästä alkaen, ja ruutu vapautetaan, kun se on
@@ -661,17 +650,18 @@ kaksinkertaiseen etäisyyteen, kauimpana lähteen alin taso). Tarkkuus seuraa si
   kysymättä palvelimelta.
 
 Mittaukset (headless Chrome samalla koneella, 1280 × 800; puhelin: 390 × 844, kolminkertainen
-tarkkuus ja nelinkertaisesti hidastettu suoritin; kyyti: zoomaus 18,6, kallistus 84°, 20 s;
+tarkkuus ja nelinkertaisesti hidastettu suoritin; ajo katutasolla reittiä pitkin: zoomaus 18,6,
+kallistus 84°, 20 s;
 keko: sivu ja työsäikeet yhteensä):
 
 | | ennen (vain Otaniemi–Laajalahti) | jälkeen (koko Espoo) |
 |---|---|---|
-| Alkulataus `?peli` (siirretty) | 14,6 Mt (puhelin 13,4 Mt) | 8,7 Mt (puhelin 7,6 Mt) |
+| Alkulataus pelillisellä maastolla (siirretty) | 14,6 Mt (puhelin 13,4 Mt) | 8,7 Mt (puhelin 7,6 Mt) |
 | JS-keko alussa | 168 Mt (puhelin 176 Mt) | 86 Mt (puhelin 84 Mt) |
-| Otaniemen kyyti, ms/kuva (toistot) | 17,6–26,8 (puhelin 36) | 19,5–26,2 (puhelin 40) |
-| Otaniemen kyyti, työsäikeiden keko | 126 Mt (puhelin 120 Mt) | 29 Mt (puhelin 41 Mt) |
-| Espoonlahden kyyti, ms/kuva | 17,1–17,5 (ei tarkkaa mallia) | 20,9–21,4 (puhelin 37 → 49) |
-| 40 s:n kyyti Espoonlahdesta Leppävaaraan | ladattu 16 Mt | ladattu 31 Mt; siltaruutuja enintään 60, luokkaruutuja 38 (40 Mt) |
+| Otaniemi katutasolla, ms/kuva (toistot) | 17,6–26,8 (puhelin 36) | 19,5–26,2 (puhelin 40) |
+| Otaniemi katutasolla, työsäikeiden keko | 126 Mt (puhelin 120 Mt) | 29 Mt (puhelin 41 Mt) |
+| Espoonlahti katutasolla, ms/kuva | 17,1–17,5 (ei tarkkaa mallia) | 20,9–21,4 (puhelin 37 → 49) |
+| 40 s:n ajo Espoonlahdesta Leppävaaraan | ladattu 16 Mt | ladattu 31 Mt; siltaruutuja enintään 60, luokkaruutuja 38 (40 Mt) |
 
 Samalla alueella piirto on yhtä raskas kuin ennen, mutta muistia kuluu selvästi vähemmän, koska
 viivoja ja tarkkoja luokkaruutuja ei ladata kerralla. Uusilla alueilla tarkka malli maksaa noin 4 ms
@@ -680,17 +670,18 @@ siltoja on lähellä noin 10 000–20 000 kolmiota.
 
 ## Rakenne
 
-- `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n ja HSY:n pyynnöt
+- `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n pyynnöt
 - `netlify.toml`: julkaisuasetukset
 - `scripts/build_data.py`: aineistojen lataus ja muunnos
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
-- `public/ride.js`: kyytinäkymä: kamera kulkuneuvon keulassa, katseen kääntäminen ja kyytipalkki
-- `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli metron kyytiä varten
-- `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: pelillinen maasto (kokeilu): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
+- `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus ja kyytipalkki
+- `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli (käytössä vain kameran ollessa maan alla)
+- `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: maaston pinta (pelillinen maasto): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
+- `public/kelikamerat.js`: tieliikenteen kelikamerat (Digitraffic): kameramerkit, kuvat ja suurennos

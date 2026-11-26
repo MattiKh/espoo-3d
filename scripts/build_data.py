@@ -2423,16 +2423,66 @@ def lane_lines(roads, junctions):
     return out
 
 
+def carriageway_half(tags):
+    """Ajoradan puolileveys (m) kaistamäärästä ja kaistan leveydestä (suojatiet ajoradan poikki)."""
+    w = LANE_ROADS.get(tags.get("highway", "").replace("_link", ""), 3.0)
+    return max(2.5, road_lanes(tags) * w / 2)
+
+
+def polyline_part(pts, s0, s1):
+    """Murtoviivan [(x, y), ...] osa matkalta s0–s1 (m alusta)."""
+    out, acc = [], 0.0
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        ln = math.hypot(bx - ax, by - ay)
+        if ln and acc + ln >= s0 and acc <= s1:
+            t0, t1 = max(0.0, (s0 - acc) / ln), min(1.0, (s1 - acc) / ln)
+            p0, p1 = (ax + (bx - ax) * t0, ay + (by - ay) * t0), (ax + (bx - ax) * t1, ay + (by - ay) * t1)
+            if not out:
+                out.append(p0)
+            out.append(p1)
+        acc += ln
+    return out
+
+
 def crossings(roads, ways, nodes):
-    """Suojatiet ja pyörätien jatkeet OSM:stä: ylitysväylät (footway/cycleway=crossing) sellaisinaan
-    ja ylityskohdat (highway=crossing), joille ei ole väylää, ajoradan poikki tien leveydeltä.
-    Merkitsemättömät jätetään pois. Palauttaa [(laji, [(x, y), ...])]."""
+    """Suojatiet ja pyörätien jatkeet OSM:stä ajoradan kohdalle. Ylitysväylät (footway/cycleway=crossing)
+    rajataan ajoradan leveydelle (carriageway_half, vinossa ylityksessä pidemmälle) niistä kohdista, joissa ne
+    ylittävät ajotien keskilinjan: OSM:ssä ylitysväylä jatkuu usein jalkakäytävälle asti, ja joskus koko
+    pyörätie on merkitty ylitykseksi. Ylityskohdat (highway=crossing), joille ei ole väylää, piirretään
+    ajoradan poikki. Merkitsemättömät jätetään pois. Palauttaa [(laji, [(x, y), ...])]."""
     out, on_way = [], set()
+    near, half = segment_grid([pts for _, pts, _ in roads]), {}
+    for tags, pts, _ in roads:
+        for a, b in zip(pts, pts[1:]):
+            half[(a, b)] = carriageway_half(tags)
     for tags, pts, ids in ways:
         kind = "suojatie" if tags.get("footway") == "crossing" else "pyorajatke" if tags.get("cycleway") == "crossing" else None
-        if kind and tags.get("crossing") not in UNMARKED and len(pts) > 1:
-            out.append((kind, pts))
-            on_way.update(ids)
+        if not kind or tags.get("crossing") in UNMARKED or len(pts) < 2:
+            continue
+        on_way.update(ids)
+        spans, acc = [], 0.0
+        for (px, py), (qx, qy) in zip(pts, pts[1:]):
+            dx, dy = qx - px, qy - py
+            ln = math.hypot(dx, dy)
+            for a, b in near((px + qx) / 2, (py + qy) / 2, ln / 2 + 1):
+                ex, ey = b[0] - a[0], b[1] - a[1]
+                den = dx * ey - dy * ex
+                if not den:
+                    continue
+                t = ((a[0] - px) * ey - (a[1] - py) * ex) / den  # ylityksellä
+                u = ((a[0] - px) * dy - (a[1] - py) * dx) / den  # tiellä
+                if 0 <= t <= 1 and 0 <= u <= 1:
+                    sin = abs(den) / (ln * math.hypot(ex, ey))
+                    reach = half[(a, b)] / max(sin, 0.35)
+                    spans.append((acc + t * ln - reach, acc + t * ln + reach))
+            acc += ln
+        merged = []  # päällekkäiset (esim. saman tien kaksi osaa samassa kohdassa) yhdistetään
+        for s0, s1 in sorted(spans):
+            if merged and s0 <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], s1)
+            else:
+                merged.append([s0, s1])
+        out += [(kind, part) for s0, s1 in merged if len(part := polyline_part(pts, s0, s1)) > 1]
     at = {}
     for tags, pts, ids in roads:
         for i, nid in enumerate(ids):
@@ -2444,7 +2494,7 @@ def crossings(roads, ways, nodes):
         road, pts, i = at[node["id"]]
         (ax, ay), (bx, by) = pts[max(0, i - 1)], pts[min(len(pts) - 1, i + 1)]
         ln = math.hypot(bx - ax, by - ay) or 1.0
-        nx, ny, h = (by - ay) / ln, -(bx - ax) / ln, game_road_half(road)
+        nx, ny, h = (by - ay) / ln, -(bx - ax) / ln, carriageway_half(road)
         x, y = pts[i]
         out.append(("suojatie", [(x - nx * h, y - ny * h), (x + nx * h, y + ny * h)]))
     return out
@@ -2492,15 +2542,26 @@ def build_landcover_lines(tiles):
 
     def fetch(type_name, c):
         # Ruuhkautunut palvelin vastaa toisinaan tyhjällä kohdejoukolla (HTTP 200), joten tyhjä vastaus
-        # haetaan vielä kahdesti hetken päästä (meren tai metsän ruutu on tyhjä silloinkin).
+        # haetaan vielä kahdesti hetken päästä (meren tai metsän ruutu on tyhjä silloinkin). Kolmesti
+        # tyhjänä saatu merkitään (.tyhja), jottei sitä tarkisteta joka ajossa uudelleen.
         dest = os.path.join(CACHE, "pelimaasto", f"{type_name.split(':')[1]}_{c[0]}_{c[1]}.xml")
-        for wait in (3, 10, None):
-            path = http_get(ESPOO_WFS, espoo_params(type_name, bbox_filter(*c)), dest, timeout=600)
-            with open(path, encoding="utf-8") as fh:
-                if wait is None or "featureMember" in fh.read(4000):
-                    return path
-            os.remove(path)
+        params = espoo_params(type_name, bbox_filter(*c))
+        http_get(ESPOO_WFS, params, dest, timeout=600)
+        if os.path.exists(dest + ".tyhja"):
+            return dest
+        for wait in (3, 10):
+            with open(dest, encoding="utf-8") as fh:
+                if "featureMember" in fh.read(4000):
+                    return dest
             time.sleep(wait)
+            try:  # uusi vastaus erilliseen tiedostoon, jottei epäonnistunut haku vie edellistä
+                os.replace(http_get(ESPOO_WFS, params, dest + ".uusi", timeout=600), dest)
+            except RuntimeError:
+                pass
+        with open(dest, encoding="utf-8") as fh:
+            if "featureMember" not in fh.read(4000):
+                open(dest + ".tyhja", "w").close()
+        return dest
 
     for type_name in [*LANDCOVER_LINE_TYPES, "kanta:Paikannimi"]:
         started = time.time()
@@ -2537,7 +2598,7 @@ def build_landcover_lines(tiles):
                                     keep = simplify_indices([(px * 0.497, py * 0.497) for px, py in run], 0.15)  # Web Mercator → noin m
                                     emit({"k": LANDCOVER_LINE_TYPES[type_name]}, {"type": "LineString", "coordinates": [to_ll(*run[k]) for k in keep]})
                                     if type_name == "kanta:Liikennevayla":  # ajoradan reunat siltojen päissä (game_bridges)
-                                        road_edges.append([stream_xy(*merc_to_lonlat(px, py)) for px, py in run])
+                                        road_edges.append([(*stream_xy(*merc_to_lonlat(x, y)), z) for x, y, z in pts[i0:i1 + 1]])
                     el.clear()
     # OpenStreetMapista kaistaviivat, suojatiet ja raiteet (junat, raitiovaunut) samalta alueelta;
     # siltojen omat viivat ja raiteet jäävät pois (sillat ovat 3D-malleja).
@@ -2584,6 +2645,7 @@ def build_landcover_lines(tiles):
 
 
 GAME_LINE_ABOVE = 2.0  # m: sillan alueella näin korkealla maanpinnasta kulkeva viiva on kannella
+EDGE_DZ = 1.5  # m: sillan kannelle jatkuvan reunaviivan korkeus enintään näin kaukana kannen pään korkeudesta
 GAME_LINE_STEP = 2.0  # m: viivat tihennetään ennen siltatestiä (sillan yli voi kulkea yksi pitkä jana)
 
 
@@ -2777,12 +2839,14 @@ def resample_line(pts, step):
     return out
 
 
-def bridge_edge_offsets(line, half, road_edges, reach=8.0):
+def bridge_edge_offsets(line, half, road_edges, z_ends, reach=8.0):
     """Ajoradan reunaviivojen sivusiirrot (m, oikealle positiivinen) sillan alussa ja lopussa: maanpinnan
-    reunaviivojen (road_edges: segment_grid) lähimmät kohdat enintään reach metrin päässä sillan päästä ja kannen
-    leveydellä. Alun ja lopun siirrot paritetaan lähimmän mukaan (ero enintään 2 m); parittomat
-    jatkuvat samana. Palauttaa [[alku, loppu], ...]."""
-    def at_end(p, q):
+    reunaviivojen (road_edges: segment_grid, pisteet (x, y, z)) lähimmät kohdat enintään reach metrin päässä
+    sillan päästä ja kannen leveydellä. Mukaan otetaan vain sillan suuntaiset viivat (enintään 25°) kannen
+    pään korkeudelta (z_ends, ±EDGE_DZ): muuten mukaan tulisi esim. sillan alta poikittain kulkevan tien
+    reunoja. Jos viivoja on enemmän kuin kaksi, uloimmat ovat ajoradan reunat. Alun ja lopun siirrot
+    paritetaan lähimmän mukaan (ero enintään 2 m); parittomat jatkuvat samana. Palauttaa [[alku, loppu], ...]."""
+    def at_end(p, q, z):
         ux, uy = q[0] - p[0], q[1] - p[1]
         ln = math.hypot(ux, uy) or 1.0
         ux, uy = ux / ln, uy / ln
@@ -2790,7 +2854,11 @@ def bridge_edge_offsets(line, half, road_edges, reach=8.0):
         for a, b in road_edges(p[0], p[1], reach + half):
             dx, dy = b[0] - a[0], b[1] - a[1]
             l2 = dx * dx + dy * dy
-            t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) if l2 else 0.0
+            if not l2 or abs(dx * ux + dy * uy) < 0.9 * math.sqrt(l2):
+                continue
+            t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2))
+            if a[2] and b[2] and abs(a[2] + (b[2] - a[2]) * t - z) > EDGE_DZ:  # korkeus 0 = korkeus puuttuu
+                continue
             cx, cy = a[0] + t * dx - p[0], a[1] + t * dy - p[1]
             if math.hypot(cx, cy) > reach + half:
                 continue
@@ -2803,11 +2871,12 @@ def bridge_edge_offsets(line, half, road_edges, reach=8.0):
                 merged[-1].append(v)
             else:
                 merged.append([v])
-        return [sum(m) / len(m) for m in merged]
+        sides = [sum(m) / len(m) for m in merged]
+        return sides if len(sides) <= 2 else [sides[0], sides[-1]]
 
-    start = at_end(line[0], line[1])
+    start = at_end(line[0], line[1], z_ends[0])
     # Lopussa kulkusuunta käännetään, jolloin myös sivu kääntyy.
-    end = [-v for v in at_end(line[-1], line[-2])]
+    end = [-v for v in at_end(line[-1], line[-2], z_ends[1])]
     pairs = []
     for v in start:
         w = min(end, key=lambda e: abs(e - v), default=None)
@@ -2821,42 +2890,110 @@ def bridge_edge_offsets(line, half, road_edges, reach=8.0):
 def game_bridges(ways, road_edges=lambda x, y, r: ()):
     """Pelillisen maaston 3D-sillat OSM:n siltaosuuksista [(tagit, [(x, y), ...], solmut)]. Kannen
     korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
-    kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien
-    pinnasta sillan ulkopuolelta (silta, jolle kansia ei ole, tai kansi mitattu ajorataa alempaa). Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
+    kannet, build_dem) tai, jos se on alempana, suoraan sillan päiden välillä. Pään korkeus on tien
+    pinnasta 4 m sillan ulkopuolelta (silta, jolle kansia ei ole, tai kansi mitattu ajorataa alempaa),
+    paitsi jos sillan pää jatkuu toisena siltaosuutena (esim. liittymä sillalla): silloin pää on
+    viereisen osuuden kannen korkeudella, jottei lyhyt osuus kallistu maahan ja kansi lopu ilmaan.
+    Sillat, jotka eivät ole vähintään metriä maanpinnan yläpuolella, jätetään pois.
     Palauttaa [{"p": [lon, lat, z, ...], "w": puolileveys (m), "k": tie | kevyt | raide, "v": kaistaviivojen
     siirrot oikealle (m), jos tiellä on viivoja, "r": ajoradan reunaviivat [[siirto alussa, siirto
     lopussa], ...]: maanpinnan reunaviivojen (road_edges: segment_grid, kantakartta) sivusijainnit sillan päiden
-    ulkopuolelta, jolloin kannen reunaviivat jatkavat tien reunaviivoja}]."""
-    dem, out = dem_sampler(), []
-    for wi, (tags, pts, _) in enumerate(ways):
+    ulkopuolelta, jolloin kannen reunaviivat jatkavat tien reunaviivoja, "ka": kaiteet janoittain, jos
+    osa sivuista on toisen sillan kannella, "tu": päätuet [alussa, lopussa] (1 = tuki)}]."""
+    import numpy as np
+    dem, items = dem_sampler(), []
+    for tags, pts, nodes in ways:
         if len(pts) < 2 or not (bk := bridge_kind(tags)):
             continue
-        kind, half = bk
         line = resample_line([(x, y, 0.0) for x, y in pts], 2.0)
         s = [0.0]
         for a, b in zip(line, line[1:]):
             s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
-        zl = [dem(x, y) for x, y, _ in line]
-        zo = [dem(x, y, False) for x, y, _ in line]
+        so = [0.0]  # OSM:n pisteiden matkat alusta (jaetut solmut)
+        for a, b in zip(pts, pts[1:]):
+            so.append(so[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
         # Päiden korkeus tien pinnasta 4 m sillan ulkopuolelta (kantakartan kansi voi olla mitattu ajorataa
         # alempaa, esim. alikulun kohdalla).
         ends = []
         for a, c in ((line[0], line[1]), (line[-1], line[-2])):
             ln = math.hypot(a[0] - c[0], a[1] - c[1]) or 1.0
             ends.append(dem(a[0] + (a[0] - c[0]) / ln * 4, a[1] + (a[1] - c[1]) / ln * 4))
-        z0, z1 = ends
-        z = [max(h, z0 + (z1 - z0) * t / (s[-1] or 1)) for h, t in zip(zl, s)]
+        items.append({"tags": tags, "kind": bk, "line": line, "s": np.array(s), "so": so, "nodes": nodes, "e": ends,
+                      "zl": np.array([dem(x, y) for x, y, _ in line]), "zo": np.array([dem(x, y, False) for x, y, _ in line])})
+    # Siltaosuuksien yhteiset solmut. Pää, joka on toisen osuuden solmu, saa korkeutensa viereisistä
+    # osuuksista (korkein); korkeudet päivitetään, kunnes ne eivät enää muutu.
+    where = collections.defaultdict(list)
+    for it in items:
+        for nid, sv in zip(it["nodes"], it["so"]):
+            where[nid].append((it, sv))
+    profile = lambda it: np.maximum(it["zl"], it["e"][0] + (it["e"][1] - it["e"][0]) * it["s"] / (it["s"][-1] or 1))
+    for it in items:
+        it["z"] = profile(it)
+    for _ in range(8):
+        changed = False
+        for it in items:
+            for k, nid in ((0, it["nodes"][0]), (1, it["nodes"][-1])):
+                others = [float(np.interp(sv, o["s"], o["z"])) for o, sv in where[nid] if o is not it]
+                if others and max(others) > it["e"][k] + 0.01:
+                    it["e"][k] = max(others)
+                    changed = True
+        for it in items:
+            it["z"] = profile(it)
+        if not changed:
+            break
+    out = []
+    for it in items:
+        (kind, half), line, s, tags = it["kind"], it["line"], it["s"], it["tags"]
+        z = list(it["z"])
         z = [sorted(z[max(0, i - 2):i + 3])[len(z[max(0, i - 2):i + 3]) // 2] for i in range(len(z))]  # mediaani
-        if max(a - b for a, b in zip(z, zo)) < 1.0:
+        if max(a - b for a, b in zip(z, it["zo"])) < 1.0:
             continue
         keep = sorted(set(simplify_indices([p[:2] for p in line], 0.3)) | set(simplify_indices(list(zip(s, z)), 0.05)))
         bridge = {"p": [v for i in keep for v in (round(line[i][0] / 55462.0 + 24.7, 6), round(line[i][1] / 111415.0 + 60.2, 6),
                                                 round(z[i], 2))], "w": round(half, 1), "k": kind}
         if kind == "tie" and (lanes := lane_offsets(tags)):
             bridge["v"] = [round(d, 2) for d, _ in lanes]  # kaistaviivat kannelle (siirto oikealle, m)
-        if kind == "tie" and (edges := bridge_edge_offsets(line, half, road_edges)):
+        if kind == "tie" and (edges := bridge_edge_offsets(line, half, road_edges, (z[0], z[-1]))):
             bridge["r"] = edges
+        # Päätuki vapaaseen päähän (ei jatku toisena siltaosuutena), joka on yli metrin pelillisen maaston
+        # yläpuolella 3 m pään ulkopuolelta, esim. portaisiin tai rakennukseen päättyvä kevyen liikenteen silta.
+        supports = []
+        for nid, (a, c), zend in ((it["nodes"][0], line[:2], z[0]), (it["nodes"][-1], line[-1:-3:-1], z[-1])):
+            ln = math.hypot(a[0] - c[0], a[1] - c[1]) or 1.0
+            free = all(o is it for o, _ in where[nid])
+            supports.append(int(free and zend - dem(a[0] + (a[0] - c[0]) / ln * 3, a[1] + (a[1] - c[1]) / ln * 3, "peli") > 1.0))
+        if any(supports):
+            bridge["tu"] = supports
         out.append(bridge)
+    # Kaiteet pois sivuilta, jotka ovat toisen sillan kannella (esim. liittymä sillalla, jossa lyhyt
+    # osuus kulkee pääsillan poikki): "ka" on merkki janaa kohden, bitti 1 vasen ja 2 oikea kaide. Sivu
+    # tarkistetaan 2 m välein; jos jokin kohta on toisella kannella, janan kaide jätetään pois.
+    decks = [[((b["p"][i] - 24.7) * 55462.0, (b["p"][i + 1] - 60.2) * 111415.0) for i in range(0, len(b["p"]), 3)] for b in out]
+    near, owner = segment_grid(decks), {}
+    for k, pts in enumerate(decks):
+        for a, c in zip(pts, pts[1:]):
+            owner[(a, c)] = k
+
+    def on_other(k, x, y):
+        for a, c in near(x, y, 30):
+            j = owner[(a, c)]
+            if j == k:
+                continue
+            ex, ey = c[0] - a[0], c[1] - a[1]
+            t = max(0.0, min(1.0, ((x - a[0]) * ex + (y - a[1]) * ey) / (ex * ex + ey * ey or 1)))
+            if math.hypot(a[0] + ex * t - x, a[1] + ey * t - y) < out[j]["w"] - 0.3:
+                return True
+        return False
+    for k, (bridge, pts) in enumerate(zip(out, decks)):
+        flags = []
+        for (ax, ay), (cx, cy) in zip(pts, pts[1:]):
+            ln = math.hypot(cx - ax, cy - ay) or 1.0
+            ux, uy, w = (cx - ax) / ln, (cy - ay) / ln, bridge["w"] - 0.2  # vasen normaali (-uy, ux)
+            steps = [ln / 2] if ln < 3 else [1.0 + i * (ln - 2.0) / max(1, round((ln - 2.0) / 2)) for i in range(round((ln - 2.0) / 2) + 1)]
+            flags.append(str(sum(bit for bit, side in ((1, w), (2, -w))
+                                 if not any(on_other(k, ax + ux * t - uy * side, ay + uy * t + ux * side) for t in steps))))
+        if any(f != "3" for f in flags):
+            bridge["ka"] = "".join(flags)
     return out
 
 
