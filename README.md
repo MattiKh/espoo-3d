@@ -50,7 +50,8 @@ python3 scripts/build_data.py
 Skripti lataa aineistot Espoon, HSY:n ja Tilastokeskuksen rajapinnoista kansioon `cache/`,
 muuntaa ne GeoJSONiksi (`data/`) ja tekee niistä vektoritiilet
 (`public/tiles/`). Siltojen tiedot tallentuvat tiedostoon `public/data/sillat.json` ja
-raiteet tiedostoon `public/data/raiteet.json` ja sähköautojen latauspaikat pysäköintiruutuineen
+raiteet tiedostoon `public/data/raiteet.json`, bussien ajotiet tiedostoon `public/data/ajotiet.json`
+ja sähköautojen latauspaikat pysäköintiruutuineen
 tiedostoon `public/data/lataus.json`. Rakennusten kaltevat katot tallentuvat kansioon
 `public/tiles/katot` (`python3 scripts/build_data.py katot`; ensimmäinen ajo lataa koko
 Espoon 3D-mallin, noin 2,5 Gt). Tiilitykseen tarvitaan
@@ -110,6 +111,7 @@ palvelimen ei tarvitse lähettää `Content-Encoding`-otsaketta.
 | Haukilahden vesitornin muoto | Wikipedia (Haukilahti water tower), Docomomo Suomi |
 | Otaniemen vesitornin muoto | Otaniemen vesitornin rakennushistoriaselvitys (ark-byroo 2017), Espoon LOD2-malli |
 | Junien, metron ja raitiovaunujen raiteet ja pysähtymispaikat | © OpenStreetMap-tekijät (ODbL), Overpass API |
+| Ajotiet, kaistamäärät ja yksisuuntaisuus (bussit ajoradan oikealle puolelle) | © OpenStreetMap-tekijät (ODbL), Overpass API |
 | Sähköautojen latauspaikat ja latauspisteiden tila | Fintraffic / Digitraffic AFIR (REST, CC BY 4.0) |
 | Tieliikenteen kelikamerat (sijainnit ja kuvat) | Fintraffic / Digitraffic weathercam (REST, CC BY 4.0) |
 | Latausasemien sijainnit, pysäköintialueet, -ruudut ja tiet latauspaikkojen ympärillä | © OpenStreetMap-tekijät (ODbL), Overpass API |
@@ -220,6 +222,33 @@ Espoossa tai Kauniaisissa tai enintään 300 metrin päässä niiden rajasta.
 - Junat, metrot ja raitiovaunut pidetään raiteilla (`public/rails.js`). Sijainti siirretään
   lähimmälle samanlajiselle raiteelle, ja edellisellä raiteella pysymistä suositaan, jottei juna
   hypi rinnakkaisten raiteiden välillä. Uuden junan vaunut asetetaan heti raidetta pitkin.
+- Bussit kulkevat ajoradan oikealla puolella (`public/roads.js`). HFP:n GPS-sijainti on usein tien
+  keskellä tai vastaantulevien kaistalla (noin viidesosa sijainneista on keskilinjan väärällä
+  puolella), joten jokainen sijainti siirretään sivusuunnassa lähimmälle menosuuntaan sopivalle
+  OpenStreetMapin ajotielle menosuunnan oikeanpuoleisimman kaistan keskelle. Kaistan paikka
+  keskilinjasta on laskettu valmiiksi kummallekin suunnalle tien kaistamäärästä samoin kuin pelillisen
+  maaston kaistaviivat (`public/data/ajotiet.json`, `python3 scripts/build_data.py ajotiet`), joten
+  bussi on piirrettyjen viivojen välissä. Kaksisuuntaisella tiellä se on noin puolen ajoradan
+  puolikkaan päässä keskilinjasta (kaistan leveys pääteillä 3,25–3,75 m, kaduilla 3 m), ja
+  yksisuuntaisella ajoradalla (moottoritiet, erilliset ajoradat, rampit, kiertoliittymät) kaistamäärän
+  mukaan lähellä keskilinjaa tai sen kohdalla. Bussikaistat ovat oikeassa reunassa, joten ne tulevat
+  tästä mukaan. Pysäkin kohdalla (HFP:n `stop`) bussi saa olla enintään 3 m kaistaa oikeammalla, jos
+  GPS-sijainti on siellä (pysäkkitasku).
+- OSM:ssä ramppi erkanee pääväylän keskilinjalta ja yhtyy siihen, vaikka kaista jatkuu pääväylän
+  oikeaan reunaan. Siksi yksisuuntaisen tien alussa ja lopussa kaistan paikka on sama kuin tiellä,
+  jolta se jatkuu tai jolle se yhtyy (alle 30° kulmassa), ja se muuttuu tasaisesti 80 metrin matkalla.
+  Samoin tasoittuu kaistamäärän muutos yksisuuntaisen ajoradan osien välillä.
+- Tie valitaan etäisyydestä kaistan kohtaan. Poikittainen tie (risteävä katu) ja muu kuin edelliseen
+  yhtyvä tie (rinnakkaiset tiet ja ajoradat) ovat huonompia, eikä yksisuuntaista tietä valita väärään
+  suuntaan. Menosuunta on HFP:n suunta; seisova bussi pitää edellisen suuntansa, jottei se vaihda
+  puolta pysäkillä. Ajoradalla tai enintään 4 metrin päässä sen reunasta oleva sijainti siirretään
+  kokonaan, ja siitä siirto pienenee niin, että yli 12 metrin päässä (esim. varikot ja terminaalit,
+  joiden teitä ei ole aineistossa) bussi on GPS-sijainnissaan. Mukana ovat ajotiet ja huoltotiet,
+  joilla on bussilupa. Espoon bussien sijainneista noin 93 % kohdistuu tielle.
+- Siirto tehdään vastaanotettuihin sijainteihin ennen interpolointia, joten liike niiden välillä pysyy
+  yhtä tasaisena kuin ennen. Kun tie vaihtuu (risteykset, rampit, kaistamäärän muutos), uuden ja
+  edellisen tien kaistan ero häipyy noin 25 metrin matkalla tai kolmessa sekunnissa, joten bussi ei
+  nytkähdä. Samalla tiellä bussi pysyy kaistan kohdalla, eikä GPS-sijainnin heilunta näy.
 - Jos raiteilla kulkevan sijainti katkeaa, liikettä jatketaan raidetta pitkin viimeisellä
   nopeudella enintään 90 sekuntia. Lähijunat, metrot ja raitiovaunut jarruttavat seuraavalle
   asemalle tai pysäkille ja jäävät sinne odottamaan; kaukojunat eivät pysähdy jokaisella asemalla,
@@ -683,5 +712,6 @@ siltoja on lähellä noin 10 000–20 000 kolmiota.
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat
+- `public/roads.js`: bussien ajotiet ja kohdistus menosuunnan oikealle kaistalle
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
 - `public/kelikamerat.js`: tieliikenteen kelikamerat (Digitraffic): kameramerkit, kuvat ja suurennos

@@ -447,7 +447,8 @@ async function initTransit() {
   try {
     const { createTransit, TRANSIT_GROUPS } = await import("./transit.js");
     transit = await createTransit(map, {
-      boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json", undergroundBeforeLayer: "rakennukset",
+      boundaryUrl: "data/espoo_raja.geojson", railsUrl: "data/raiteet.json", roadsUrl: "data/ajotiet.json",
+      undergroundBeforeLayer: "rakennukset",
       beforeLayer: "kaupunginosat_nimet", // ajoneuvot nimien alle
       // adsb.fi ei salli selaimen suoria hakuja, joten haku kulkee välityspalvelimen kautta (server.py, netlify.toml).
       planesUrl: new URL("proxy/adsb/lat/60.21/lon/24.66/dist/25", BASE).href,

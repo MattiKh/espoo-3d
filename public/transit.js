@@ -7,6 +7,7 @@ import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.min.j
 import mqtt from "https://unpkg.com/mqtt@5.10.1/dist/mqtt.esm.js";
 import { deckHeightAt, gameDecksAt, rawElevationAt } from "./bridges.js";
 import { METRO, RAIL, TRAM, loadRails, metroLines, nextStop, pathBehind, signFor, snap, walk } from "./rails.js";
+import { loadRoads, onRoad } from "./roads.js";
 import { buildTunnelInterior } from "./metrotunnel.js";
 import { LANDMARKS, detailRadius } from "./layers.js";
 import { LANDMARK_MODELS, lod2Landmark } from "./landmarks.js";
@@ -28,6 +29,10 @@ const RAIL_TIMEOUT = 120000; // raiteilla kulkevia jatketaan katkoksen yli, jote
 const DEADRECKON_MAX = 90000; // ms: näin kauan raiteilla kulkevaa jatketaan ilman uutta sijaintia
 const BRAKE = 0.8; // m/s²: jarrutus asemalle
 const UNIT_STALE = 15000; // ms: kytketyn yksikön sijainti vanhenee
+const LANE_EASE = 25; // m: bussin sivusiirron muutos (tie tai kaista vaihtuu) pehmennetään näin pitkälle matkalle
+const LANE_EASE_MS = 3000; // ... ja ajalle (myös seisovalla)
+const LANE_AHEAD = Math.cos(30 * (Math.PI / 180)); // loivempi tien vaihto on tien jatkumista, jyrkempi kääntymistä
+const BAY = 3; // m: pysäkillä bussi saa olla näin paljon kaistaa oikeammalla (pysäkkitasku), jos sijainti on siellä
 const REGION_MARGIN = 300; // m: ajoneuvot näkyvät vielä näin kaukana Espoon rajan takana
 const MODEL_MINZOOM = 12.5; // tätä kauempaa ajoneuvot näytetään vain pisteinä
 const MAX_ENLARGE = 2; // mallit näytetään kaukaa suurennettuina, jotta ne erottuvat
@@ -62,9 +67,10 @@ const COLORS = {
 // jonka yläpuolelle linjanumero sijoitetaan. rail kertoo raideverkon (rails.js), stops,
 // pysähtyykö ajoneuvo yleensä jokaisella asemalla tai pysäkillä, ja grade radan suurimman
 // kaltevuuden (korkeuden muutos metriä metrillä). eye on kuljettajan silmien korkeus maasta (m);
-// ajoneuvoihin, joilta se puuttuu (tavarajunat), ei voi hypätä kyytiin (ride.js).
+// ajoneuvoihin, joilta se puuttuu (tavarajunat), ei voi hypätä kyytiin (ride.js). road kertoo, että
+// ajoneuvo kulkee ajoradan oikealla puolella (roads.js, keepRight).
 const KINDS = {
-  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3, eye: 2.5 },
+  bus: { group: "bussit", label: "Bussi", cars: [["bus", 12]], gap: 0, height: 3.3, eye: 2.5, road: true },
   tram: {
     group: "ratikat", label: "Raitiovaunu", gap: 0.5, height: 3.7, eye: 2.7, rail: TRAM, stops: true, grade: 0.07,
     cars: [["tramCab", 12.2], ["tramMid", 9.4], ["tramCab", 12.2, true]],
@@ -483,7 +489,7 @@ function addSample(v, s, inside) {
     // Sijainti raiteelle; raidekohta tarvitaan, jos liikettä pitää jatkaa ilman uutta sijaintia.
     const p = snap(s.x, s.y, rail, v.way);
     if (p) { s.x = p.x; s.y = p.y; s.pos = p; v.way = p.way; }
-  }
+  } else if (KINDS[v.kind].road && !(last && s.t <= last.t)) keepRight(v, s);
   if (last) {
     if (s.t <= last.t) return; // kaksoiskappale tai myöhässä saapunut viesti
     const d = Math.hypot(s.x - last.x, s.y - last.y);
@@ -497,6 +503,41 @@ function addSample(v, s, inside) {
   else if (v.outAt == null) v.outAt = s.t;
   S.push(s);
   if (S.length > 6) S.shift();
+}
+
+// Bussi ajoradan oikealle puolelle: GPS-sijainti voi olla tien keskellä tai vastaantulevien kaistalla,
+// joten se siirretään sivusuunnassa menosuunnan oikeanpuoleisimman kaistan keskelle (roads.js). Siirto
+// tehdään vastaanotettuihin sijainteihin, joten liike niiden välillä pysyy yhtä tasaisena kuin ennen.
+// Menosuunta on HFP:n suunta liikkeessä; seisovan bussin suunnaksi jää edellinen, jottei se vaihda puolta
+// pysäkillä. Pysäkin kohdalla (HFP:n stop) bussi saa olla kaistaa oikeammalla, jos GPS-sijainti on siellä.
+// Kun tie vaihtuu (risteykset, rampit, kaistamäärän muutos), uuden ja edellisen tien kaistan ero
+// siirretään perittäväksi siirroksi, joka häipyy kuljetun matkan mukaan, joten bussi ei nytkähdä.
+// Samalla tiellä bussi on kaistan kohdalla, eikä GPS-sijainnin heilunta näy.
+function keepRight(v, s) {
+  const r = v.road, near = r && Math.hypot(s.x - r.x, s.y - r.y) < 150 ? r : null;
+  const hdg = s.hdg != null && [Math.sin(s.hdg * D2R), Math.cos(s.hdg * D2R)];
+  const m = onRoad(s.x, s.y, (s.spd > 1.5 && hdg) || near?.m?.dir || hdg || null, near?.m);
+  const a = near ? 1 - Math.exp(-Math.hypot(s.x - near.x, s.y - near.y) / LANE_EASE - Math.max(0, s.t - near.t) / LANE_EASE_MS) : 1;
+  const shift = (p, want) => {
+    const d = (want * p.k - p.lat) * p.weight; // sivusiirto kaistan kohtaan
+    return [d * p.nx, d * p.ny];
+  };
+  const same = m && near?.m?.way === m.way && m.dir[0] * near.m.dir[0] + m.dir[1] * near.m.dir[1] > 0;
+  let want = null, sx = 0, sy = 0, cx = near ? near.cx * (1 - a) : 0, cy = near ? near.cy * (1 - a) : 0;
+  if (m) {
+    const target = s.stop ? Math.min(m.off + BAY, Math.max(m.off, m.lat / m.k)) : m.off;
+    want = same ? near.want + (target - near.want) * a : target;
+    [sx, sy] = shift(m, want);
+  }
+  if (near?.m && !same) {
+    // Ero edelliseen: tien jatkuessa samaan suuntaan edellisen tien kaista tämän sijainnin kohdalla,
+    // kääntyessä (edellisen tien kaistan jatke ei enää kuvaa mitään) edellinen siirto.
+    const ahead = m && m.dir[0] * near.m.dir[0] + m.dir[1] * near.m.dir[1] > LANE_AHEAD;
+    const [px, py] = ahead && m.stay ? shift(m.stay, near.want) : [near.sx, near.sy];
+    cx += px - sx; cy += py - sy;
+  }
+  v.road = { x: s.x, y: s.y, t: s.t, m, want, sx, sy, cx, cy };
+  s.x += sx + cx; s.y += sy + cy;
 }
 
 function slope(S, i, k) {
@@ -751,7 +792,7 @@ function onHfp(topic, payload) {
   if (v.units && !updateUnits(v, unit, x, y, vp.hdg)) return;
   v.cell = p[16];
   v.info = { line: vp.desi, headsign: p[11], dl: vp.dl, spd: vp.spd, veh: v.unitList?.join(" + ") ?? unit };
-  addSample(v, { t, x, y, spd: vp.spd ?? 0 }, inside);
+  addSample(v, { t, x, y, spd: vp.spd ?? 0, hdg: vp.hdg, stop: vp.stop != null }, inside);
 }
 
 const railInfo = new Map();
@@ -2367,13 +2408,15 @@ const nextFrame = () => (ride.active ? rideFrame() : mapRef.triggerRepaint());
 
 // ------------------------------------------------------------ julkinen rajapinta
 
-export async function createTransit(map, { boundaryUrl, railsUrl, planesUrl, chargingUrl, beforeLayer, undergroundBeforeLayer }) {
+export async function createTransit(map, { boundaryUrl, railsUrl, roadsUrl, planesUrl, chargingUrl, beforeLayer, undergroundBeforeLayer }) {
   mapRef = map;
   ride = createRide(map, { onEnd: () => { riding = null; } });
   await loadRegion(boundaryUrl);
   // Ilman raiteita metro kulkee ilmoitetuissa sijainneissa ilman tunnelia.
   // Ilman raiteita junat kulkevat ilmoitetuissa sijainneissa, eikä metrotunneleita piirretä.
   loadRails(railsUrl).then(buildTunnels).catch((err) => console.warn("Raiteita ei saatu ladattua", err));
+  // Ilman ajoteitä bussit kulkevat ilmoitetuissa sijainneissa.
+  loadRoads(roadsUrl).catch((err) => console.warn("Ajoteitä ei saatu ladattua", err));
   labelLayer = document.createElement("div");
   labelLayer.className = "vehicle-labels";
   map.getContainer().append(labelLayer);

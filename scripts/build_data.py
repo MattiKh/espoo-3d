@@ -8,7 +8,7 @@ jatkaa. Valmiit GeoJSON-tiedostot menevät kansioon data/, ja niistä tehdään
 vektoritiilet kansioon public/tiles/ (tippecanoe); rakennusten katot ovat kansiossa
 public/tiles/katot ja siltojen kohdalla nostetut korkeusmallin tiilet kansiossa
 public/tiles/korkeus. Selain tarvitsee kansiosta public/data/ vain tiedostot manifest.json,
-espoo_raja.geojson, kaupunginosat_nimet.geojson, sillat.json, raiteet.json ja lataus.json.
+espoo_raja.geojson, kaupunginosat_nimet.geojson, sillat.json, raiteet.json, ajotiet.json ja lataus.json.
 """
 import collections
 import concurrent.futures as cf
@@ -1986,6 +1986,144 @@ def build_rails():
         json.dump({"lahde": "© OpenStreetMap-tekijät (ODbL)", "solmut": solmut, "raiteet": raiteet, "pysakit": pysakit},
                   fh, separators=(",", ":"))
     log(f"  → raiteet.json: {len(raiteet)} raidetta, {len(solmut) // 2} solmua, {len(pysakit)} pysähtymispaikkaa, "
+        f"{os.path.getsize(path) / 1e3:.0f} kt")
+
+
+# Bussien ajotiet: selain siirtää bussit tielle ja menosuunnan oikealle kaistalle (public/roads.js).
+BUS_ROAD_TOL = 0.3  # m: tien muoto yksinkertaistetaan näin tarkaksi (risteyssolmut säilyvät)
+BUS_MINOR_LANE = 3.0  # m: kaistan leveys teillä, joilla ei ole kaistaviivoja (kuten carriageway_half)
+BUS_JOIN_TURN = 30  # astetta: loivemmin yhtyvä tie on jatkoa (ramppi, ajoradan jatke), jyrkemmin risteävä
+
+
+def bus_allowed(tags):
+    """Saako bussi ajaa väylällä: bus- tai psv-lupa ohittaa yleisen kiellon (esim. joukkoliikennekatu)."""
+    if any(tags.get(k) in ("yes", "designated") for k in ("bus", "psv")):
+        return True
+    if any(tags.get(k) == "no" for k in ("bus", "psv")):
+        return False
+    return all(tags.get(k) not in ("no", "private") for k in ("access", "vehicle", "motor_vehicle"))
+
+
+def bus_lane_offsets(tags):
+    """Bussin paikka ajoradalla: siirto (m) tien keskilinjasta oikealle väylän suuntaan ja sitä vastaan
+    ajettaessa (None, jos suuntaan ei saa ajaa; oneway=-1:n suunta on käännetty valmiiksi). Bussi on
+    menosuunnan oikeanpuoleisimman kaistan keskellä: bussikaistat ovat oikeassa reunassa, ja kaistamäärä
+    jaetaan suunnille kuten kaistaviivoissa (lane_offsets), joten bussi on piirrettyjen viivojen välissä.
+    Kaksisuuntaisella tiellä se on silloin noin puolen ajoradan puolikkaan päässä keskilinjasta, ja
+    yksisuuntaisella (erilliset ajoradat, rampit, kiertoliittymät) kaistamäärän mukaan lähellä keskilinjaa."""
+    base = tags.get("highway", "").replace("_link", "")
+    w = LANE_ROADS.get(base, BUS_MINOR_LANE)
+    oneway = road_oneway(tags) or tags.get("oneway") == "-1"
+    if tags.get("lanes", "").isdigit():
+        lanes = int(tags["lanes"])
+    else:
+        # Yksisuuntainen ramppi tai pienempi katu on yleensä yksikaistainen (pääteiden erilliset ajoradat eivät).
+        lanes = 1 if oneway and (tags.get("highway", "").endswith("_link") or base not in LANE_ROADS) else 2
+    if oneway:
+        off = (lanes - 1) * w / 2
+        return off, off if "no" in (tags.get("oneway:bus"), tags.get("oneway:psv")) else None
+    if lanes == 1:
+        return w / 4, w / 4  # kapea kaksisuuntainen katu: lähes keskellä
+    fwd = int(tags["lanes:forward"]) if tags.get("lanes:forward", "").isdigit() else (lanes + 1) // 2
+    return (fwd - 0.5) * w, (max(1, lanes - fwd) - 0.5) * w
+
+
+def bus_lane_ends(roads, offsets):
+    """Yksisuuntaisten teiden (rampit, erilliset ajoradat) kaistan paikka alussa ja lopussa. OSM:ssä ramppi
+    erkanee pääväylän keskilinjalta ja yhtyy siihen, vaikka kaista jatkuu pääväylän oikeaan reunaan,
+    joten rampin päässä bussin paikka on sama kuin tiellä, jolta se tulee tai jolle se jatkaa (suunnat
+    enintään BUS_JOIN_TURN asteen päässä toisistaan). Palauttaa {indeksi: (alku tai None, loppu tai None)}."""
+    at = collections.defaultdict(list)
+    for k, (_, _, ids) in enumerate(roads):
+        for j, nid in enumerate(ids):
+            at[nid].append((k, j))
+
+    def heading(pts, i, j):
+        (ax, ay), (bx, by) = pts[i], pts[j]
+        return math.atan2(by - ay, bx - ax)
+
+    def lane_at(k0, node, h, arriving):
+        """Kaistan paikka tiellä, joka tulee solmuun (arriving) tai lähtee siitä suuntaan h."""
+        best, best_turn = None, math.radians(BUS_JOIN_TURN)
+        for k, j in at[node]:
+            if k == k0:
+                continue
+            pts, fwd, back = roads[k][1], *offsets[k]
+            for step, off in ((1, fwd), (-1, back)):
+                i = j - step if arriving else j + step
+                if off is None or not 0 <= i < len(pts) or pts[i] == pts[j]:
+                    continue
+                d = heading(pts, i, j) if arriving else heading(pts, j, i)
+                turn = abs((d - h + math.pi) % (2 * math.pi) - math.pi)
+                if turn < best_turn:
+                    best, best_turn = off, turn
+        return best
+
+    ends = {}
+    for k, (_, pts, ids) in enumerate(roads):
+        if offsets[k][1] is not None or len(pts) < 2:
+            continue
+        start = lane_at(k, ids[0], heading(pts, 0, 1), True)
+        end = lane_at(k, ids[-1], heading(pts, -2, -1), False)
+        if start is not None or end is not None:
+            ends[k] = (start, end)
+    return ends
+
+
+def build_bus_roads():
+    """Ajotiet bussien kohdistukseen (OpenStreetMap). Selain siirtää bussin sijainnin lähimmälle
+    menosuuntaan sopivalle tielle ja sillä menosuunnan oikeanpuoleisimmalle kaistalle (public/roads.js).
+    Mukana ovat ajotiet kuten pelillisen maaston kaistaviivoissa sekä huoltotiet, joilla on bussilupa
+    (terminaalit).
+
+    Tiedosto: tiet [[eteen, taakse, alussa, lopussa, x0, y0, dx1, dy1, ...], ...]: bussin siirto
+    keskilinjasta oikealle (bus_lane_offsets) desimetreinä väylän suuntaan ja sitä vastaan ajettaessa (null,
+    jos suuntaan ei saa ajaa), yksisuuntaisella tiellä siirto alussa ja lopussa, jos se on eri (bus_lane_ends;
+    selain muuttaa siirtoa tasaisesti tien päiden lähellä), ja pisteet paikallisina desimetreinä
+    (transit.js:n koordinaatisto), ensimmäinen suoraan ja muut erotuksina edellisestä. Teiden yhteiset
+    solmut säilyvät yksinkertaistuksessa, joten selain tunnistaa toisiinsa yhtyvät tiet samoista pisteistä."""
+    log("ajotiet (OpenStreetMap)")
+    ways, _ = landcover_osm()
+    w, s, e, n = ESPOO_LONLAT
+    box = f"({s},{w},{n},{e})"
+    query = (f'[out:json][timeout:180];(way["highway"="service"]["bus"~"^(yes|designated)$"]{box};'
+             f'way["highway"="service"]["psv"~"^(yes|designated)$"]{box};);out geom;')
+    with open(overpass_post(query, os.path.join(CACHE, "ajotiet_huolto_osm.json")), encoding="utf-8") as fh:
+        ways = ways + [(el.get("tags", {}), [stream_xy(g["lon"], g["lat"]) for g in el["geometry"]], el["nodes"])
+                       for el in json.load(fh)["elements"] if el["type"] == "way"]
+    roads = {}
+    for tags, pts, ids in ways:
+        hw = tags.get("highway", "")
+        if hw.replace("_link", "") not in VEHICLE_ROADS and not (hw == "service" and bus_allowed(tags)):
+            continue
+        if tags.get("area") == "yes" or not bus_allowed(tags) or len(pts) < 2:
+            continue
+        if tags.get("oneway") == "-1":
+            pts, ids = pts[::-1], ids[::-1]
+        roads[tuple(ids)] = (tags, pts, ids)  # sama väylä voi tulla kahdesta kyselystä
+    roads = list(roads.values())
+    offsets = [bus_lane_offsets(tags) for tags, _, _ in roads]
+    ends = bus_lane_ends(roads, offsets)
+    uses = collections.Counter(nid for _, _, ids in roads for nid in ids)
+    dm = lambda v: None if v is None else round(v * 10)
+    tiet, points = [], 0
+    for k, (tags, pts, ids) in enumerate(roads):
+        keep = set(simplify_indices(pts, BUS_ROAD_TOL)) | {i for i, nid in enumerate(ids) if uses[nid] > 1}
+        q = [(dm(pts[i][0]), dm(pts[i][1])) for i in sorted(keep)]
+        q = [p for j, p in enumerate(q) if j == 0 or p != q[j - 1]]
+        if len(q) < 2:
+            continue
+        fwd, back = map(dm, offsets[k])
+        start, end = (None if e is None or dm(e) == fwd else dm(e) for e in ends.get(k, (None, None)))
+        row = [fwd, back, start, end, *q[0]]
+        for (ax, ay), (bx, by) in zip(q, q[1:]):
+            row += [bx - ax, by - ay]
+        tiet.append(row)
+        points += len(q)
+    path = os.path.join(PUBLIC_DATA, "ajotiet.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"lahde": "© OpenStreetMap-tekijät (ODbL)", "tiet": tiet}, fh, separators=(",", ":"))
+    log(f"  → ajotiet.json: {len(tiet)} tietä ({len(ends)} rampin tai ajoradan päätä), {points} pistettä, "
         f"{os.path.getsize(path) / 1e3:.0f} kt")
 
 
@@ -4330,6 +4468,8 @@ def main():
         build_bridges()
     if want("raiteet"):
         build_rails()
+    if want("ajotiet"):
+        build_bus_roads()
     if want("purot"):
         build_streams()
     if want("rakennukset"):
