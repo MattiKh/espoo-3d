@@ -1094,16 +1094,18 @@ def write_roof_tiles(roofs, targets):
 
 # Rakennusten luonnolliset värit (väritys "Luonnolliset värit", app.js). Rakennusrekisterissä tai
 # 3D-mallin materiaaleissa ei ole väriä, mutta 3D-mallin (LOD2) jokaisella katto- ja seinäpinnalla
-# on oma valokuvatekstuuri vuoden 2024 ilmakuvista. Rakennukselta haetaan muutaman suurimman pinnan
-# kuvat, seinistä mieluiten etelään päin olevien, koska ne ovat valossa. Kuvassa näkyy pinnan
+# on oma valokuvatekstuuri vuoden 2024 ilmakuvista. Rakennukselta haetaan suurimman kattopinnan ja
+# kahden seinän kuvat: suurimman seinän ja suurimman sen vastakkaiselta sivulta, koska auringon
+# puoleinen seinä on viistokuvissa usein ylivalottunut (esim. Otakaari 1:n punatiili näkyy
+# itäseinällä vaaleanpunaisena ja varjoisalla länsiseinällä tiilenruskeana). Kuvassa näkyy pinnan
 # ympäristöäkin, joten väri lasketaan vain pinnan alueelta (tekstuurikoordinaatit), ja siitä jätetään
-# pois kasvillisuus sekä tummimmat pikselit (varjot ja ikkunat).
+# pois kasvillisuus ja varjojen tummimmat kohdat (color_pixels).
 APP = "{http://www.opengis.net/citygml/appearance/2.0}"
-COLOR_ROOFS = 1  # kattopintaa rakennusta kohden
-COLOR_WALLS = 2  # seinäpintaa rakennusta kohden
 COLOR_PARALLEL = 16  # samanaikaista kuvahakua
 COLOR_SAMPLE = 48  # px: pinnan alue tallennetaan välimuistiin enintään tämän kokoisena
-COLOR_DARK = {0: 30, 1: 50}  # prosenttia tummimmista pikseleistä jätetään pois (katto, seinä)
+COLOR_BIN = 16  # yleisimmän värin väriruudun leveys (0–255)
+COLOR_WARM = 0.3  # seinä on lämmin (tiili, punamulta, rappaus), jos tätä suurempi osa on lämmintä
+COLOR_WARM_BOOST = 2.0  # lämpimän seinän kylläisyyden kerroin: viistokuvissa värit ovat haaleita
 
 
 def color_surfaces(path):
@@ -1121,9 +1123,8 @@ def color_surfaces(path):
                     uv = [float(v) for v in (target.findtext(f"{APP}TexCoordList/{APP}textureCoordinates") or "").split()]
                     if target.get("uri") and len(uv) >= 6:
                         textures[target.get("uri").lstrip("#")] = (tex.findtext(APP + "imageURI"), list(zip(uv[::2], uv[1::2])))
-            picked = []
-            for kind, name, count in ((0, "RoofSurface", COLOR_ROOFS), (1, "WallSurface", COLOR_WALLS)):
-                scored = []
+            found = {0: [], 1: []}  # laji → [(ala, vaakanormaali, kuva, uv)]
+            for kind, name in ((0, "RoofSurface"), (1, "WallSurface")):
                 for surface in el.iter(BLDG + name):
                     for poly in surface.iter(GML + "Polygon"):
                         tex, ring = textures.get(poly.get(GML + "id")), poly.find(f"{GML}exterior/{GML}LinearRing")
@@ -1131,11 +1132,18 @@ def color_surfaces(path):
                         if len(pts) < 3:
                             continue
                         nx, ny, nz = newell(pts)
-                        size = math.sqrt(nx * nx + ny * ny + nz * nz)
-                        if size:  # etelään päin oleva pinta on valossa: paino enintään kaksinkertainen
-                            scored.append((size * (1 + max(0.0, -ny / size)), kind, *tex))
-                scored.sort(key=lambda s: -s[0])
-                picked += [s[1:] for s in scored[:count]]
+                        size, h = math.sqrt(nx * nx + ny * ny + nz * nz), math.hypot(nx, ny)
+                        if size:
+                            found[kind].append((size, (nx / h, ny / h) if h else (0.0, 0.0), *tex))
+            picked = []
+            if found[0]:  # katoista suurin, etelään päin oleva painotettuna (ortokuvassa valossa)
+                roof = max(found[0], key=lambda f: f[0] * (1 + max(0.0, -f[1][1])))
+                picked.append((0, *roof[2:]))
+            if found[1]:
+                walls = sorted(found[1], key=lambda f: -f[0])
+                (ax, ay) = walls[0][1]
+                back = next((w for w in walls[1:] if w[1][0] * ax + w[1][1] * ay < -0.5), None)
+                picked += [(1, *w[2:]) for w in (walls[0], back) if w]
             if picked:
                 out[tunnus] = picked
         el.clear()
@@ -1186,25 +1194,73 @@ def texture_sample(uri, uv):
     return dest
 
 
-def surface_color(paths, kind):
-    """Pintojen väri näytekuvista (texture_sample) "#rgb"-muodossa tai None. Väri pyöristetään 16
-    tasoon kanavaa kohden (4 096 sävyä): samat arvot toistuvat tiilissä, joten ne pakkautuvat, ja
-    rakennustiilet kasvavat värien takia noin 10 % eikä 35 %."""
+def color_pixels(paths, kind):
+    """Näytekuvien (texture_sample) pinnan pikselit (n × 3) ilman kasvillisuutta (kellanvihreä tai
+    tumma vihreä; kuparikatto jää) ja mustimpia varjoja. Kokonaan vihreä katto (esim. maalattu
+    pelti) jää, puiden peittämästä seinästä ei jää mitään."""
     import numpy as np
     from PIL import Image
     px = [np.asarray(Image.open(p).convert("RGBA")).reshape(-1, 4) for p in paths]
-    rgb = np.concatenate(px)[:, :3][np.concatenate(px)[:, 3] > 127].astype(float) if px else np.zeros((0, 3))
-    if len(rgb) < 20:
-        return None
+    if not px:
+        return np.zeros((0, 3))
+    rgb = np.concatenate(px)
+    rgb = rgb[rgb[:, 3] > 127, :3].astype(float)
     r, g, b = rgb.T
-    plant = (g >= r) & (2 * g - r - b > 10)  # vihreä tai kellanvihreä, ei keltainen seinä
-    if (~plant).sum() >= 20:
-        rgb = rgb[~plant]
-    elif kind == 1:
-        return None  # seinä on puiden takana
     lum = rgb @ np.array([0.299, 0.587, 0.114])
-    rgb = rgb[lum >= np.percentile(lum, COLOR_DARK[kind])]
-    return "#" + "".join("%x" % round(v / 17) for v in np.median(rgb, axis=0))
+    keep = ~((g >= r) & (g >= b) & (2 * g - r - b > 10) & ((r > b) | (lum < 90))) & (lum > 20)
+    return rgb[keep] if keep.sum() >= 20 or kind == 1 else rgb
+
+
+def dominant_color(rgb):
+    """Yleisin väri: tiheimmän kohdan (väriruutu naapureineen) pikselien mediaani. Tiiliseinässä se
+    on tiili, vaikka ikkunat olisivat vaaleampia ja varjot tummempia."""
+    import numpy as np
+    n = 256 // COLOR_BIN
+    q = (rgb // COLOR_BIN).astype(int)
+    hist = np.zeros((n, n, n))
+    np.add.at(hist, (q[:, 0], q[:, 1], q[:, 2]), 1)
+    pad = np.pad(hist, 1)
+    density = sum(pad[1 + i:1 + i + n, 1 + j:1 + j + n, 1 + k:1 + k + n] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1))
+    best = np.array(np.unravel_index(np.argmax(density), density.shape))
+    return np.median(rgb[np.all(np.abs(q - best) <= 1, axis=1)], axis=0)
+
+
+def color_hex(c):
+    """Väri "#rgb"-muodossa. Pyöristys 16 tasoon kanavaa kohden (4 096 sävyä): samat arvot toistuvat
+    tiilissä ja pakkautuvat, joten rakennustiilet kasvavat värien takia noin 10 % eikä 35 %."""
+    return None if c is None else "#" + "".join("%x" % round(min(255, max(0, v)) / 17) for v in c)
+
+
+def roof_color(paths):
+    rgb = color_pixels(paths, 0)
+    return color_hex(dominant_color(rgb)) if len(rgb) >= 20 else None
+
+
+def wall_color(paths):
+    """Seinien väri. Lämpimän seinän (tiili, punamulta, rappaus) sävy ja kylläisyys otetaan
+    värikkäimmältä seinältä (varjossa väri näkyy, auringossa se haalistuu) ja kirkkaus valoisimmalta.
+    Viistokuvissa värit ovat haaleita (Otakaari 1:n punatiili näkyy auringossa vaalean
+    harmaanruskeana), joten kylläisyys kerrotaan COLOR_WARM_BOOSTilla ja punaista tai ruskeaa
+    väriä tummennetaan, koska tiili on kuvaa tummempi (keltainen jää vaaleaksi). Neutraali seinä (valkoinen, harmaa betoni) saa
+    valoisimman seinän yleisimmän värin."""
+    import colorsys
+    import numpy as np
+    warm, plain = [], []
+    for p in paths:
+        rgb = color_pixels([p], 1)
+        if len(rgb) < 20:
+            continue  # puiden takana
+        r, g, b = rgb.T
+        hot = (r - b > 12) & (r >= g)
+        if hot.mean() >= COLOR_WARM:
+            warm.append(colorsys.rgb_to_hsv(*(np.median(rgb[hot], axis=0) / 255)))
+        plain.append(dominant_color(rgb))
+    if warm:
+        h, s, _ = max(warm, key=lambda c: c[1])
+        s = min(1.0, s * COLOR_WARM_BOOST)
+        v = max(c[2] for c in warm) * (1 - 0.5 * s if h < 0.1 else 1)  # sävy alle 36°
+        return color_hex(np.array(colorsys.hsv_to_rgb(h, s, v)) * 255)
+    return color_hex(max(plain, key=lambda c: c.sum())) if plain else None
 
 
 def build_building_colors():
@@ -1243,7 +1299,7 @@ def build_building_colors():
             samples[tunnus][kind].append(fetched[uri])
     colors = {}
     for tunnus, (roofs, walls) in samples.items():
-        c = [surface_color(walls, 1), surface_color(roofs, 0)]
+        c = [wall_color(walls), roof_color(roofs)]
         if any(c):
             colors[tunnus] = c
     with open(os.path.join(CACHE, "rakennusvarit.json"), "w", encoding="utf-8") as fh:

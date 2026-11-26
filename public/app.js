@@ -223,15 +223,17 @@ function buildStyle() {
     },
   });
   // MapLibren 3D-rakennuksella on yksi väri, joten luonnollisissa väreissä tasaisen katon väri on ohut
-  // laatta yläpinnan päällä. Rakennuksella, jonka kalteva katto piirretään (roofs.js), laattaa ei ole.
+  // laatta yläpinnan päällä. Rakennuksella, jonka kalteva katto piirretään (roofs.js), laatta on
+  // litteä ja rakennuksen sisällä 1 m korkeudessa: pohjan korkeus 0 jatkaisi sen seiniä MapLibressa
+  // 10 m maan alle rakennuksen omien seinien kohdalle, jolloin seinien alaosa välkkyisi.
   const hasRoof = ["boolean", ["feature-state", "katto"], false];
   layers.push({
     id: "rakennukset-katto", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
     filter: buildingFilter(), layout: { visibility: visibility(state.buildingColor === "luonnollinen") },
     paint: {
       "fill-extrusion-color": ["coalesce", ["get", "katto"], NATURAL_ROOF],
-      "fill-extrusion-base": ["case", hasRoof, 0, ["get", "korkeus"]],
-      "fill-extrusion-height": ["case", hasRoof, 0, ["+", ["get", "korkeus"], NATURAL_ROOF_CAP]],
+      "fill-extrusion-base": ["case", hasRoof, 1, ["get", "korkeus"]],
+      "fill-extrusion-height": ["case", hasRoof, 1, ["+", ["get", "korkeus"], NATURAL_ROOF_CAP]],
       "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1],
     },
   });
