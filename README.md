@@ -28,8 +28,15 @@ hypätä klikkaamalla, jolloin kartta seuraa kulkuneuvoa yläpuolelta menosuunta
   3D-sillat ja metsissä 3D-puut. Puut voi ottaa pois (Maasto → 3D-puut metsissä tai osoite
   `?puut=0`). Aiemmin pohjana oli Espoon ilmakuva (vuodet 1976–2024); se poistettiin, kun
   pelillinen maasto kattoi koko Espoon.
-- Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h). Uusin kuva-aika luetaan
-  kahden minuutin välein, ja aika on tiiliosoitteessa, jottei selain näytä vanhaa kuvaa.
+- Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h) pyöreäreunaisina alueina
+  läpikuultavana (75 % läpinäkyvä) värikerroksena 50 m maanpinnan yläpuolella (`public/sadetutka.js`).
+  Tutkakuva on 500 metrin ruudukko TM35FIN-koordinaatistossa; se haetaan WMS:stä kerran koko kartan
+  alueelta niin, että yksi kuvapiste on yksi tutkan ruutu. Varjostin pehmentää ruudut (kuutiollinen
+  B-spline) ja leikkaa reunan, joten yksittäinen ruutu on pyöreä läiskä ja värit liukuvat ruudusta
+  toiseen. Pinta on 500 metrin verkko lähiympäristön korkeimman maanpinnan (Mapterhornin harva
+  korkeusmalli, korostettuna kuten kartalla) yläpuolella, joten mäet eivät puhkaise sitä; yli
+  50-metriset rakennukset nousevat sen läpi. Uusin kuva-aika luetaan kahden minuutin välein, ja aika on
+  kuvan osoitteessa, jottei selain näytä vanhaa kuvaa.
 
 ## Käynnistys
 
@@ -321,8 +328,11 @@ ikkuna, johon haetaan aseman nimi ja kuvasuuntien nimet (`/stations/{id}`) sekä
 (`https://weathercam.digitraffic.fi/{kuvasuunta}.jpg?thumbnail=true`). Pikkukuvasta aukeaa
 täysikokoinen kuva (1280 × 720) koko näkymän päälle; Esc, taustan klikkaus tai sulkunappi sulkee
 sen. Kamerat ottavat kuvan noin 10 minuutin välein, joten avoinna olevat kuvat päivitetään samassa
-tahdissa. Rajapinnat sallivat selaimen suorat haut (CORS), ja pyynnöissä on Digitrafficin
-suosittelema `Digitraffic-User`-otsake. Kamerat toimivat myös kyytinäkymän seurannassa.
+tahdissa. Vain alle 15 minuuttia vanhat kuvat näytetään: ikkunassa ovat vain tuoreet kuvasuunnat,
+ja kartalla näkyvät (vihreinä) vain asemat, joilla on vähintään yksi tuore kuva. Kaikkien asemien
+kuvausajat haetaan kahden minuutin välein yhdellä pyynnöllä (`/stations/data`, noin 20 kt), ja
+merkit tulevat näkyviin ensimmäisen haun jälkeen. Rajapinnat sallivat selaimen suorat haut (CORS),
+ja pyynnöissä on Digitrafficin suosittelema `Digitraffic-User`-otsake. Kamerat toimivat myös kyytinäkymän seurannassa.
 
 ## Lentokoneet
 
@@ -721,3 +731,4 @@ siltoja on lähellä noin 10 000–20 000 kolmiota.
 - `public/roads.js`: bussien ajotiet ja kohdistus menosuunnan oikealle kaistalle
 - `public/landmarks.js`: maamerkkien 3D-mallit (Haukilahden vesitorni)
 - `public/kelikamerat.js`: tieliikenteen kelikamerat (Digitraffic): kameramerkit, kuvat ja suurennos
+- `public/sadetutka.js`: sadetutka pyöreäreunaisina alueina 50 m maanpinnan yläpuolella (three.js)

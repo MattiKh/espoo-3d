@@ -68,42 +68,36 @@ function fixTerrainLookup(terrain) {
 // aukko erotu vaaleana. Sama sävy on Espoon ulkopuolella (pelimaasto_worker.js).
 const GROUND_BACKGROUND = "#6f8a5a";
 
-// Sadetutka: Ilmatieteen laitoksen sateen voimakkuus (mm/h). Uusin kuva-aika luetaan tason
-// ominaisuuksista viiden minuutin välein; aika on tiiliosoitteessa, joten selain ei näytä vanhaa kuvaa
-// välimuistista.
+// Sadetutka (sadetutka.js): Ilmatieteen laitoksen sateen voimakkuus (mm/h) pyöreäreunaisina alueina
+// 50 m maanpinnan yläpuolella. Uusin kuva-aika luetaan tason ominaisuuksista kahden minuutin välein;
+// aika on kuvan osoitteessa, joten selain ei näytä vanhaa kuvaa välimuistista.
 const FMI_WMS = "https://openwms.fmi.fi/geoserver/Radar";
 const ATTR_FMI = 'Sadetutka © <a href="https://www.ilmatieteenlaitos.fi/avoin-data" target="_blank" rel="noopener">Ilmatieteen laitos</a> (CC BY 4.0)';
 let radarTime = null;
-
-function radarTiles(layer, time) {
-  const params = new URLSearchParams({
-    SERVICE: "WMS", VERSION: "1.1.1", REQUEST: "GetMap", LAYERS: layer, STYLES: "", SRS: "EPSG:3857",
-    WIDTH: "512", HEIGHT: "512", FORMAT: "image/png", TRANSPARENT: "TRUE", TIME: time,
-  });
-  return [`${FMI_WMS}/wms?${params}&BBOX={bbox-epsg-3857}`];
-}
+let radar = null;
+let radarBusy = false;
 
 async function refreshRadar() {
   const def = LAYERS.find((d) => d.radar);
-  if (!def) return;
+  if (!def || radarBusy) return;
+  radarBusy = true;
   try {
     const caps = await fetch(`${FMI_WMS}/${def.radar}/wms?service=WMS&request=GetCapabilities&version=1.3.0`, { cache: "no-store" }).then((r) => r.text());
     const times = caps.match(/<Dimension name="time"[^>]*>([^<]+)</)?.[1] ?? "";
     const latest = times.split(",").pop().split("/")[1] ?? times.split(",").pop();
     if (!latest || latest === radarTime) return;
-    radarTime = latest;
-    if (map.getSource(def.id)) {
-      map.getSource(def.id).setTiles(radarTiles(def.radar, latest));
-    } else {
-      map.addSource(def.id, { type: "raster", tiles: radarTiles(def.radar, latest), tileSize: 512, attribution: ATTR_FMI });
-      map.addLayer({
-        id: def.id, type: "raster", source: def.id, layout: { visibility: def.on ? "visible" : "none" },
-        paint: { "raster-opacity": 0.7, "raster-fade-duration": 0 },
-      }, "rakennukset");
+    if (!radar) {
+      const [{ createRadar }, { addExtra }] = await Promise.all([import("./sadetutka.js"), import("./transit.js")]);
+      radar = createRadar(map, { layer: def.radar, visible: def.on, attribution: ATTR_FMI });
+      addExtra(radar.drawable);
     }
+    await radar.setTime(latest);
+    radarTime = latest;
     renderLegends();
   } catch (err) {
-    console.warn("Sadetutkan kuva-aikaa ei saatu", err);
+    console.warn("Sadetutkaa ei saatu", err);
+  } finally {
+    radarBusy = false;
   }
 }
 
@@ -312,7 +306,9 @@ function setVisible(def, on) {
     streams?.setVisible(on);
   } else if (def.cameras) {
     cameras?.setVisible(on);
-  } else if (def.radar || def.labels) {
+  } else if (def.radar) {
+    radar?.setVisible(on);
+  } else if (def.labels) {
     if (map.getLayer(def.id)) map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
   } else if (def.wms) {
     map.setLayoutProperty(def.id, "visibility", on ? "visible" : "none");
@@ -417,7 +413,7 @@ function renderLegends() {
     }
     if (def.legend === "streams") slot.append(el("p", { class: "hint" }, streams?.legendText() ?? "Ladataan uomia…"));
     if (def.legend === "cameras") {
-      slot.append(el("p", { class: "hint" }, cameras ? `${cameras.count} kameraa (Fintraffic). Klikkaa kameraa nähdäksesi kuvat.` : "Haetaan kameroita…"));
+      slot.append(el("p", { class: "hint" }, cameras?.legendText() ?? "Haetaan kameroita…"));
     }
   }
 }
@@ -527,6 +523,7 @@ async function initCameras() {
   try {
     const { createCameras } = await import("./kelikamerat.js");
     cameras = await createCameras(map, { boundaryUrl: "data/espoo_raja.geojson", visible: def.on });
+    cameras.onUpdate(renderLegends);
     renderLegends();
   } catch (err) {
     console.warn("Kelikameroita ei saatu haettua", err);
