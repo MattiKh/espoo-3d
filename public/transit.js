@@ -2506,7 +2506,6 @@ export async function createTransit(map, { boundaryUrl, railsUrl, roadsUrl, plan
     },
     onStats(fn) { listeners.push(fn); fn(stats()); },
     // Pois kyydistä heti, esimerkiksi ennen kuin kartta lennätetään toiseen paikkaan.
-    leaveRide() { ride.stop(); },
     // Palauttaa true, jos klikkaus osui ajoneuvoon, koneeseen tai alukseen (ja tiedot avattiin
     // tai kulkuneuvon kyytiin hypättiin). Kyydissä toisen julkisen kulkuneuvon klikkaus vaihtaa sen
     // kyytiin, ja muut kohteet (rakennukset ym., app.js) avautuvat kuten muutenkin.

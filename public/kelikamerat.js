@@ -86,7 +86,7 @@ export async function createCameras(map, { boundaryUrl, visible }) {
     id: "kelikamerat", type: "symbol", source: "kelikamerat", minzoom: MINZOOM,
     layout: {
       visibility: visible ? "visible" : "none", "icon-image": "kelikamera", "icon-allow-overlap": true,
-      "icon-size": ["interpolate", ["linear"], ["zoom"], MINZOOM, 0.7, 15, 1],
+      "icon-size": ["interpolate", ["exponential", 1.5], ["zoom"], MINZOOM, 0.3, 14, 0.5, 16, 0.9, 18, 1.2], // pieni kaukaa
     },
   });
 

@@ -24,8 +24,10 @@ hypätä klikkaamalla, jolloin kartta seuraa kulkuneuvoa yläpuolelta menosuunta
   `build_data.py kauniainen`). Raja on HSY:n seutukartasta, koska Tilastokeskuksen
   1:1 000 000 -raja on karkea; Kauniaisesta ei ole 3D-rakennuksia, koska ne tulevat Espoon
   aineistoista.
+- Rakennusten värityksenä on käyttötarkoitus (oletus), valmistumisvuosi, korkeus tai luonnolliset
+  värit (ks. Rakennusten värit). 3D-rakennukset ja 3D-puut voi ottaa pois samasta kohdasta.
 - Pohjana on pelillinen maasto (ks. Pelillinen maasto): maanpeite tekstuureina, tiet viivoineen,
-  3D-sillat ja metsissä 3D-puut. Puut voi ottaa pois (Maasto → 3D-puut metsissä tai osoite
+  3D-sillat ja metsissä 3D-puut. Puut voi ottaa pois (Rakennukset → 3D-puut metsissä tai osoite
   `?puut=0`). Aiemmin pohjana oli Espoon ilmakuva (vuodet 1976–2024); se poistettiin, kun
   pelillinen maasto kattoi koko Espoon.
 - Sadetutka (Ilmatieteen laitos) näyttää sateen voimakkuuden (mm/h) pyöreäreunaisina alueina
@@ -61,7 +63,9 @@ raiteet tiedostoon `public/data/raiteet.json`, bussien ajotiet tiedostoon `publi
 ja sähköautojen latauspaikat pysäköintiruutuineen
 tiedostoon `public/data/lataus.json`. Rakennusten kaltevat katot tallentuvat kansioon
 `public/tiles/katot` (`python3 scripts/build_data.py katot`; ensimmäinen ajo lataa koko
-Espoon 3D-mallin, noin 2,5 Gt). Tiilitykseen tarvitaan
+Espoon 3D-mallin, noin 2,5 Gt), ja rakennusten luonnolliset värit lasketaan saman mallin
+valokuvista (`python3 scripts/build_data.py rakennusvarit`; ensimmäinen ajo hakee noin
+172 000 pintakuvaa, noin kaksi tuntia). Tiilitykseen tarvitaan
 [tippecanoe](https://github.com/felt/tippecanoe) (`brew install tippecanoe`) ja siltojen
 korkeusmallin tiiliin Pythonin numpy ja Pillow (`pip3 install numpy pillow`). Pelillisen
 maaston aineistot tehdään komennolla `python3 scripts/build_data.py sillat maanpeite` (sillat ensin,
@@ -183,21 +187,46 @@ jonka kattopinta-alasta vähintään 15 % on yli 10° kalteva, lasketaan
 
 Kaltevia kattoja on 41 768; 18 425 rakennusta on tasakattoisia tai niiltä puuttuvat kattopinnat,
 ja ne näkyvät ennallaan. Verkot ovat tiilinä `public/tiles/katot/14/x/y.bin` (278 tiiltä,
-13 Mt, gzip-pakattu binääri; muoto on kuvattu `write_roof_tiles`-funktiossa).
+16 Mt, gzip-pakattu binääri; muoto on kuvattu `write_roof_tiles`-funktiossa ja värit
+`color_roof_tiles`-funktiossa).
 
 Selain (`public/roofs.js`) lataa lähikuvassa katot lähialueelta (ks. alla) ja piirtää ne
 joukkoliikenteen 3D-tasolla. Katto nostetaan rakennuksen keskipisteen maastokorkeudelle samoin
 kuin MapLibre nostaa 3D-rakennuksen, ja vielä 25 cm, jottei 3D-rakennuksen tasainen yläpinta
 pistä räystäiden kohdalla katon läpi. Piirrettyjen kattojen rakennusten seinät lasketaan
 räystään korkeuteen MapLibren feature-state-tilalla (`katto`), joten rakennus, jonka kattoa ei
-piirretä, näkyy LOD0-korkeudessaan. Katon väri seuraa rakennusten väritystä hieman tummempana,
-ja kattoa klikkaamalla saa rakennuksen tiedot.
+piirretä, näkyy LOD0-korkeudessaan. Katon väri seuraa rakennusten väritystä hieman tummempana
+(luonnollisissa väreissä katolla on oma värinsä), ja kattoa klikkaamalla saa rakennuksen tiedot.
 
 Tiedostossa pinnan kolmiot jakavat kärkipisteitä, ja noin 6 000 rakennuksen kattopinnoissa on
 pieniä vinoja tai alaspäin osoittavia kolmioita. Selain antaa siksi jokaiselle kolmiolle omat
 kärkipisteet ja kolmion oman normaalin. Yhteinen kärkipiste sai aiemmin viimeksi käsitellyn
 kolmion normaalin, jolloin koko lappeen varjostus vääristyi liukuvaksi ja harjakatto näytti
 kourulta (esim. rivitalo 1016018534 Kauniaisten rajalla).
+
+## Rakennusten värit
+
+Värityksen vaihtoehto Luonnolliset värit näyttää rakennusten seinät ja katot niiden todellisen
+värisinä. Rakennusrekisterissä väriä ei ole, eikä 3D-mallin (LOD2) materiaaliväristä ole apua
+(sama oletusharmaa kaikille), mutta mallin jokaisella katto- ja seinäpinnalla on oma
+valokuvatekstuuri vuoden 2024 ilmakuvista. `build_data.py rakennusvarit` valitsee rakennukselta
+suurimman kattopinnan ja kaksi suurinta seinäpintaa (etelään päin olevia painotetaan, koska ne
+ovat valossa) ja hakee niiden kuvat: 57 629 rakennusta ja 171 720 kuvaa, ensimmäisellä
+kerralla noin kaksi tuntia (16 hakua kerrallaan). Kuvassa näkyy pinnan ympäristöäkin, joten pinnan
+alue rajataan tekstuurikoordinaateista ja tallennetaan enintään 48 px:n näytteenä välimuistiin
+`cache/rakennusvarit/`; myöhemmät ajot laskevat värit näytteistä. Väri on näytteiden mediaani,
+josta on jätetty pois kasvillisuus (vihreä, ei keltainen) ja tummimmat pikselit eli varjot ja
+ikkunat (katoista 30 %, seinistä 50 %). Puiden peittämä seinä jää ilman väriä, mutta kokonaan
+vihreä katto (esim. maalattu pelti) säilyy vihreänä. Värit tallennetaan rakennusaineistoon
+(`seina`, `katto`), kattotiiliin ja maamerkkien malleihin; ne ovat 57 618 rakennuksella
+(seinä 56 834, katto 56 809). Värittömät rakennukset (esim. rekisteristä täydennetyt)
+saavat yleisimmät sävyt, vaalean beigen seinän ja tummanharmaan katon. Värit pyöristetään 16
+tasoon kanavaa kohden (`#rgb`, 4 096 sävyä), jolloin samat arvot toistuvat tiilissä ja pakkautuvat:
+rakennustiilet kasvavat värien takia noin 1,3 Mt eli 10 % (13,1 → 14,4 Mt; tarkoilla väreillä koeajossa noin 35 %).
+
+MapLibren 3D-rakennuksella on yksi väri, joten tasaisen katon väri piirretään 30 cm paksuna
+laattana rakennuksen yläpinnan päälle (taso `rakennukset-katto`, vain luonnollisissa väreissä).
+Rakennuksella, jonka kalteva katto piirretään (`roofs.js`), laattaa ei ole.
 
 ## Lähialue ja sujuvuus
 
@@ -319,7 +348,8 @@ lentokoneiden ja latausautojen klikkaus avaa tiedot kuten ennenkin.
 ## Kelikamerat
 
 Fintrafficin tieliikenteen kelikamerat näkyvät kartalla kameramerkkeinä zoomaustasolta 10 alkaen
-(`public/kelikamerat.js`, taso Kelikamerat). Sijainnit haetaan kerran Digitrafficin asemaluettelosta
+(`public/kelikamerat.js`, taso Kelikamerat). Merkit ovat kaukaa katsottaessa pieniä ja suurenevat
+lähennettäessä. Sijainnit haetaan kerran Digitrafficin asemaluettelosta
 (`https://tie.digitraffic.fi/api/weathercam/v1/stations`, koko Suomi noin 40 kt), ja mukaan otetaan
 keruussa olevat kamerat Espoon rajan sisältä (sama raja kuin ajoneuvoilla, `espoo_raja.geojson`;
 44 kameraa, joista kaksi aivan rajalla). Kuvia ei ladata etukäteen: kameraa klikkaamalla aukeaa
@@ -414,7 +444,8 @@ Dipoli (Raili ja Reima Pietilä, 1966; 661 pintaa), Suomen luontokeskus Haltia (
 Mahlamäki, 2013), Keilaniemen torni eli Accountor Tower (1976) ja Tapiolan kirkko (Aarno
 Ruusuvuori, 1965). `build_data.py maamerkit` poimii rakennukset välimuistissa olevasta
 3D-mallista (`LANDMARK_BUILDINGS`) tiedostoiksi `public/data/maamerkit/<id>.json`. Mallit
-väritetään kuten muut rakennukset (luokka, vuosi tai korkeus; katot hieman tummempina), ne
+väritetään kuten muut rakennukset (luokka, vuosi tai korkeus, katot hieman tummempina, tai
+luonnolliset värit), ne
 noudattavat 3D-rakennusten valintaa, ja klikkaus avaa rakennuksen
 tiedot kuten muissakin rakennuksissa, lisänä maamerkin omat tiedot. Espoon 3D-mallissa on
 myös valokuvatekstuurit, mutta niillä rakennukset erottuivat liikaa muista. Lisää maamerkkejä
@@ -656,7 +687,7 @@ Viivat tarkistetaan 2 metrin välein, sillä esim. kävelysillan ääriviivan si
 jana, jonka molemmat päät ovat maan tasolla.
 
 Metsissä on kartan keskipisteen ympärillä (600 m, zoomaustaso 15 ja lähempää) matalapolygonisia
-3D-puita (oletuksena; pois paneelista Maasto → 3D-puut metsissä tai osoitteella `?puut=0`)
+3D-puita (oletuksena; pois paneelista Rakennukset → 3D-puut metsissä tai osoitteella `?puut=0`)
 (`public/pelimaasto.js`): tasavälinen 4,5 metrin ruudukko satunnaisesti siirrettynä, puun korkeus puustoluokasta, matalammassa puustossa enimmäkseen lehtipuita (pyöreä
 latvus) ja korkeammassa havupuita (kartio). Puita on noin 10 000, ja niiden korkeus haetaan
 maastosta vähitellen. Kun keskipiste siirtyy 150 m, puut sijoitellaan uudelleen; edelliseltä

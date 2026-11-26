@@ -19,19 +19,6 @@ export const TERRAIN_EXAGGERATION = 1.5;
 export const DETAIL_MINZOOM = 14;
 export const detailRadius = (zoom) => (zoom < DETAIL_MINZOOM ? null : Math.max(2000, 4000 * 2 ** ((DETAIL_MINZOOM - zoom) / 2)));
 
-export const PLACES = [
-  ["Koko Espoo", null],
-  ["Tapiola", [24.8055, 60.1757, 15.2]],
-  ["Keilaniemi", [24.8285, 60.1770, 15.6]],
-  ["Otaniemi", [24.8290, 60.1865, 15.2]],
-  ["Leppävaara", [24.8130, 60.2185, 15.2]],
-  ["Matinkylä", [24.7385, 60.1600, 15.2]],
-  ["Espoon keskus", [24.6570, 60.2050, 15.2]],
-  ["Nuuksio", [24.5750, 60.2950, 13]],
-];
-
-export const ESPOO_BOUNDS = [[24.48, 60.05], [24.88, 60.37]];
-
 // ---------------------------------------------------------------- värit
 
 export const BUILDING_CLASSES = [
@@ -209,4 +196,4 @@ export const FIELD_LABELS = {
   ika_yli80: "Yli 80-vuotiaat",
 };
 
-export const HIDDEN_FIELDS = new Set(["luokka", "arvio", "osa", "keski", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);
+export const HIDDEN_FIELDS = new Set(["luokka", "arvio", "osa", "keski", "seina", "katto", "ClassId", "KARTTALAJI", "selvitys_id", "_Type", "ID", "VALUE"]);

@@ -1,6 +1,6 @@
 import {
-  BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, ESPOO_BOUNDS, FIELD_LABELS, HIDDEN_FIELDS,
-  KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, PLACES, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
+  BUILDING_CLASSES, BUILDING_HEIGHT_STOPS, BUILDING_YEAR_STOPS, FIELD_LABELS, HIDDEN_FIELDS,
+  KAUNIAINEN, LANDMARKS, LANDUSE_CLASSES, LAYERS, POPUP_TITLES, RADAR_STOPS, TERRAIN_EXAGGERATION,
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
 import { liftedTileUrl } from "./bridges.js";
@@ -134,7 +134,14 @@ const el = (tag, attrs = {}, ...children) => {
 
 // ------------------------------------------------------------ tyyli
 
+// Luonnolliset värit (scripts/build_data.py, build_building_colors): seinien ja kattojen värit
+// Espoon 3D-mallin valokuvista. Rakennukset, joilla väriä ei ole (esim. rekisteristä täydennetyt),
+// saavat yleisimmät sävyt.
+const NATURAL_WALL = "#d6d1c6", NATURAL_ROOF = "#5d5f61";
+const NATURAL_ROOF_CAP = 0.3; // m: tasaisen katon värilaatan paksuus
+
 function buildingColorExpr(mode) {
+  if (mode === "luonnollinen") return ["coalesce", ["get", "seina"], NATURAL_WALL];
   if (mode === "vuosi") {
     return ["case", ["has", "vuosi"],
       ["interpolate", ["linear"], ["get", "vuosi"], ...BUILDING_YEAR_STOPS.flat()], "#9e9e9e"];
@@ -213,6 +220,19 @@ function buildStyle() {
         ["coalesce", ["get", "raystas"], ["get", "korkeus"]], ["get", "korkeus"]],
       "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1], // läpinäkymättömät lähikuvassa
       "fill-extrusion-vertical-gradient": true,
+    },
+  });
+  // MapLibren 3D-rakennuksella on yksi väri, joten luonnollisissa väreissä tasaisen katon väri on ohut
+  // laatta yläpinnan päällä. Rakennuksella, jonka kalteva katto piirretään (roofs.js), laattaa ei ole.
+  const hasRoof = ["boolean", ["feature-state", "katto"], false];
+  layers.push({
+    id: "rakennukset-katto", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
+    filter: buildingFilter(), layout: { visibility: visibility(state.buildingColor === "luonnollinen") },
+    paint: {
+      "fill-extrusion-color": ["coalesce", ["get", "katto"], NATURAL_ROOF],
+      "fill-extrusion-base": ["case", hasRoof, 0, ["get", "korkeus"]],
+      "fill-extrusion-height": ["case", hasRoof, 0, ["+", ["get", "korkeus"], NATURAL_ROOF_CAP]],
+      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1],
     },
   });
   layers.push(...overlay.filter((l) => order[l.type] === 4));
@@ -358,7 +378,7 @@ function updateDetail() {
   }
   if (next === detail) return;
   detail = next;
-  map.setFilter("rakennukset", buildingFilter());
+  for (const id of ["rakennukset", "rakennukset-katto"]) map.setFilter(id, buildingFilter());
   roofs?.setArea(detail);
 }
 
@@ -367,16 +387,6 @@ function setOverlayOpacity(v) {
   for (const def of LAYERS) {
     if (def.wms) map.setPaintProperty(def.id, "raster-opacity", v);
   }
-}
-
-function flyTo(place) {
-  transit?.leaveRide();
-  if (!place) {
-    map.fitBounds(ESPOO_BOUNDS, { pitch: 45, bearing: 0, padding: 40, duration: 2500 });
-    return;
-  }
-  const [lon, lat, zoom] = place;
-  map.flyTo({ center: [lon, lat], zoom, pitch: 62, bearing: map.getBearing(), duration: 2500, essential: true });
 }
 
 function legendRows(rows) {
@@ -394,9 +404,12 @@ function gradientLegend(stops, fmt) {
 function renderLegends() {
   const b = document.getElementById("building-legend");
   b.replaceChildren(
-    state.buildingColor === "vuosi" ? gradientLegend(BUILDING_YEAR_STOPS, (v) => v)
-      : state.buildingColor === "korkeus" ? gradientLegend(BUILDING_HEIGHT_STOPS, (v) => v + " m")
-        : legendRows(BUILDING_CLASSES),
+    state.buildingColor === "luonnollinen"
+      ? el("p", { class: "hint" }, "Seinien ja kattojen värit Espoon 3D-kaupunkimallin valokuvista (ilmakuvat 2024). "
+        + "Väri on arvio, josta on jätetty pois varjot, ikkunat ja kasvillisuus.")
+      : state.buildingColor === "vuosi" ? gradientLegend(BUILDING_YEAR_STOPS, (v) => v)
+        : state.buildingColor === "korkeus" ? gradientLegend(BUILDING_HEIGHT_STOPS, (v) => v + " m")
+          : legendRows(BUILDING_CLASSES),
   );
   for (const def of LAYERS) {
     const slot = document.querySelector(`[data-legend="${def.id}"]`);
@@ -419,9 +432,6 @@ function renderLegends() {
 }
 
 function buildPanel() {
-  document.getElementById("places").append(...PLACES.map(([name, place]) =>
-    el("button", { type: "button", class: "chip", onclick: () => flyTo(place) }, name)));
-
   const trees = document.getElementById("pelimaasto-puut");
   trees.checked = state.trees;
   trees.addEventListener("change", () => {
@@ -429,14 +439,20 @@ function buildPanel() {
     ground?.setTrees(state.trees);
   });
 
-  document.getElementById("buildings").addEventListener("change", (e) => {
-    map.setLayoutProperty("rakennukset", "visibility", e.target.checked ? "visible" : "none");
-    roofs?.setVisible(e.target.checked);
+  const buildings = document.getElementById("buildings");
+  const showBuildings = () => {
+    map.setLayoutProperty("rakennukset", "visibility", buildings.checked ? "visible" : "none");
+    map.setLayoutProperty("rakennukset-katto", "visibility", buildings.checked && state.buildingColor === "luonnollinen" ? "visible" : "none");
+  };
+  buildings.addEventListener("change", () => {
+    showBuildings();
+    roofs?.setVisible(buildings.checked);
     refreshLandmarks();
   });
   document.getElementById("building-color").addEventListener("change", (e) => {
     state.buildingColor = e.target.value;
     map.setPaintProperty("rakennukset", "fill-extrusion-color", buildingColorExpr(state.buildingColor));
+    showBuildings();
     roofs?.refresh();
     refreshLandmarks();
     renderLegends();
@@ -534,8 +550,10 @@ async function initCameras() {
 
 let roofs = null;
 
-// Katon ja räystään yläpuolisten seinien väri samoin kuin 3D-rakennuksissa (buildingColorExpr).
+// Katon ja räystään yläpuolisten seinien väri samoin kuin 3D-rakennuksissa (buildingColorExpr);
+// luonnollisissa väreissä seinillä ja katolla on omat värinsä ({ seina, katto }).
 function buildingColor(b) {
+  if (state.buildingColor === "luonnollinen") return { seina: b.seina ?? NATURAL_WALL, katto: b.katto ?? NATURAL_ROOF };
   if (state.buildingColor === "vuosi") return b.vuosi ? interpolateColor(BUILDING_YEAR_STOPS, b.vuosi) : "#9e9e9e";
   if (state.buildingColor === "korkeus") return interpolateColor(BUILDING_HEIGHT_STOPS, b.korkeus);
   return BUILDING_CLASSES.find(([k]) => k === b.luokka)?.[2] ?? "#bdbdbd";

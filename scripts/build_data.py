@@ -15,6 +15,7 @@ import concurrent.futures as cf
 import gzip
 import hashlib
 import heapq
+import io
 import json
 import math
 import os
@@ -1089,6 +1090,199 @@ def write_roof_tiles(roofs, targets):
     log(f"  → tiles/katot: {len(roofs)} kattoa, {len(groups)} tiiltä, {size / 1e6:.1f} Mt")
 
 
+# ---------------------------------------------------------------- rakennusten värit
+
+# Rakennusten luonnolliset värit (väritys "Luonnolliset värit", app.js). Rakennusrekisterissä tai
+# 3D-mallin materiaaleissa ei ole väriä, mutta 3D-mallin (LOD2) jokaisella katto- ja seinäpinnalla
+# on oma valokuvatekstuuri vuoden 2024 ilmakuvista. Rakennukselta haetaan muutaman suurimman pinnan
+# kuvat, seinistä mieluiten etelään päin olevien, koska ne ovat valossa. Kuvassa näkyy pinnan
+# ympäristöäkin, joten väri lasketaan vain pinnan alueelta (tekstuurikoordinaatit), ja siitä jätetään
+# pois kasvillisuus sekä tummimmat pikselit (varjot ja ikkunat).
+APP = "{http://www.opengis.net/citygml/appearance/2.0}"
+COLOR_ROOFS = 1  # kattopintaa rakennusta kohden
+COLOR_WALLS = 2  # seinäpintaa rakennusta kohden
+COLOR_PARALLEL = 16  # samanaikaista kuvahakua
+COLOR_SAMPLE = 48  # px: pinnan alue tallennetaan välimuistiin enintään tämän kokoisena
+COLOR_DARK = {0: 30, 1: 50}  # prosenttia tummimmista pikseleistä jätetään pois (katto, seinä)
+
+
+def color_surfaces(path):
+    """Ruudun LOD2-rakennuksilta värinäytteiksi valitut pinnat: tunnus → [(laji, kuvan osoite,
+    tekstuurikoordinaatit [(u, v)])], laji 0 katto ja 1 seinä."""
+    out = {}
+    for _, el in ET.iterparse(path):
+        if el.tag != BLDG + "Building":
+            continue
+        tunnus = {a.get("name"): a.findtext(GEN + "value") for a in el.iter(GEN + "stringAttribute")}.get("rakennustunnus")
+        if tunnus and tunnus not in out:
+            textures = {}
+            for tex in el.iter(APP + "ParameterizedTexture"):
+                for target in tex.iter(APP + "target"):
+                    uv = [float(v) for v in (target.findtext(f"{APP}TexCoordList/{APP}textureCoordinates") or "").split()]
+                    if target.get("uri") and len(uv) >= 6:
+                        textures[target.get("uri").lstrip("#")] = (tex.findtext(APP + "imageURI"), list(zip(uv[::2], uv[1::2])))
+            picked = []
+            for kind, name, count in ((0, "RoofSurface", COLOR_ROOFS), (1, "WallSurface", COLOR_WALLS)):
+                scored = []
+                for surface in el.iter(BLDG + name):
+                    for poly in surface.iter(GML + "Polygon"):
+                        tex, ring = textures.get(poly.get(GML + "id")), poly.find(f"{GML}exterior/{GML}LinearRing")
+                        pts = read_positions_3d(ring) if tex and ring is not None else []
+                        if len(pts) < 3:
+                            continue
+                        nx, ny, nz = newell(pts)
+                        size = math.sqrt(nx * nx + ny * ny + nz * nz)
+                        if size:  # etelään päin oleva pinta on valossa: paino enintään kaksinkertainen
+                            scored.append((size * (1 + max(0.0, -ny / size)), kind, *tex))
+                scored.sort(key=lambda s: -s[0])
+                picked += [s[1:] for s in scored[:count]]
+            if picked:
+                out[tunnus] = picked
+        el.clear()
+    return out
+
+
+def texture_sample(uri, uv):
+    """Pinnan alue tekstuurikuvasta välimuistiin PNG-kuvana (läpinäkyvä pinnan ulkopuolella),
+    enintään COLOR_SAMPLE px kokoisena. Palauttaa polun tai None, jos kuvaa ei ole."""
+    from PIL import Image, ImageDraw
+    dest = os.path.join(CACHE, "rakennusvarit", uri.rsplit("/", 1)[-1].rsplit(".", 1)[0] + ".png")
+    if os.path.exists(dest):
+        return dest if os.path.getsize(dest) else None
+    data = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(uri, headers={"User-Agent": UA}), timeout=60) as r:
+                data = r.read()
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                open(dest, "wb").close()  # kuvaa ei ole: ei haeta uudelleen
+                return None
+            time.sleep(5 * (attempt + 1))
+        except Exception:  # verkkovirhe: yritä uudelleen (seuraavalla ajolla, jos ei nytkään)
+            time.sleep(5 * (attempt + 1))
+    if data is None:
+        return None
+    try:
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        open(dest, "wb").close()
+        return None
+    # Tekstuurikoordinaattien origo on kuvan vasen alakulma.
+    mask = Image.new("L", im.size, 0)
+    ImageDraw.Draw(mask).polygon([(u * im.width, (1 - v) * im.height) for u, v in uv], fill=255)
+    box = mask.getbbox()
+    if not box:
+        open(dest, "wb").close()
+        return None
+    im = im.crop(box)
+    im.putalpha(mask.crop(box))
+    k = COLOR_SAMPLE / max(im.size)
+    if k < 1:
+        im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.NEAREST)
+    im.save(dest + ".part", "PNG")
+    os.replace(dest + ".part", dest)
+    return dest
+
+
+def surface_color(paths, kind):
+    """Pintojen väri näytekuvista (texture_sample) "#rgb"-muodossa tai None. Väri pyöristetään 16
+    tasoon kanavaa kohden (4 096 sävyä): samat arvot toistuvat tiilissä, joten ne pakkautuvat, ja
+    rakennustiilet kasvavat värien takia noin 10 % eikä 35 %."""
+    import numpy as np
+    from PIL import Image
+    px = [np.asarray(Image.open(p).convert("RGBA")).reshape(-1, 4) for p in paths]
+    rgb = np.concatenate(px)[:, :3][np.concatenate(px)[:, 3] > 127].astype(float) if px else np.zeros((0, 3))
+    if len(rgb) < 20:
+        return None
+    r, g, b = rgb.T
+    plant = (g >= r) & (2 * g - r - b > 10)  # vihreä tai kellanvihreä, ei keltainen seinä
+    if (~plant).sum() >= 20:
+        rgb = rgb[~plant]
+    elif kind == 1:
+        return None  # seinä on puiden takana
+    lum = rgb @ np.array([0.299, 0.587, 0.114])
+    rgb = rgb[lum >= np.percentile(lum, COLOR_DARK[kind])]
+    return "#" + "".join("%x" % round(v / 17) for v in np.median(rgb, axis=0))
+
+
+def build_building_colors():
+    """Rakennusten seinien ja kattojen värit (ominaisuudet seina ja katto) rakennusaineistoon,
+    kattotiiliin (color_roof_tiles) ja välimuistiin maamerkkejä varten (build_landmarks). 3D-malli
+    on välimuistissa kattojen jäljiltä (build_roofs), ja pintojen näytteet jäävät välimuistiin, joten
+    vain ensimmäinen ajo hakee kuvia (noin 170 000, pari tuntia)."""
+    log("rakennusten värit (3D-mallin valokuvatekstuurit)")
+    path = os.path.join(OUT, "rakennukset.geojson")
+    with open(path, encoding="utf-8") as fh:
+        feats = json.load(fh)["features"]
+    wanted = {str(f["properties"]["tunnus"]) for f in feats if f["properties"].get("tunnus")}
+    folder = os.path.join(CACHE, "lod2_ruudut")
+    cells = sorted(os.path.join(folder, n) for n in os.listdir(folder) if n.endswith(".xml"))
+    surfaces = {}
+    with cf.ProcessPoolExecutor() as ex:
+        for found in ex.map(color_surfaces, cells, chunksize=4):
+            for tunnus, picked in found.items():
+                if tunnus in wanted:
+                    surfaces.setdefault(tunnus, picked)  # ruutujen rajalla olevat rakennukset tulevat kahdesti
+    os.makedirs(os.path.join(CACHE, "rakennusvarit"), exist_ok=True)
+    jobs = [(tunnus, kind, uri, uv) for tunnus, picked in surfaces.items() for kind, uri, uv in picked]
+    textures = {}
+    for _, _, uri, uv in jobs:
+        textures.setdefault(uri, uv)  # sama kuva voi olla usean pinnan tekstuuri (esim. osiin jaettu seinä)
+    log(f"  {len(surfaces)} rakennusta, {len(jobs)} pintaa, {len(textures)} kuvaa")
+    fetched = {}
+    with cf.ThreadPoolExecutor(max_workers=COLOR_PARALLEL) as ex:
+        for i, (uri, sample) in enumerate(zip(textures, ex.map(lambda item: texture_sample(*item), textures.items())), 1):
+            fetched[uri] = sample
+            if i % 10000 == 0:
+                log(f"  {i}/{len(textures)} kuvaa")
+    samples = collections.defaultdict(lambda: ([], []))
+    for tunnus, kind, uri, _ in jobs:
+        if fetched[uri]:
+            samples[tunnus][kind].append(fetched[uri])
+    colors = {}
+    for tunnus, (roofs, walls) in samples.items():
+        c = [surface_color(walls, 1), surface_color(roofs, 0)]
+        if any(c):
+            colors[tunnus] = c
+    with open(os.path.join(CACHE, "rakennusvarit.json"), "w", encoding="utf-8") as fh:
+        json.dump(colors, fh)
+    for f in feats:
+        p = f["properties"]
+        wall, roof = colors.get(str(p.get("tunnus")), (None, None))
+        for key, value in (("seina", wall), ("katto", roof)):
+            p.pop(key, None)
+            if value:
+                p[key] = value
+    log(f"  värit {len(colors)} rakennukselle: seinä {sum(1 for c in colors.values() if c[0])}, "
+        f"katto {sum(1 for c in colors.values() if c[1])}")
+    color_roof_tiles(colors)
+    make_building_tiles(write_geojson("rakennukset", feats))
+
+
+def color_roof_tiles(colors):
+    """Kattotiilten rakennuksiin seinän ja katon väri (KAT2): kolme tavua kumpikin kärkipisteiden ja
+    kolmioiden määrien perään, musta = ei tiedossa (write_roof_tiles tekee KAT1-tiilet)."""
+    rgb = lambda c: bytes(int(ch, 16) * 17 for ch in c[1:]) if c else b"\0\0\0"  # "#rgb"
+    for folder, _, names in os.walk(os.path.join(TILES, "katot", str(ROOF_TILE_ZOOM))):
+        for name in names:
+            path = os.path.join(folder, name)
+            with open(path, "rb") as fh:
+                buf = gzip.decompress(fh.read())
+            extra = 6 if buf[:4] == b"KAT2" else 0
+            out, o = bytearray(b"KAT2") + buf[4:8], 8
+            for _ in range(struct.unpack_from("<I", buf, 4)[0]):
+                head = o + 1 + buf[o] + 21
+                wall, roof = colors.get(buf[o + 1:o + 1 + buf[o]].decode("utf-8"), (None, None))
+                nv, n_roof, n_wall = struct.unpack_from("<HHH", buf, head - 6)
+                body = 6 * nv + 6 * (n_roof + n_wall)
+                out += buf[o:head] + rgb(wall) + rgb(roof) + buf[head + extra:head + extra + body]
+                o = head + extra + body
+            with open(path, "wb") as fh:
+                fh.write(gzip.compress(bytes(out), 9, mtime=0))
+
+
 # ---------------------------------------------------------------- maamerkit
 
 # Tunnetut rakennukset, jotka piirretään kokonaan 3D-mallin (LOD2) pinnoista muiden rakennusten
@@ -1105,10 +1299,14 @@ LANDMARK_BUILDINGS = {
 
 def build_landmarks():
     """Maamerkkien mallit: public/data/maamerkit/<id>.json = { lon, lat, korkeus (mallin huippu),
-    luokka, vuosi, rakennuskorkeus (LOD0), pinnat: [[laji (0 katto, 1 seinä), [x, y, z, ...] dm,
-    [kolmiot]], ...] }. Kärkipisteet ovat desimetreinä origosta (x itään, y pohjoiseen) ja alimmasta
-    maanpinnasta."""
+    luokka, vuosi, rakennuskorkeus (LOD0), seina ja katto (värit, build_building_colors), pinnat:
+    [[laji (0 katto, 1 seinä), [x, y, z, ...] dm, [kolmiot]], ...] }. Kärkipisteet ovat desimetreinä
+    origosta (x itään, y pohjoiseen) ja alimmasta maanpinnasta."""
     log("maamerkit (LOD2-pinnat)")
+    colors = {}
+    if os.path.exists(os.path.join(CACHE, "rakennusvarit.json")):
+        with open(os.path.join(CACHE, "rakennusvarit.json"), encoding="utf-8") as fh:
+            colors = json.load(fh)
     with open(os.path.join(OUT, "rakennukset.geojson"), encoding="utf-8") as fh:
         targets = roof_targets(json.load(fh)["features"])
     folder = os.path.join(PUBLIC_DATA, "maamerkit")
@@ -1138,7 +1336,7 @@ def build_landmarks():
             json.dump({"lahde": "Espoon 3D-kaupunkimalli (LOD2), Espoon kaupunki",
                        "lon": round(origin["lon"], 7), "lat": round(origin["lat"], 7), "korkeus": round(top, 1),
                        "luokka": origin["luokka"], "vuosi": origin["vuosi"], "rakennuskorkeus": origin["korkeus"],
-                       "pinnat": pinnat}, fh, ensure_ascii=False, separators=(",", ":"))
+                       **dict(zip(("seina", "katto"), colors.get(ids[0], ()))), "pinnat": pinnat}, fh, ensure_ascii=False, separators=(",", ":"))
         log(f"  → maamerkit/{lid}.json: {len(found)}/{len(ids)} rakennusta, {len(pinnat)} pintaa, "
             f"korkeus {top:.1f} m, {os.path.getsize(path) / 1e3:.0f} kt")
 
@@ -4476,7 +4674,9 @@ def main():
         build_buildings()
     if want("rakennukset") or want("katot"):
         build_roofs()  # lisää rakennuksiin räystään korkeuden ja tekee rakennustiilet uudelleen
-    if want("rakennukset") or want("katot") or want("maamerkit"):
+    if want("rakennukset") or want("katot") or want("rakennusvarit"):
+        build_building_colors()  # kattojen jälkeen: värit lisätään myös kattotiiliin
+    if want("rakennukset") or want("katot") or want("rakennusvarit") or want("maamerkit"):
         build_landmarks()  # 3D-malli on välimuistissa kattojen jäljiltä
     if want("maanpeite"):
         build_landcover()  # myös viivat ja sillat

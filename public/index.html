@@ -24,11 +24,6 @@
 
     <div class="scroll">
       <section>
-        <h2>Siirry</h2>
-        <div id="places" class="chips"></div>
-      </section>
-
-      <section>
         <h2>Liikenne nyt</h2>
         <div id="transit-groups"></div>
         <p class="hint" id="transit-status">Ladataan reaaliaikaisia sijainteja…</p>
@@ -37,12 +32,14 @@
       <section>
         <h2>Rakennukset</h2>
         <label class="check"><input id="buildings" type="checkbox" checked> <span>3D-rakennukset (63 602 kpl)</span></label>
+        <label class="check"><input id="pelimaasto-puut" type="checkbox"> <span>3D-puut metsissä</span></label>
         <div class="row between">
           <label for="building-color">Väritys</label>
           <select id="building-color">
             <option value="luokka">Käyttötarkoitus</option>
             <option value="vuosi">Valmistumisvuosi</option>
             <option value="korkeus">Korkeus</option>
+            <option value="luonnollinen">Luonnolliset värit</option>
           </select>
         </div>
         <div id="building-legend"></div>
@@ -53,12 +50,6 @@
         <div id="layers"></div>
         <div class="row between"><span>Karttakuvien peittävyys</span></div>
         <input id="overlay-opacity" type="range" min="0.1" max="1" step="0.05" aria-label="Karttakuvien peittävyys">
-      </section>
-
-      <section>
-        <h2>Maasto</h2>
-        <label class="check"><input id="pelimaasto-puut" type="checkbox"> <span>3D-puut metsissä</span></label>
-        <p class="hint">Maaston pinta HSY:n maanpeitteen mukaan tekstuureina, tiet viivoineen ja 3D-sillat. Puut ovat raskaita, joten hitaalla puhelimella ne kannattaa ottaa pois.</p>
       </section>
 
       <footer>

@@ -123,7 +123,8 @@ export const LANDMARK_MODELS = {
 
 // Maamerkki Espoon 3D-kaupunkimallista (LOD2) (scripts/build_data.py, build_landmarks). Malli
 // väritetään kuten muut rakennukset (setLandmarkStyle, app.js): seinät rakennuksen värillä ja
-// katot hieman tummempina kuten roofs.js:n katoissa. Mallin origo ja korkeus tulevat tiedostosta.
+// katot hieman tummempina kuten roofs.js:n katoissa, tai luonnollisissa väreissä seinät ja katot
+// omilla väreillään. Mallin origo ja korkeus tulevat tiedostosta.
 const ROOF_SHADE = 0.78;
 const lod2Landmarks = [];
 let landmarkStyle = { colorOf: () => "#bdbdbd", isVisible: () => true };
@@ -137,10 +138,12 @@ export function setLandmarkStyle(style) {
 function paintLandmark({ mesh, building, kinds }) {
   if (!mesh) return;
   mesh.visible = landmarkStyle.isVisible(building);
-  const c = new THREE.Color(landmarkStyle.colorOf(building)), col = mesh.geometry.attributes.color;
+  const color = landmarkStyle.colorOf(building), col = mesh.geometry.attributes.color;
+  const wall = new THREE.Color(color.seina ?? color);
+  const roof = color.katto ? new THREE.Color(color.katto) : wall.clone().multiplyScalar(ROOF_SHADE);
   for (let i = 0; i < kinds.length; i++) {
-    const s = kinds[i] === 0 ? ROOF_SHADE : 1;
-    col.setXYZ(i, c.r * s, c.g * s, c.b * s);
+    const c = kinds[i] === 0 ? roof : wall;
+    col.setXYZ(i, c.r, c.g, c.b);
   }
   col.needsUpdate = true;
 }
@@ -166,7 +169,10 @@ export function lod2Landmark(entry) {
     g.computeVertexNormals(); // kullakin pinnalla omat kärkipisteet: pinnan normaali
     // Pinnat voivat olla kumpaan suuntaan tahansa kierrettyjä, joten molemmat puolet piirretään.
     record.mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
-    record.building = { tunnus: String([entry.building].flat()[0]), luokka: data.luokka, vuosi: data.vuosi, korkeus: data.rakennuskorkeus };
+    record.building = {
+      tunnus: String([entry.building].flat()[0]), luokka: data.luokka, vuosi: data.vuosi, korkeus: data.rakennuskorkeus,
+      seina: data.seina, katto: data.katto,
+    };
     record.kinds = kinds;
     group.add(record.mesh);
     group.userData.box = null; // klikkausalue lasketaan uudelleen (transit.js)

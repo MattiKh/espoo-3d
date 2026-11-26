@@ -28,10 +28,17 @@ const tileLon = (x, z) => (x / 2 ** z) * 360 - 180;
 const tileLat = (y, z) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / 2 ** z))) / D2R;
 const metersBetween = (lon, lat, a) => Math.hypot((lon - a.lon) * 111320 * Math.cos(a.lat * D2R), (lat - a.lat) * 111320);
 
-// Tiilen rakennukset (muoto: build_data.py, write_roof_tiles).
+// Värin tavut "#rrggbb"-muodossa; musta = ei tiedossa.
+function hexColor(dv, o) {
+  const v = (dv.getUint8(o) << 16) | (dv.getUint8(o + 1) << 8) | dv.getUint8(o + 2);
+  return v ? "#" + v.toString(16).padStart(6, "0") : null;
+}
+
+// Tiilen rakennukset (muoto: build_data.py, write_roof_tiles; KAT2: seinän ja katon väri,
+// color_roof_tiles).
 function parseTile(buf, classes) {
-  const dv = new DataView(buf), dec = new TextDecoder();
-  if (dec.decode(new Uint8Array(buf, 0, 4)) !== "KAT1") throw new Error("Tuntematon kattotiedosto");
+  const dv = new DataView(buf), dec = new TextDecoder(), magic = dec.decode(new Uint8Array(buf, 0, 4));
+  if (magic !== "KAT1" && magic !== "KAT2") throw new Error("Tuntematon kattotiedosto");
   const n = dv.getUint32(4, true), out = [];
   let o = 8;
   for (let b = 0; b < n; b++) {
@@ -43,11 +50,17 @@ function parseTile(buf, classes) {
     const korkeus = dv.getUint16(o + 11, true) / 10, raystas = dv.getUint16(o + 13, true) / 10;
     const nv = dv.getUint16(o + 15, true), nRoof = dv.getUint16(o + 17, true), nWall = dv.getUint16(o + 19, true);
     o += 21;
+    let seina = null, katto = null;
+    if (magic === "KAT2") {
+      seina = hexColor(dv, o);
+      katto = hexColor(dv, o + 3);
+      o += 6;
+    }
     const verts = new Float32Array(3 * nv);
     for (let i = 0; i < verts.length; i++, o += 2) verts[i] = dv.getInt16(o, true) / 10;
     const tris = new Uint16Array(3 * (nRoof + nWall));
     for (let i = 0; i < tris.length; i++, o += 2) tris[i] = dv.getUint16(o, true);
-    out.push({ tunnus, luokka, vuosi, lon, lat, korkeus, raystas, verts, tris, nRoof, base: null, baseAt: 0, range: null, state: false });
+    out.push({ tunnus, luokka, vuosi, lon, lat, korkeus, raystas, seina, katto, verts, tris, nRoof, base: null, baseAt: 0, range: null, state: false });
   }
   return out;
 }
@@ -112,12 +125,16 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
     if (!nv) return;
     const pos = new Float32Array(3 * nv), nor = new Float32Array(3 * nv), col = new Float32Array(3 * nv);
     const refX = mercX(t.lon), refY = mercY(t.lat), m = EARTH_CIRC * Math.cos(t.lat * D2R);
-    const c = new THREE.Color();
+    const wall = new THREE.Color(), roof = new THREE.Color();
     let v0 = 0;
     for (const b of shownB) {
       const dx = (mercX(b.lon) - refX) * m, dy = -(mercY(b.lat) - refY) * m;
       b.range = [v0, b.tris.length];
-      c.set(colorOf(b)); // sRGB → lineaarinen
+      // Yksi väri (katto hieman tummempi) tai seinille ja katolle omat ({ seina, katto }).
+      const color = colorOf(b);
+      wall.set(color.seina ?? color); // sRGB → lineaarinen
+      if (color.katto) roof.set(color.katto);
+      else roof.copy(wall).multiplyScalar(ROOF_SHADE);
       for (let j = 0; j < b.tris.length; j++) {
         const q = 3 * (v0 + j), i = 3 * b.tris[j];
         pos[q] = b.verts[i] + dx;
@@ -131,10 +148,10 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
         let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
         const len = Math.hypot(nx, ny, nz) || 1;
         nx /= len; ny /= len; nz /= len;
-        const shade = j < 3 * b.nRoof ? ROOF_SHADE : 1;
+        const c = j < 3 * b.nRoof ? roof : wall;
         for (let q = a; q < a + 9; q += 3) {
           nor[q] = nx; nor[q + 1] = ny; nor[q + 2] = nz;
-          col[q] = c.r * shade; col[q + 1] = c.g * shade; col[q + 2] = c.b * shade;
+          col[q] = c.r; col[q + 1] = c.g; col[q + 2] = c.b;
         }
       }
       v0 += b.tris.length;
