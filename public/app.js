@@ -40,6 +40,29 @@ maplibregl.addProtocol("dem", async (params, abortController) => {
   return { data: await res.arrayBuffer() };
 });
 
+// MapLibre (4.7) laskee korkeusmallin hakumatriisin väärin suurennetulle ruudulle (zoom yli tiilien
+// tason 15), kun sen korkeusmalliruutu latautuu vielä ja tilalla käytetään yläruutua: haku kattaa
+// koko yläruudun eikä vain ruudun omaa osaa. 3D-rakennukset (ja nimet) saivat silloin hetkeksi
+// toisen kohdan korkeuden ja välähtivät kymmeniä metrejä ilmassa tai maan alla. Matriisi lasketaan
+// uudelleen käytetyn yläruudun mukaan; MapLibre tekee sen joka kutsulla uutena, joten sen voi muuttaa.
+const TILE_EXTENT = 8192; // vektoritiilen koordinaatit
+function fixTerrainLookup(terrain) {
+  const proto = Object.getPrototypeOf(terrain);
+  if (proto.getTerrainData.fixed) return;
+  const get = proto.getTerrainData;
+  proto.getTerrainData = function (tileID) {
+    const data = get.call(this, tileID);
+    const src = data.tile?.tileID.canonical, c = tileID.canonical, dz = src ? c.z - src.z : 0;
+    if (tileID.overscaledZ > c.z && dz > 0 && c.x >> dz === src.x && c.y >> dz === src.y) {
+      const s = 1 / (TILE_EXTENT << dz);
+      data.u_terrain_matrix.set([s, 0, 0, 0, 0, s, 0, 0, 0, 0, 0, 0,
+        (c.x - (src.x << dz)) * TILE_EXTENT * s, (c.y - (src.y << dz)) * TILE_EXTENT * s, 0, 1]);
+    }
+    return data;
+  };
+  proto.getTerrainData.fixed = true;
+}
+
 // Maaston pinta on pelillinen maasto (pelimaasto.js). 3D-maastotilassa MapLibre jättää loitonnettaessa
 // maastoruudun toisinaan yhdeksi kuvaksi ilman pintaa, joten tausta on maaston keskisävy, jottei
 // aukko erotu vaaleana. Sama sävy on Espoon ulkopuolella (pelimaasto_worker.js).
@@ -259,6 +282,7 @@ const map = new maplibregl.Map({
   fadeDuration: 0,
 });
 window.espooMap = map; // selaimen konsolia varten
+map.on("terrain", () => map.terrain && fixTerrainLookup(map.terrain));
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 

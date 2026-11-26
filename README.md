@@ -204,6 +204,12 @@ koska MapLibre käsittelee rakennustiilet silloin uudelleen. Liikkuvat ajoneuvot
 piirretään noin 30 kertaa sekunnissa; karttaa liikutettaessa MapLibre piirtää täydellä
 nopeudella.
 
+Lähempänä kuin zoomaustaso 17 rakennukset ovat suurennettuja tason 15 tiiliä. Jos niiden kohdan
+korkeusmalliruutu latautuu vielä, MapLibre (4.7) käyttää yläruutua mutta hakee korkeuden koko
+yläruudun alueelta eikä ruudun omasta osasta. 3D-rakennus sai silloin toisen kohdan korkeuden ja
+välähti hetkeksi ilmaan tai maan alle (keskimäärin noin 11 m, enimmillään noin 40 m korostettuna).
+`app.js` (`fixTerrainLookup`) laskee hakumatriisin uudelleen käytetyn yläruudun mukaan.
+
 ## Joukkoliikenne reaaliajassa
 
 Selain tilaa sijainnit suoraan HSL:n ja Digitrafficin MQTT-palveluista (`public/transit.js`),
