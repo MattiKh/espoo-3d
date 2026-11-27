@@ -16,11 +16,30 @@ const BASE = new URL(".", location.href).href;
 const manifest = await fetch("data/manifest.json").then((r) => r.json()).catch(() => ({}));
 const TILE_VERSION = manifest.versio ?? 0;
 
+// Tiilen haku. Verkkokatkossa (esim. koneen herätessä lepotilasta) haku yritetään uudelleen
+// hetken päästä, sillä MapLibre ei hae epäonnistunutta tiiltä itse uudelleen (ks. reloadErroredTiles).
+const RETRY_DELAYS = [1000, 2000, 4000, 8000]; // ms
+async function fetchTile(url, signal) {
+  for (let i = 0; ; i++) {
+    try {
+      const res = await fetch(url, { signal });
+      if (res.status < 500 || i === RETRY_DELAYS.length) return res;
+    } catch (err) {
+      if (err.name === "AbortError" || i === RETRY_DELAYS.length) throw err;
+    }
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, RETRY_DELAYS[i]);
+      signal.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("Haku peruttu", "AbortError")); }, { once: true });
+    });
+  }
+}
+
 // Vektoritiilet ovat gzip-pakattuja (tippecanoe). Staattiset palvelimet eivät kerro sitä
 // selaimelle Content-Encoding-otsakkeella, joten paketti puretaan tarvittaessa itse.
 maplibregl.addProtocol("gz", async (params, abortController) => {
-  const res = await fetch(params.url.slice("gz://".length), { signal: abortController.signal });
-  if (!res.ok) return { data: new ArrayBuffer(0) }; // puuttuva tiili = tyhjä alue
+  const res = await fetchTile(params.url.slice("gz://".length), abortController.signal);
+  if (res.status === 404) return { data: new ArrayBuffer(0) }; // puuttuva tiili = tyhjä alue
+  if (!res.ok) throw new Error(`Tiili ${res.status}`);
   let data = await res.arrayBuffer();
   const head = new Uint8Array(data, 0, Math.min(2, data.byteLength));
   if (head[0] === 0x1f && head[1] === 0x8b) {
@@ -35,7 +54,7 @@ maplibregl.addProtocol("gz", async (params, abortController) => {
 maplibregl.addProtocol("dem", async (params, abortController) => {
   const [z, x, y] = params.url.slice("dem://".length).split("?")[0].split("/").map(Number);
   const url = (await liftedTileUrl(z, x, y, TILE_VERSION)) ?? `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`;
-  const res = await fetch(url, { signal: abortController.signal });
+  const res = await fetchTile(url, abortController.signal);
   if (!res.ok) throw new Error(`Korkeusmallin tiili ${res.status}`);
   return { data: await res.arrayBuffer() };
 });
@@ -301,6 +320,21 @@ const map = new maplibregl.Map({
 });
 window.espooMap = map; // selaimen konsolia varten
 map.on("terrain", () => map.terrain && fixTerrainLookup(map.terrain));
+
+// MapLibre (4.7) jättää epäonnistuneen tiilen tyhjäksi niin pitkäksi aikaa kuin se on näkyvissä.
+// Pitkän verkkokatkon jälkeen 3D-rakennuksista näkyivät silloin vain katot (roofs.js) ilmassa
+// räystään korkeudella. Epäonnistuneet tiilet haetaan uudelleen, kun verkko palaa, sivu tulee
+// näkyviin ja puolen minuutin välein; tila "expired" saa MapLibren hakemaan tiilen alusta.
+function reloadErroredTiles() {
+  for (const cache of Object.values(map.style?.sourceCaches ?? {})) {
+    for (const [key, tile] of Object.entries(cache._tiles)) {
+      if (tile.state === "errored") cache._reloadTile(key, "expired");
+    }
+  }
+}
+window.addEventListener("online", reloadErroredTiles);
+document.addEventListener("visibilitychange", () => document.hidden || reloadErroredTiles());
+setInterval(reloadErroredTiles, 30000);
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 

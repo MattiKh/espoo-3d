@@ -267,6 +267,13 @@ yläruudun alueelta eikä ruudun omasta osasta. 3D-rakennus sai silloin toisen k
 välähti hetkeksi ilmaan tai maan alle (keskimäärin noin 11 m, enimmillään noin 40 m korostettuna).
 `app.js` (`fixTerrainLookup`) laskee hakumatriisin uudelleen käytetyn yläruudun mukaan.
 
+MapLibre ei hae epäonnistunutta tiiltä uudelleen, vaan ruutu jää tyhjäksi niin kauan kuin se on
+näkyvissä. Kun kone heräsi lepotilasta ja verkko oli hetken poikki, 3D-rakennuksista näkyivät
+siksi vain katot (`roofs.js`) räystään korkeudella ilmassa. Vektori- ja korkeusmallitiilten haku
+yritetään verkkovirheessä ja palvelimen virheessä uudelleen 1, 2, 4 ja 8 s:n päästä (`app.js`,
+`fetchTile`), ja yhä epäonnistuneet tiilet haetaan uudelleen, kun verkko palaa, sivu tulee
+näkyviin ja puolen minuutin välein (`reloadErroredTiles`).
+
 ## Joukkoliikenne reaaliajassa
 
 Selain tilaa sijainnit suoraan HSL:n ja Digitrafficin MQTT-palveluista (`public/transit.js`),
