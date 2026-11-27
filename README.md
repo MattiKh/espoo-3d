@@ -210,14 +210,20 @@ Värityksen vaihtoehto Luonnolliset värit näyttää rakennusten seinät ja kat
 värisinä. Rakennusrekisterissä väriä ei ole, eikä 3D-mallin (LOD2) materiaaliväristä ole apua
 (sama oletusharmaa kaikille), mutta mallin jokaisella katto- ja seinäpinnalla on oma
 valokuvatekstuuri vuoden 2024 ilmakuvista. `build_data.py rakennusvarit` valitsee rakennukselta
-suurimman kattopinnan (etelään päin olevia painotetaan) sekä suurimman seinän ja suurimman seinän
+suurimman kaltevan kattopinnan (etelään päin olevia painotetaan) sekä suurimman seinän ja suurimman seinän
 sen vastakkaiselta sivulta ja hakee niiden kuvat: 57 629 rakennusta ja 171 499 kuvaa,
 ensimmäisellä kerralla noin kaksi ja puoli tuntia (16 hakua kerrallaan). Kuvassa näkyy pinnan
 ympäristöäkin, joten pinnan alue rajataan tekstuurikoordinaateista ja tallennetaan enintään 48 px:n
 näytteenä välimuistiin `cache/rakennusvarit/`; myöhemmät ajot laskevat värit näytteistä.
 
 Katon väri on pinnan yleisin väri (tiheimmän väriruudun pikselien mediaani), josta on jätetty pois
-kasvillisuus (kellanvihreä tai tumma vihreä; kuparikatto jää) ja mustimmat varjot. Seinissä
+kasvillisuus (kellanvihreä tai tumma vihreä; kuparikatto jää) ja mustimmat varjot. Ilmakuvissa katot
+ovat todellista vaaleampia (yleisimmät värit olivat vaaleanharmaat `#aaa` ja `#999`), joten väri
+kerrotaan 0,75:llä. Tasakatot (alle 10° kaltevat pinnat) ovat aina bitumikatteen harmaita
+(`#4a4b4d`): niiden väri vaihtelee kuvissa valaistuksen, sepelin ja likaisuuden mukaan ja näyttäisi
+kirjavalta. Kokonaan tasakattoiselta rakennukselta (ei räystästä, ks. Katot) ei siksi tallenneta
+katon väriä, ja kaltevan katon tasaiset osat väritetään selaimessa kolmioiden normaalin mukaan
+(`roofs.js`, maamerkit). Seinissä
 haittaavat ikkunat ja auringon ylivalotus: auringon puoleinen seinä on viistokuvissa haalea
 (Otakaari 1:n punatiili näkyy itäseinällä vaaleanpunaisena ja varjoisalla länsiseinällä
 tummanruskeana). Lämpimän seinän (tiili, punamulta, rappaus) sävy ja kylläisyys otetaan siksi
@@ -228,10 +234,14 @@ vihreä katto (esim. maalattu pelti) säilyy vihreänä. Värit ovat arvioita: e
 on harmaanruskea eikä punainen, koska kuvissa sen tiili on haalea.
 
 Värit tallennetaan rakennusaineistoon (`seina`, `katto`), kattotiiliin ja maamerkkien malleihin;
-ne ovat 57 612 rakennuksella (seinä 56 887, katto 56 809). Värittömät rakennukset (esim. rekisteristä täydennetyt)
-saavat yleisimmät sävyt, vaalean beigen seinän ja tummanharmaan katon. Värit pyöristetään 16
-tasoon kanavaa kohden (`#rgb`, 4 096 sävyä), jolloin samat arvot toistuvat tiilissä ja pakkautuvat:
-rakennustiilet kasvavat värien takia noin 1,4 Mt eli 11 % (13,1 → 14,5 Mt; tarkoilla väreillä koeajossa noin 35 %).
+ne ovat 57 456 rakennuksella (seinä 56 887, kalteva katto 44 346; kattoväri käytössä 42 890
+rakennusosalla, ja 41 768 kaltevakattoisesta rakennuksesta 502 jää ilman). Värittömät rakennukset
+(esim. rekisteristä täydennetyt) saavat yleisimmät sävyt, vaalean beigen seinän ja tummanharmaan
+katon. Värit pyöristetään 16 tasoon kanavaa kohden (`#rgb`, 4 096 sävyä), jolloin samat arvot
+toistuvat tiilissä ja pakkautuvat: rakennustiilet kasvavat värien takia noin 1,3 Mt eli 10 %
+(13,1 → 14,4 Mt; tarkoilla väreillä koeajossa noin 35 %). 3D-mallin pisteet ovat Web Mercatorin
+metreinä, joten pinnan kaltevuus lasketaan vasta, kun vaakamitat on muunnettu maaston metreiksi
+(Espoossa kerroin noin 0,5); muuten loivat harjakatot näyttäisivät tasakatoilta.
 
 MapLibren 3D-rakennuksella on yksi väri, joten tasaisen katon väri piirretään 30 cm paksuna
 laattana rakennuksen yläpinnan päälle (taso `rakennukset-katto`, vain luonnollisissa väreissä).

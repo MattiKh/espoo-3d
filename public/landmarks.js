@@ -123,9 +123,10 @@ export const LANDMARK_MODELS = {
 
 // Maamerkki Espoon 3D-kaupunkimallista (LOD2) (scripts/build_data.py, build_landmarks). Malli
 // väritetään kuten muut rakennukset (setLandmarkStyle, app.js): seinät rakennuksen värillä ja
-// katot hieman tummempina kuten roofs.js:n katoissa, tai luonnollisissa väreissä seinät ja katot
-// omilla väreillään. Mallin origo ja korkeus tulevat tiedostosta.
+// katot hieman tummempina kuten roofs.js:n katoissa, tai luonnollisissa väreissä seinät, katot ja
+// tasakatot omilla väreillään. Mallin origo ja korkeus tulevat tiedostosta.
 const ROOF_SHADE = 0.78;
+const FLAT_NZ = Math.cos(10 * Math.PI / 180); // kuten roofs.js
 const lod2Landmarks = [];
 let landmarkStyle = { colorOf: () => "#bdbdbd", isVisible: () => true };
 
@@ -141,8 +142,10 @@ function paintLandmark({ mesh, building, kinds }) {
   const color = landmarkStyle.colorOf(building), col = mesh.geometry.attributes.color;
   const wall = new THREE.Color(color.seina ?? color);
   const roof = color.katto ? new THREE.Color(color.katto) : wall.clone().multiplyScalar(ROOF_SHADE);
+  const flat = color.tasakatto ? new THREE.Color(color.tasakatto) : roof;
+  const nor = mesh.geometry.attributes.normal;
   for (let i = 0; i < kinds.length; i++) {
-    const c = kinds[i] === 0 ? roof : wall;
+    const c = kinds[i] !== 0 ? wall : Math.abs(nor.getZ(i)) >= FLAT_NZ ? flat : roof;
     col.setXYZ(i, c.r, c.g, c.b);
   }
   col.needsUpdate = true;

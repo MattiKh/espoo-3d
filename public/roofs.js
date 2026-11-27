@@ -13,6 +13,7 @@ const PARALLEL = 4;
 const ELEV_BUDGET = 150; // rakennusta piirtokertaa kohden: korkeus tarkistetaan maastosta
 const ELEV_MAX_AGE = 4000; // ms: korkeusmalli tarkentuu, kun karttaa lähennetään
 const ROOF_SHADE = 0.78; // katto hieman seiniä tummempi
+const FLAT_NZ = Math.cos(10 * Math.PI / 180); // tätä loivempi kattokolmio on tasainen (build_data.py, ROOF_FLAT_NZ)
 // Katto nostetaan hieman, jottei 3D-rakennuksen tasainen yläpinta pistä räystäiden kohdalla katon
 // läpi; seinien jatke räystään alla (build_data.py, ROOF_SKIRT) peittää raon.
 const ROOF_LIFT = 0.25; // m
@@ -125,16 +126,19 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
     if (!nv) return;
     const pos = new Float32Array(3 * nv), nor = new Float32Array(3 * nv), col = new Float32Array(3 * nv);
     const refX = mercX(t.lon), refY = mercY(t.lat), m = EARTH_CIRC * Math.cos(t.lat * D2R);
-    const wall = new THREE.Color(), roof = new THREE.Color();
+    const wall = new THREE.Color(), roof = new THREE.Color(), flat = new THREE.Color();
     let v0 = 0;
     for (const b of shownB) {
       const dx = (mercX(b.lon) - refX) * m, dy = -(mercY(b.lat) - refY) * m;
       b.range = [v0, b.tris.length];
-      // Yksi väri (katto hieman tummempi) tai seinille ja katolle omat ({ seina, katto }).
+      // Yksi väri (katto hieman tummempi) tai seinille, katolle ja sen tasaisille osille omat
+      // ({ seina, katto, tasakatto }).
       const color = colorOf(b);
       wall.set(color.seina ?? color); // sRGB → lineaarinen
       if (color.katto) roof.set(color.katto);
       else roof.copy(wall).multiplyScalar(ROOF_SHADE);
+      if (color.tasakatto) flat.set(color.tasakatto);
+      else flat.copy(roof);
       for (let j = 0; j < b.tris.length; j++) {
         const q = 3 * (v0 + j), i = 3 * b.tris[j];
         pos[q] = b.verts[i] + dx;
@@ -148,7 +152,7 @@ export async function createRoofs(map, { url, version, colorOf, isVisible, visib
         let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
         const len = Math.hypot(nx, ny, nz) || 1;
         nx /= len; ny /= len; nz /= len;
-        const c = j < 3 * b.nRoof ? roof : wall;
+        const c = j >= 3 * b.nRoof ? wall : Math.abs(nz) >= FLAT_NZ ? flat : roof;
         for (let q = a; q < a + 9; q += 3) {
           nor[q] = nx; nor[q + 1] = ny; nor[q + 2] = nz;
           col[q] = c.r; col[q + 1] = c.g; col[q + 2] = c.b;

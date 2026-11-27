@@ -134,10 +134,11 @@ const el = (tag, attrs = {}, ...children) => {
 
 // ------------------------------------------------------------ tyyli
 
-// Luonnolliset värit (scripts/build_data.py, build_building_colors): seinien ja kattojen värit
-// Espoon 3D-mallin valokuvista. Rakennukset, joilla väriä ei ole (esim. rekisteristä täydennetyt),
-// saavat yleisimmät sävyt.
-const NATURAL_WALL = "#d6d1c6", NATURAL_ROOF = "#5d5f61";
+// Luonnolliset värit (scripts/build_data.py, build_building_colors): seinien ja kaltevien kattojen
+// värit Espoon 3D-mallin valokuvista. Tasakatot ovat bitumikatteen harmaita, sillä kuvissa niiden
+// väri vaihtelee valaistuksen ja likaisuuden mukaan. Rakennukset, joilla väriä ei ole (esim.
+// rekisteristä täydennetyt), saavat yleisimmät sävyt.
+const NATURAL_WALL = "#d6d1c6", NATURAL_ROOF = "#5d5f61", NATURAL_FLAT_ROOF = "#4a4b4d";
 const NATURAL_ROOF_CAP = 0.3; // m: tasaisen katon värilaatan paksuus
 
 function buildingColorExpr(mode) {
@@ -231,7 +232,8 @@ function buildStyle() {
     id: "rakennukset-katto", type: "fill-extrusion", source: "rakennukset", "source-layer": "rakennukset", minzoom: 11,
     filter: buildingFilter(), layout: { visibility: visibility(state.buildingColor === "luonnollinen") },
     paint: {
-      "fill-extrusion-color": ["coalesce", ["get", "katto"], NATURAL_ROOF],
+      // Kaltevakattoinen rakennus (raystas) näkyy kaukaa ja lähialueen ulkopuolella laatikkona.
+      "fill-extrusion-color": ["case", ["has", "raystas"], ["coalesce", ["get", "katto"], NATURAL_ROOF], NATURAL_FLAT_ROOF],
       "fill-extrusion-base": ["case", hasRoof, 1, ["get", "korkeus"]],
       "fill-extrusion-height": ["case", hasRoof, 1, ["+", ["get", "korkeus"], NATURAL_ROOF_CAP]],
       "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], 11, 0, 12, 1],
@@ -407,8 +409,8 @@ function renderLegends() {
   const b = document.getElementById("building-legend");
   b.replaceChildren(
     state.buildingColor === "luonnollinen"
-      ? el("p", { class: "hint" }, "Seinien ja kattojen värit Espoon 3D-kaupunkimallin valokuvista (ilmakuvat 2024). "
-        + "Väri on arvio, josta on jätetty pois varjot, ikkunat ja kasvillisuus.")
+      ? el("p", { class: "hint" }, "Seinien ja kaltevien kattojen värit Espoon 3D-kaupunkimallin valokuvista (ilmakuvat 2024). "
+        + "Väri on arvio, josta on jätetty pois varjot, ikkunat ja kasvillisuus. Tasakatot ovat bitumikatteen harmaita.")
       : state.buildingColor === "vuosi" ? gradientLegend(BUILDING_YEAR_STOPS, (v) => v)
         : state.buildingColor === "korkeus" ? gradientLegend(BUILDING_HEIGHT_STOPS, (v) => v + " m")
           : legendRows(BUILDING_CLASSES),
@@ -553,9 +555,12 @@ async function initCameras() {
 let roofs = null;
 
 // Katon ja räystään yläpuolisten seinien väri samoin kuin 3D-rakennuksissa (buildingColorExpr);
-// luonnollisissa väreissä seinillä ja katolla on omat värinsä ({ seina, katto }).
+// luonnollisissa väreissä seinillä, katolla ja sen tasaisilla osilla on omat värinsä
+// ({ seina, katto, tasakatto }).
 function buildingColor(b) {
-  if (state.buildingColor === "luonnollinen") return { seina: b.seina ?? NATURAL_WALL, katto: b.katto ?? NATURAL_ROOF };
+  if (state.buildingColor === "luonnollinen") {
+    return { seina: b.seina ?? NATURAL_WALL, katto: b.katto ?? NATURAL_ROOF, tasakatto: NATURAL_FLAT_ROOF };
+  }
   if (state.buildingColor === "vuosi") return b.vuosi ? interpolateColor(BUILDING_YEAR_STOPS, b.vuosi) : "#9e9e9e";
   if (state.buildingColor === "korkeus") return interpolateColor(BUILDING_HEIGHT_STOPS, b.korkeus);
   return BUILDING_CLASSES.find(([k]) => k === b.luokka)?.[2] ?? "#bdbdbd";

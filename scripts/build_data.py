@@ -1094,8 +1094,8 @@ def write_roof_tiles(roofs, targets):
 
 # Rakennusten luonnolliset värit (väritys "Luonnolliset värit", app.js). Rakennusrekisterissä tai
 # 3D-mallin materiaaleissa ei ole väriä, mutta 3D-mallin (LOD2) jokaisella katto- ja seinäpinnalla
-# on oma valokuvatekstuuri vuoden 2024 ilmakuvista. Rakennukselta haetaan suurimman kattopinnan ja
-# kahden seinän kuvat: suurimman seinän ja suurimman sen vastakkaiselta sivulta, koska auringon
+# on oma valokuvatekstuuri vuoden 2024 ilmakuvista. Rakennukselta haetaan suurimman kaltevan
+# kattopinnan ja kahden seinän kuvat (tasakatot näytetään bitumikatteen harmaina, app.js): suurimman seinän ja suurimman sen vastakkaiselta sivulta, koska auringon
 # puoleinen seinä on viistokuvissa usein ylivalottunut (esim. Otakaari 1:n punatiili näkyy
 # itäseinällä vaaleanpunaisena ja varjoisalla länsiseinällä tiilenruskeana). Kuvassa näkyy pinnan
 # ympäristöäkin, joten väri lasketaan vain pinnan alueelta (tekstuurikoordinaatit), ja siitä jätetään
@@ -1106,11 +1106,12 @@ COLOR_SAMPLE = 48  # px: pinnan alue tallennetaan välimuistiin enintään täm�
 COLOR_BIN = 16  # yleisimmän värin väriruudun leveys (0–255)
 COLOR_WARM = 0.3  # seinä on lämmin (tiili, punamulta, rappaus), jos tätä suurempi osa on lämmintä
 COLOR_WARM_BOOST = 2.0  # lämpimän seinän kylläisyyden kerroin: viistokuvissa värit ovat haaleita
+COLOR_ROOF_SHADE = 0.75  # katon värin kerroin: ilmakuvissa katot ovat todellista vaaleampia (#999 → #777)
 
 
 def color_surfaces(path):
     """Ruudun LOD2-rakennuksilta värinäytteiksi valitut pinnat: tunnus → [(laji, kuvan osoite,
-    tekstuurikoordinaatit [(u, v)])], laji 0 katto ja 1 seinä."""
+    tekstuurikoordinaatit [(u, v)])], laji 0 katto ja 1 seinä. Katoista mukana ovat vain kaltevat."""
     out = {}
     for _, el in ET.iterparse(path):
         if el.tag != BLDG + "Building":
@@ -1131,12 +1132,13 @@ def color_surfaces(path):
                         pts = read_positions_3d(ring) if tex and ring is not None else []
                         if len(pts) < 3:
                             continue
-                        nx, ny, nz = newell(pts)
+                        k = 1 / math.cosh(pts[0][1] / R)  # Web Mercatorin metrit maaston metreiksi (kaltevuus)
+                        nx, ny, nz = newell([(x * k, y * k, z) for x, y, z in pts])
                         size, h = math.sqrt(nx * nx + ny * ny + nz * nz), math.hypot(nx, ny)
-                        if size:
+                        if size and (kind or abs(nz) < ROOF_FLAT_NZ * size):
                             found[kind].append((size, (nx / h, ny / h) if h else (0.0, 0.0), *tex))
             picked = []
-            if found[0]:  # katoista suurin, etelään päin oleva painotettuna (ortokuvassa valossa)
+            if found[0]:  # kaltevista katoista suurin, etelään päin oleva painotettuna (ortokuvassa valossa)
                 roof = max(found[0], key=lambda f: f[0] * (1 + max(0.0, -f[1][1])))
                 picked.append((0, *roof[2:]))
             if found[1]:
@@ -1233,7 +1235,7 @@ def color_hex(c):
 
 def roof_color(paths):
     rgb = color_pixels(paths, 0)
-    return color_hex(dominant_color(rgb)) if len(rgb) >= 20 else None
+    return color_hex(dominant_color(rgb) * COLOR_ROOF_SHADE) if len(rgb) >= 20 else None
 
 
 def wall_color(paths):
@@ -1307,12 +1309,14 @@ def build_building_colors():
     for f in feats:
         p = f["properties"]
         wall, roof = colors.get(str(p.get("tunnus")), (None, None))
+        if "raystas" not in p:
+            roof = None  # piirretään tasakattona (bitumikatteen harmaa, app.js)
         for key, value in (("seina", wall), ("katto", roof)):
             p.pop(key, None)
             if value:
                 p[key] = value
     log(f"  värit {len(colors)} rakennukselle: seinä {sum(1 for c in colors.values() if c[0])}, "
-        f"katto {sum(1 for c in colors.values() if c[1])}")
+        f"katto {sum(1 for c in colors.values() if c[1])}, kattoväri käytössä {sum(1 for f in feats if 'katto' in f['properties'])} osalla")
     color_roof_tiles(colors)
     make_building_tiles(write_geojson("rakennukset", feats))
 
