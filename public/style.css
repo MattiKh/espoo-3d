@@ -1,5 +1,7 @@
 :root {
   --bg: rgba(255, 255, 255, 0.94);
+  --bg-glass: rgba(255, 255, 255, 0.62); /* kartan päällä pysyvät laatikot (paneeli, kyytinäkymä) */
+  --shadow-glass: 0 4px 16px rgba(15, 30, 45, 0.14);
   --fg: #1d2a35;
   --muted: #5f6b76;
   --line: rgba(29, 42, 53, 0.12);
@@ -14,6 +16,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: rgba(22, 28, 34, 0.94);
+    --bg-glass: rgba(22, 28, 34, 0.58);
     --fg: #e6edf3;
     --muted: #9aa7b3;
     --line: rgba(230, 237, 243, 0.12);
@@ -21,12 +24,14 @@
     --accent-soft: rgba(90, 169, 240, 0.16);
     --chip: #2a333c;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    --shadow-glass: 0 4px 16px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
   --bg: rgba(22, 28, 34, 0.94);
+  --bg-glass: rgba(22, 28, 34, 0.58);
   --fg: #e6edf3;
   --muted: #9aa7b3;
   --line: rgba(230, 237, 243, 0.12);
@@ -34,6 +39,7 @@
   --accent-soft: rgba(90, 169, 240, 0.16);
   --chip: #2a333c;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-glass: 0 4px 16px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
 
@@ -58,10 +64,10 @@ html, body {
   width: 320px;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  backdrop-filter: blur(10px);
+  background: var(--bg-glass);
+  backdrop-filter: blur(8px);
   border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-glass);
   z-index: 2;
   transition: transform 0.25s ease;
 }
@@ -225,46 +231,49 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 
 .maplibregl-ctrl-attrib { font-size: 11px; }
 
-/* Kyytinäkymä (ride.js) */
+/* Kyytinäkymä (ride.js): kapea, läpikuultava laatikko oikeassa yläkulmassa, jossa kartan omat
+   painikkeet ovat seurannan ajan piilossa. Seurannan päättymisen ilmoitus on painikkeiden vasemmalla. */
 .ride {
   position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 10px;
+  right: 10px;
   width: max-content;
-  max-width: min(460px, calc(100% - 24px));
+  max-width: min(240px, calc(100% - 20px));
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 14px;
-  padding: 10px 12px 10px 14px;
-  background: var(--bg);
-  backdrop-filter: blur(10px);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  gap: 6px 10px;
+  padding: 8px 10px 9px 12px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(8px);
+  border-radius: 10px;
+  box-shadow: var(--shadow-glass);
   z-index: 3;
 }
+#map:not(.riding) .ride { right: 52px; }
 .ride[hidden], .ride [hidden] { display: none; }
-.ride-info { flex: 1 1 180px; min-width: 0; }
-.ride .kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.ride h3 { margin: 1px 0 2px; font-size: 15px; }
-.ride .meta { font-size: 12.5px; color: var(--muted); }
+.ride-info { flex: 1 1 100%; min-width: 0; }
+.ride .kind { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.ride h3 { margin: 1px 0 2px; font-size: 14px; overflow-wrap: anywhere; }
+.ride .meta { font-size: 12px; color: var(--muted); }
 .ride-note { margin: 0; font-size: 13px; }
 .ride button {
   flex: none;
   border: 0;
-  padding: 8px 14px;
+  padding: 5px 12px;
   border-radius: 999px;
   background: var(--accent);
   color: #fff;
   font: inherit;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
 .ride button:disabled { opacity: 0.6; cursor: default; }
-.ride .hint { flex-basis: 100%; margin: 0; font-size: 11.5px; }
+.ride .hint { flex-basis: 100%; margin: 0; font-size: 11px; line-height: 1.35; }
 #map.riding .maplibregl-ctrl-group { display: none; }
 #map.riding .maplibregl-canvas-container { touch-action: none; }
+#map.ride-drag .maplibregl-canvas-container { cursor: ns-resize; }
 
 /* Kapea näyttö: paneeli alareunaan */
 @media (max-width: 700px) {
@@ -281,7 +290,6 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 }
 
 @media (min-width: 701px) {
-  body:not(.panel-closed) .ride { left: calc(50% + 166px); max-width: min(460px, calc(100% - 368px)); }
   body.panel-closed #panel { transform: translateX(calc(-100% + 56px)); }
   body.panel-closed #panel header > div { visibility: hidden; }
 }

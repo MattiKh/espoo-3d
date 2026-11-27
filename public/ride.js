@@ -3,7 +3,8 @@
 // enemmän) ja menosuunta on aina ylöspäin. Sijainti ja suunta tulevat transit.js:ltä joka
 // ruudussa. Kartan kohteita (rakennukset, aineistot, muut kulkuneuvot) voi klikata kuten muutenkin.
 // Kartan oma raahaus ja kierto ovat seurannan ajan pois päältä; zoomausta (rulla, nipistys, +/−)
-// ohjataan täällä, sillä MapLibren omat eleet pysähtyisivät, kun näkymä asetetaan joka ruudussa.
+// ja kallistusta (hiirellä vetäminen ylös tai alas) ohjataan täällä, sillä MapLibren omat eleet
+// pysähtyisivät, kun näkymä asetetaan joka ruudussa.
 // Poistuttaessa palataan näkymään, josta kyytiin hypättiin.
 
 const D2R = Math.PI / 180;
@@ -11,6 +12,12 @@ const HANDLERS = ["dragPan", "dragRotate", "scrollZoom", "boxZoom", "doubleClick
 const FOLLOW_ZOOM = 17; // noin 350 m näkymän leveydeltä (1280 px)
 const MIN_ZOOM = 14.5, MAX_ZOOM = 19;
 const FOLLOW_PITCH = 45;
+const MIN_PITCH = 0, MAX_PITCH = 80; // app.js: maxPitch
+const PITCH_PER_PX = 0.5; // kuten MapLibren kallistus hiirellä: ylös vetäminen kallistaa kohti horisonttia
+// FOLLOW_PITCHiä jyrkemmin kallistetaan vain niin pitkälle, että kamera on vähintään näin korkealla
+// kulkuneuvon yläpuolella, jottei se lähikuvassa painu mäen tai rakennusten sisään.
+const CAM_MIN_HEIGHT = 40; // m
+const EARTH_CIRC = 40075016.686;
 const LEAD = 0.3; // näkymän yläreunan täyte korkeuden osuutena: kulkuneuvo noin 65 % ylhäältä
 const ENTER_MS = 1500;
 const EXIT_MS = 1200;
@@ -31,7 +38,7 @@ export function createRide(map, { onEnd }) {
   const container = map.getContainer(), box = map.getCanvasContainer();
   let saved = null; // näkymä ja asetukset ennen kyytiä
   let smooth = null, anim = null, leaving = null, pose = null, view = null, lastAt = 0;
-  let zoom = FOLLOW_ZOOM, zoomTarget = FOLLOW_ZOOM, noteTimer = null;
+  let zoom = FOLLOW_ZOOM, zoomTarget = FOLLOW_ZOOM, pitch = FOLLOW_PITCH, pitchTarget = FOLLOW_PITCH, noteTimer = null;
 
   // Osoiterivin näkymä (hash: true) pysyy kyydin ajan siinä, josta kyytiin hypättiin, jottei
   // uudelleenlataus jatka seurantaa vanhasta kohdasta.
@@ -49,7 +56,7 @@ export function createRide(map, { onEnd }) {
   exitButton.addEventListener("click", () => exit());
   const hint = document.createElement("p");
   hint.className = "hint";
-  hint.textContent = "Menosuunta on ylöspäin. Zoomaa rullalla, nipistämällä tai +/− -näppäimillä; kohteita voi klikata.";
+  hint.textContent = "Menosuunta on ylöspäin. Kallista vetämällä hiirellä ylös tai alas, zoomaa rullalla, nipistämällä tai +/−. Kohteita voi klikata.";
   const bar = document.createElement("div");
   bar.className = "ride";
   bar.hidden = true;
@@ -86,6 +93,14 @@ export function createRide(map, { onEnd }) {
     return inset;
   }
 
+  // Suurin kallistus zoomaustasolla z: kameran etäisyys näkymän keskipisteestä (m) riippuu
+  // zoomauksesta ja näkymän korkeudesta.
+  let pitchLimit = MAX_PITCH;
+  function maxPitch(z, lat) {
+    const t = map.transform, d = (t.cameraToCenterDistance * EARTH_CIRC * Math.cos(lat * D2R)) / ((t.tileSize ?? 512) * 2 ** z);
+    return clamp(Math.acos(Math.min(1, CAM_MIN_HEIGHT / d)) / D2R, FOLLOW_PITCH, MAX_PITCH);
+  }
+
   // Seurantanäkymä: kulkuneuvo täytteiden sisäpuolisen alueen keskellä, menosuunta ylöspäin.
   // Suunta pehmennetään, jotta sijaintien kohina ei heiluta karttaa.
   function followView(p, dt, now) {
@@ -93,8 +108,10 @@ export function createRide(map, { onEnd }) {
     if (!smooth) smooth = { heading };
     smooth.heading = wrap(smooth.heading + angleDiff(heading, smooth.heading) * (1 - Math.exp(-dt / TURN_MS)));
     zoom += (zoomTarget - zoom) * (1 - Math.exp(-dt / ZOOM_MS));
+    pitchLimit = maxPitch(zoom, p.lat);
+    pitch += (Math.min(pitchTarget, pitchLimit) - pitch) * (1 - Math.exp(-dt / ZOOM_MS));
     return {
-      center: { lng: p.lon, lat: p.lat }, zoom, pitch: FOLLOW_PITCH, bearing: smooth.heading,
+      center: { lng: p.lon, lat: p.lat }, zoom, pitch, bearing: smooth.heading,
       padding: { top: map.transform.height * LEAD, bottom: 0, left: panelInset(now), right: 0 },
     };
   }
@@ -148,7 +165,8 @@ export function createRide(map, { onEnd }) {
   function restore(v, note = null) {
     const s = saved;
     saved = leaving = anim = smooth = pose = view = null;
-    pinch = null;
+    pinch = drag = null;
+    container.classList.remove("ride-drag");
     if (updateHash) map.on("moveend", updateHash);
     map.jumpTo(v ?? { padding: s.view.padding });
     for (const h of s.handlers) map[h].enable();
@@ -191,6 +209,28 @@ export function createRide(map, { onEnd }) {
       if (touches.size < 2) pinch = null;
     });
   }
+  // Kallistus vetämällä hiirellä (mikä tahansa nappi) ylös tai alas. Paikallaan painettu nappi on
+  // klikkaus, sillä MapLibre ei tulkitse klikkaukseksi yli 3 px:n siirtoa.
+  let drag = null;
+  box.addEventListener("pointerdown", (e) => {
+    if (!saved || leaving || e.pointerType !== "mouse") return;
+    drag = { id: e.pointerId, y: e.clientY, pitch: Math.min(pitchTarget, pitchLimit) };
+    box.setPointerCapture(e.pointerId);
+  });
+  box.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id || leaving) return;
+    const dy = e.clientY - drag.y;
+    if (Math.abs(dy) > 3) container.classList.add("ride-drag");
+    pitchTarget = clamp(drag.pitch - dy * PITCH_PER_PX, MIN_PITCH, MAX_PITCH);
+  });
+  for (const type of ["pointerup", "pointercancel"]) {
+    box.addEventListener(type, (e) => {
+      if (drag?.id !== e.pointerId) return;
+      drag = null;
+      container.classList.remove("ride-drag");
+    });
+  }
+
   window.addEventListener("keydown", (e) => {
     if (!saved || leaving || e.target.closest?.("input, select, textarea")) return;
     if (e.key === "Escape") exit();
@@ -219,6 +259,7 @@ export function createRide(map, { onEnd }) {
         container.classList.add("riding");
         if (saved.closedPanel) document.body.classList.add("panel-closed"); // kapealla näytöllä paneeli peittäisi näkymän
         zoom = zoomTarget = FOLLOW_ZOOM;
+        pitch = pitchTarget = FOLLOW_PITCH;
       }
       anim = { from: view ?? currentView(), t0: performance.now(), ms: duration(ENTER_MS) };
       leaving = smooth = null;

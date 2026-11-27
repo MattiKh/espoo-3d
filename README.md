@@ -341,8 +341,10 @@ Bussia, raitiovaunua, lähi- tai kaukojunaa, metroa tai matkustaja-alusta (lauta
 hypätään sen kyytiin (`public/ride.js`): kartta siirtyy noin puolessatoista sekunnissa
 seuraamaan kulkuneuvoa yläpuolelta. Kulkuneuvo pysyy näkymässä paikallaan hieman keskikohdan
 alapuolella (yläreunassa täyte 30 % näkymän korkeudesta, joten edessä näkyy enemmän), menosuunta on
-aina ylöspäin ja kallistus 45°. Zoomaus on alussa 17 (noin 350 m näkymän leveydeltä). Tavarajunien,
-lentokoneiden ja latausautojen klikkaus avaa tiedot kuten ennenkin.
+aina ylöspäin ja kallistus alussa 45°. Zoomaus on alussa 17 (noin 350 m näkymän leveydeltä). Tavarajunien,
+lentokoneiden ja latausautojen klikkaus avaa tiedot kuten ennenkin. Kulkuneuvon tiedot ja
+Lopeta seuranta -nappi ovat kapeassa, läpikuultavassa laatikossa oikeassa yläkulmassa, jossa kartan
+navigointinapit ovat seurannan ajan piilossa; paneeli on yhtä läpikuultava (`--bg-glass`).
 
 - Kartan kohteet ovat seurannan aikana klikattavissa kuten muutenkin: rakennusten tiedot,
   aineistojen kohteet, purot ja muiden kulkuneuvojen tiedot. Toisen julkisen kulkuneuvon klikkaus
@@ -351,13 +353,20 @@ lentokoneiden ja latausautojen klikkaus avaa tiedot kuten ennenkin.
   kulkuneuvo ei heilu näkymässä. Kulkusuunnan muutokset pehmennetään, jotta sijaintien kohina ei
   käännä karttaa. Leveällä näytöllä avoin paneeli otetaan huomioon, ja kulkuneuvo pidetään
   näkyvän osan keskellä.
-- Zoomataan hiiren rullalla, kahden sormen nipistyksellä tai +/− -näppäimillä (14,5–19). Kartan omat
-  eleet pysäyttäisivät joka ruudussa asetettavan näkymän, joten raahaus, kierto, kallistus,
-  kartan oma zoomaus ja navigointinapit ovat seurannan ajan pois päältä, ja zoomaus tehdään
-  `ride.js`:ssä.
+- Zoomataan hiiren rullalla, kahden sormen nipistyksellä tai +/− -näppäimillä (14,5–19), ja
+  kameraa kallistetaan vetämällä hiirellä (napin pohjassa) ylös tai alas: ylös vetäminen
+  kallistaa kohti horisonttia kuten kartan omassa kallistuksessa (0,5° pikseliltä, 0–80°).
+  Paikallaan painettu nappi on edelleen klikkaus. Kartan omat eleet pysäyttäisivät joka
+  ruudussa asetettavan näkymän, joten raahaus, kierto, kallistus, kartan oma zoomaus ja
+  navigointinapit ovat seurannan ajan pois päältä, ja zoomaus ja kallistus tehdään `ride.js`:ssä.
+- 45°:tta jyrkemmin kallistetaan vain niin pitkälle, että kamera on vähintään 40 m kulkuneuvon
+  yläpuolella (kameran etäisyys keskipisteestä riippuu zoomauksesta ja näkymän korkeudesta):
+  esimerkiksi 760 px korkeassa näkymässä zoomauksella 17 kallistus voi olla 80°, mutta 19:llä
+  noin 62°. Zoomattaessa lähemmäs kallistus laskee rajaan ja palaa loitonnettaessa.
 - Metro kulkee maan alla, ja se näkyy läpikuultavana kuten muutenkin. Metrotunnelien sisäpuoli
   (`public/metrotunnel.js`) piirretään vain, jos kamera on maan alla; se on jäänyt aiemmasta
-  katutason kyytinäkymästä, eikä seurannassa kamera ole koskaan maan alla.
+  katutason kyytinäkymästä. Seurannassa kameran korkeusraja pitää sen maan yläpuolella
+  tavallisissa maastonmuodoissa.
 - "Lopeta seuranta" tai Esc palauttaa näkymän, josta kyytiin hypättiin; osoiterivin näkymä pysyy
   seurannan ajan siinä. Paneelin paikkanapit päättävät seurannan heti. Jos kulkuneuvo katoaa
   datasta (vuoro päättyy, ajoneuvo ajaa Espoon ulkopuolelle tai sijainti ei päivity), näkymä jää
@@ -791,7 +800,7 @@ siltoja on lähellä noin 10 000–20 000 kolmiota.
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
-- `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus ja kyytipalkki
+- `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus, kallistus ja kyytipalkki
 - `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli (käytössä vain kameran ollessa maan alla)
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: maaston pinta (pelillinen maasto): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
