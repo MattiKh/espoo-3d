@@ -69,7 +69,8 @@ export async function liftedTileUrl(z, x, y, v) {
   return `tiles/korkeus/${z}/${x}/${y}.webp?v=${v}`;
 }
 
-// 3D-siltojen kannet (pelimaasto.js): funktio (lon, lat) → [{ z: kannen korkeus (m), k: tie | kevyt | raide }]
+// 3D-siltojen kannet (pelimaasto.js): funktio (lon, lat) → [{ z: kannen korkeus (m), k: tie | kevyt | raide,
+// u: kannen suunta lähimmässä kohdassa (yksikkövektori itään ja pohjoiseen) }]
 // ladatuista siltaruuduista. Sillan kohdalla korkeusmallin jänne on auki, joten ajoneuvo pidetään
 // kannella näiden mukaan (transit.js).
 let gameDecks = () => [];

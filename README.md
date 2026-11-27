@@ -559,7 +559,8 @@ Tarkimmista tiilistä (zoom 15) tallennetaan myös nostettujen pikselien (korjat
 (`public/tiles/korkeus/maa`, muualla musta). Selain lataa sen, kun se hakee nostetun tiilen. Sillan
 ali kulkeva ajoneuvo (`public/transit.js`) lähestyi alempaa ja pysyy alla olevan tien tasolla, ja
 uoma (`public/streams.js`) kulkee sillan alla maanpinnalla. Sillalle kannen korkeudelta,
-esimerkiksi penkereeltä, tullut ajoneuvo pysyy kannella.
+esimerkiksi penkereeltä, tullut ajoneuvo pysyy kannella. Pelillisen maaston 3D-silloilla kannelle
+pääsy ratkaistaan ajosuunnasta (ks. Pelillinen maasto).
 
 ## Purot ja joet
 
@@ -698,7 +699,11 @@ sillalla), pää on viereisen osuuden kannen korkeudella; muuten lyhyt osuus kal
 loppui ilmaan. Kaiteita ei piirretä sellaisen janan sivulle, jonka jokin kohta (2 m välein) on toisen
 sillan kannella (`ka`: kaiteet janoittain), jottei liittymän keskelle jää kaiteita. Vapaaseen päähän,
 joka on yli metrin maaston yläpuolella (esim. portaisiin tai rakennukseen päättyvä kevyen liikenteen
-silta), tulee päätuki (`tu`; 35 päätä), jottei kansi jää ilmaan.
+silta), tulee päätuki (`tu`; 35 päätä), jottei kansi jää ilmaan. OSM:n silta päättyi paikoin ennen
+avattua kantaa, jolloin sillan pään ja kannen tasolla jatkuvan maan väliin jäi rako, johon bussi
+putosi. Vapaata päätä jatketaan siksi suoraan avatun raon yli, kunnes pelillinen maasto on enintään
+0,5 m kannen pään alapuolella (`bridge_gap`, enintään 15 m, ja vain jos rako on avattua kantaa eikä
+esim. portaat): 68 päätä, yhteensä 280 m. Ajoteiden siltojen yli 3 m:n raot vähenivät 12:sta 2:een.
 Pelillisessä tilassa korkeusmallin tiilet vaihdetaan siltojen kohdalla versioon, jossa
 OSM:n siltojen kohdalla kaikki nostot ovat auki ja niiden ympäriltä on poistettu noin 3,5 metrin
 täyttö (`public/tiles/korkeus/peli`, `build_data.py`; 316 tiiltä, 21 Mt). OSM:n silta on usein
@@ -725,8 +730,16 @@ kaikki nostot avataan, alkuperäistä (`korkeus_peli_alkup` tiedostossa `sillat.
 ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
 kannella kulkeva ajoneuvo pidetään kannen tasolla: 3D-siltojen kohdalla ladattujen siltaruutujen
 kansista (`bridges.js`, `gameDecksAt`; enintään 1 m kannen reunan ulkopuolelle), muualla
-kantakartan siltaviivoista. Raidesillalla juna ja raitiovaunu ovat aina kannella; muuten ajoneuvo on
-kannella, jos se tuli sillalle kannen korkeudelta. Aiemmin juna laskeutui avatun jänteen pohjalle,
+kantakartan siltaviivoista. Raidesillalla juna ja raitiovaunu ovat aina kannella. Muut ajoneuvot
+ovat kannella, jos ne kulkevat kannen suuntaisesti (alle 20°, kannen suunta lähimmästä kohdasta), ja
+alla, jos ne kulkevat kannen poikki (yli 60°); vinossa, esim. liittymässä kääntyessä, ajoneuvo on
+kannella, jos se tuli sillalle kannen korkeudelta. Aiemmin ratkaisi aina edellinen korkeus, jolloin
+sillalle raon yli ajanut tai dataan sillalla ilmestynyt bussi sukelsi koko sillan ali: koko Espoon
+bussiteiden simuloinnissa (2 m välein kumpaankin suuntaan kaistan kohdalla) kannen ja alla olevan
+tien välillä vaihtelevia yli 1,2 m:n hyppyjä oli 111 kohdassa, nyt 5. Ei-siltateitä kulkee 3D-tiesillan
+kannen suuntaisesti sen alla koko Espoossa vain 64 m (2 m:n pätkiä liittymien reunoilla). Jäljellä
+olevista hypyistä useimmat (131 kohtaa) ovat korkeusmallin omia seinämiä, jotka ovat myös
+nostetussa korkeusmallissa (esim. Tapiolantien työmaa). Aiemmin juna laskeutui avatun jänteen pohjalle,
 jos rautatiesillan kohdalla ei ollut kantakartan siltaviivoja. Sillan kannella kulkevat viivat
 (kantakartan reunaviivat sillan alueella yli 2 m alkuperäisen korkeusmallin yläpuolella sekä
 siltaosuuksien kaistaviivat, raiteet ja suojatiet) jätetään maanpinnasta pois, samoin

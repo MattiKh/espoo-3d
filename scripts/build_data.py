@@ -3561,6 +3561,32 @@ def bridge_edge_offsets(line, half, road_edges, z_ends, reach=8.0):
     return pairs
 
 
+# OSM:n silta päättyy paikoin ennen avattua kantta (build_dem: siltaala ja korkeat kannet), jolloin
+# 3D-sillan ja kannen tasolla jatkuvan maan väliin jää rako: kulkuneuvo putoaisi siihen ja jatkaisi
+# sillan ali (transit.js). Vapaata päätä (ei jatku toisena siltaosuutena) jatketaan suoraan, kunnes
+# pelillinen maasto on enintään BRIDGE_GAP_DZ kannen pään alapuolella, jos rako on avattua kantaa
+# (nostettu maasto yli metrin pelillisen yläpuolella) ja umpeutuu BRIDGE_GAP_MAX matkalla.
+BRIDGE_GAP_MAX, BRIDGE_GAP_DZ = 15, 0.5  # m
+
+
+def bridge_gap(pts, at_end, dem):
+    """Sillan pään jatke (m) avatun raon yli tai 0 (pts paikallisina metreinä, ks. BRIDGE_GAP_MAX)."""
+    a, c = (pts[-1], pts[-2]) if at_end else (pts[0], pts[1])
+    ln = math.hypot(a[0] - c[0], a[1] - c[1])
+    if not ln:
+        return 0
+    ux, uy, top, gap = (a[0] - c[0]) / ln, (a[1] - c[1]) / ln, dem(a[0], a[1]), False
+    for s in range(1, BRIDGE_GAP_MAX + 1):
+        x, y = a[0] + ux * s, a[1] + uy * s
+        game = dem(x, y, "peli")
+        if game >= top - BRIDGE_GAP_DZ:
+            return s if gap else 0
+        if dem(x, y) < game + 1.0:
+            return 0  # maa on alempana muutenkin (esim. portaat), ei avattu kansi
+        gap = True
+    return 0
+
+
 def game_bridges(ways, road_edges=lambda x, y, r: ()):
     """Pelillisen maaston 3D-sillat OSM:n siltaosuuksista [(tagit, [(x, y), ...], solmut)]. Kannen
     korkeus näytteittäin (2 m) on siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
@@ -3576,15 +3602,24 @@ def game_bridges(ways, road_edges=lambda x, y, r: ()):
     osa sivuista on toisen sillan kannella, "tu": päätuet [alussa, lopussa] (1 = tuki)}]."""
     import numpy as np
     dem, items = dem_sampler(), []
+    shared = collections.Counter(nid for tags, pts, nodes in ways if len(pts) >= 2 and bridge_kind(tags) for nid in set(nodes))
     for tags, pts, nodes in ways:
         if len(pts) < 2 or not (bk := bridge_kind(tags)):
             continue
+        osm, ext = pts, [0.0, 0.0]
+        for at_end in (False, True):  # vapaa pää avatun raon yli (bridge_gap)
+            if shared[nodes[-1 if at_end else 0]] == 1 and (gap := bridge_gap(pts, at_end, dem)):
+                a, c = (pts[-1], pts[-2]) if at_end else (pts[0], pts[1])
+                ln = math.hypot(a[0] - c[0], a[1] - c[1])
+                p = (a[0] + (a[0] - c[0]) / ln * gap, a[1] + (a[1] - c[1]) / ln * gap)
+                pts = [*pts, p] if at_end else [p, *pts]
+                ext[at_end] = gap
         line = resample_line([(x, y, 0.0) for x, y in pts], 2.0)
         s = [0.0]
         for a, b in zip(line, line[1:]):
             s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
-        so = [0.0]  # OSM:n pisteiden matkat alusta (jaetut solmut)
-        for a, b in zip(pts, pts[1:]):
+        so = [ext[0]]  # OSM:n pisteiden matkat alusta (jaetut solmut)
+        for a, b in zip(osm, osm[1:]):
             so.append(so[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
         # Päiden korkeus tien pinnasta 4 m sillan ulkopuolelta (kantakartan kansi voi olla mitattu ajorataa
         # alempaa, esim. alikulun kohdalla).

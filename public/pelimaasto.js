@@ -483,14 +483,14 @@ export async function createGameTerrain(map, { base, version }) {
       for (let dy = -1; dy <= 1; dy++) {
         for (const d of chunks.get(`${cx + dx}/${cy + dy}`)?.decks ?? []) {
           if (x < d.box[0] || y < d.box[1] || x > d.box[2] || y > d.box[3]) continue;
-          let best = Infinity, z = null;
+          let best = Infinity, z = null, u = null;
           for (let i = 1; i < d.pts.length; i++) {
             const [ax, ay, az] = d.pts[i - 1], [bx, by, bz] = d.pts[i], ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
             const t = l2 ? Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / l2)) : 0;
             const dist = Math.hypot(ax + ex * t - x, ay + ey * t - y);
-            if (dist < best) { best = dist; z = az + (bz - az) * t; }
+            if (dist < best && l2) { best = dist; z = az + (bz - az) * t; u = [ex / Math.sqrt(l2), ey / Math.sqrt(l2)]; }
           }
-          if (best <= d.w + DECK_REACH) out.push({ z, k: d.k });
+          if (best <= d.w + DECK_REACH) out.push({ z, k: d.k, u });
         }
       }
     }

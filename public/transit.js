@@ -2028,9 +2028,13 @@ const pts = new Float64Array(64), ptsZ = new Float64Array(32);
 // Ajoneuvon korkeus pisteessä absoluuttisena, maaston korostus mukana. 3D-siltojen (pelimaasto.js)
 // kohdalla korkeusmallin jänne on auki, joten kannen korkeus tulee sillasta; muiden siltojen kohdalla
 // korkeusmalli on nostettu kannen tasolle ja kannen korkeus tulee kantakartan siltaviivoista
-// (bridges.js). Raidesillalla juna tai raitiovaunu on aina kannella. Muuten ajoneuvo pysyy kannella,
+// (bridges.js). Raidesillalla juna tai raitiovaunu on aina kannella. 3D-sillan kannen suuntaisesti
+// (DECK_ALONG) kulkeva ajoneuvo on kannella ja sen poikki (DECK_ACROSS) kulkeva alla olevalla tiellä,
+// sillä edellinen korkeus voi olla väärä (ajoneuvo ilmestyy dataan sillalla tai ajaa sillalle raon
+// yli). Vinossa (esim. liittymässä kääntyessä) ja muiden siltojen kohdalla ajoneuvo pysyy kannella,
 // jos se tuli sillalle kannen korkeudelta (esimerkiksi penkereeltä), ja sillan ali kulkeva ajoneuvo
 // pysyy alla olevan tien tasolla. prev on saman kohdan edellinen korkeus.
+const DECK_ALONG = Math.cos(20 * D2R), DECK_ACROSS = Math.cos(60 * D2R);
 function groundAt(v, x, y, prev, centerElev, exag) {
   const lon = lonOf(x), lat = latOf(y);
   const dem = (mapRef.queryTerrainElevation([lon, lat]) ?? 0) + centerElev;
@@ -2042,11 +2046,15 @@ function groundAt(v, x, y, prev, centerElev, exag) {
   if (rails?.length) return Math.max(dem, nearest(rails, prev ?? dem) * exag);
   let approach = null;
   const from = () => (approach ??= prev ?? approachElevation(v, centerElev));
-  const deck = decks.length ? nearest(decks, from()) : deckHeightAt(lon, lat);
-  if (deck == null) return dem;
-  const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag, top = deck * exag;
+  const h = v.heading ?? v.dir, hl = h ? Math.hypot(h[0], h[1]) : 0;
+  const along = (d) => (hl ? Math.abs(d.u[0] * h[0] + d.u[1] * h[1]) / hl : 0.5); // suunta tuntematon: vino
+  const on = decks.filter((d) => along(d) >= DECK_ALONG), skew = decks.filter((d) => along(d) > DECK_ACROSS);
+  const deck = on.length ? nearest(on, from()) : skew.length ? nearest(skew, from()) : decks.length ? null : deckHeightAt(lon, lat);
+  const rawM = rawElevationAt(lon, lat), raw = rawM == null ? dem : rawM * exag;
+  if (deck == null) return decks.length ? raw : dem; // 3D-sillan poikki: sen alla
+  const top = deck * exag;
   if (top < raw + 0.5) return dem; // silta ei ole maanpinnan yläpuolella
-  if (Math.abs(from() - top) >= Math.abs(from() - raw)) return raw; // sillan alla
+  if (!on.length && Math.abs(from() - top) >= Math.abs(from() - raw)) return raw; // sillan alla
   // Kannella: jänne on 3D-silta (pelimaasto.js), ja maasto on sen alla.
   return Math.max(dem, top);
 }
