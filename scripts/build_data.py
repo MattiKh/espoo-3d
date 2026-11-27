@@ -3603,7 +3603,8 @@ def game_bridges(ways, road_edges=lambda x, y, r: ()):
     siirrot oikealle (m), jos tiellä on viivoja, "r": ajoradan reunaviivat [[siirto alussa, siirto
     lopussa], ...]: maanpinnan reunaviivojen (road_edges: segment_grid, kantakartta) sivusijainnit sillan päiden
     ulkopuolelta, jolloin kannen reunaviivat jatkavat tien reunaviivoja, "ka": kaiteet janoittain, jos
-    osa sivuista on toisen sillan kannella, "tu": päätuet [alussa, lopussa] (1 = tuki)}]."""
+    osa sivuista on toisen sillan kannella, "tu": päätuet [alussa, lopussa] (1 = tuki), "ra": "ratikka", jos
+    raidesilta on raitiotien}]."""
     import numpy as np
     dem, items = dem_sampler(), []
     shared = collections.Counter(nid for tags, pts, nodes in ways if len(pts) >= 2 and bridge_kind(tags) for nid in set(nodes))
@@ -3668,6 +3669,8 @@ def game_bridges(ways, road_edges=lambda x, y, r: ()):
             bridge["v"] = [round(d, 2) for d, _ in lanes]  # kaistaviivat kannelle (siirto oikealle, m)
         if kind == "tie" and (edges := bridge_edge_offsets(line, half, road_edges, (z[0], z[-1]))):
             bridge["r"] = edges
+        if kind == "raide" and RAIL_KINDS.get(tags.get("railway")) == "ratikka":
+            bridge["ra"] = "ratikka"  # raitiotie: kannen raiteen sepeli tummempi kuten maassa (pelimaasto.js)
         # Päätuki vapaaseen päähän (ei jatku toisena siltaosuutena), joka on yli metrin pelillisen maaston
         # yläpuolella 3 m pään ulkopuolelta, esim. portaisiin tai rakennukseen päättyvä kevyen liikenteen silta.
         supports = []
