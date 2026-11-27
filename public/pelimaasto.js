@@ -73,6 +73,52 @@ const EDGE_HALF = 0.125, EDGE = [0.88, 0.86, 0.8]; // m: ajoradan reunaviiva kan
 
 let bridgeMaterial = null;
 
+// Maastoeditorilla (editori.py) tehdyt siltakorjaukset (public/data/siltakorjaukset.json): siltaosan
+// voi poistaa, sen päitä voi jatkaa tai lyhentää ja päätuet ottaa pois tai lisätä. Osa tunnistetaan
+// lajista ja alkuperäisten päiden sijainnista, joten tunnus säilyy, kun sillat tehdään uudelleen.
+export function bridgeId({ p, k }) {
+  const n = p.length;
+  return `${k}:${p[0].toFixed(5)},${p[1].toFixed(5)}:${p[n - 3].toFixed(5)},${p[n - 2].toFixed(5)}`;
+}
+
+// Siltaosa korjauksen jälkeen, tai null, jos osa on poistettu. alku/loppu (m): positiivinen jatkaa
+// pään suuntaan samalla korkeudella, negatiivinen lyhentää (osaa jää vähintään metri).
+export function editedBridge(s, e) {
+  if (!e) return s;
+  if (e.poista) return null;
+  if (!e.alku && !e.loppu && !e.tu) return s;
+  const lon0 = s.p[0], lat0 = s.p[1], unit = EARTH_CIRC * Math.cos(lat0 * D2R);
+  let pts = [];
+  for (let i = 0; i < s.p.length; i += 3) pts.push([(mercX(s.p[i]) - mercX(lon0)) * unit, (mercY(s.p[i + 1]) - mercY(lat0)) * unit, s.p[i + 2]]);
+  let ka = s.ka ? [...s.ka] : null;
+  const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const fromStart = (d) => {
+    if (!d || pts.length < 2) return;
+    if (d > 0) {
+      const [a, b] = pts, ln = dist(a, b) || 1;
+      pts = [[a[0] + ((a[0] - b[0]) / ln) * d, a[1] + ((a[1] - b[1]) / ln) * d, a[2]], ...pts];
+      if (ka) ka = [ka[0], ...ka];
+      return;
+    }
+    let left = -d;
+    while (pts.length > 2 && dist(pts[0], pts[1]) <= left) {
+      left -= dist(pts[0], pts[1]);
+      pts = pts.slice(1);
+      if (ka) ka = ka.slice(1);
+    }
+    const seg = dist(pts[0], pts[1]), t = Math.max(0, Math.min(left, seg - 1)) / (seg || 1);
+    pts[0] = pts[0].map((v, j) => v + (pts[1][j] - v) * t);
+  };
+  fromStart(e.alku);
+  pts.reverse();
+  ka?.reverse();
+  fromStart(e.loppu);
+  pts.reverse();
+  ka?.reverse();
+  const p = pts.flatMap(([x, y, z]) => [lonOfX(mercX(lon0) + x / unit), latOfY(mercY(lat0) + y / unit), z]);
+  return { ...s, p, ...(ka ? { ka: ka.join("") } : {}), ...(e.tu ? { tu: e.tu } : {}) };
+}
+
 // Siltojen malli ruudulle (full: kaiteet, ajoradan viivat ja pilarit; muuten pelkkä kansi).
 function bridgeMesh(list, ref, exag, full) {
   const pos = [], col = [];
@@ -335,6 +381,16 @@ export async function createGameTerrain(map, { base, version }) {
   // Siltaruudut: "x/y" → { x, y, ref, list (ladattu data), want (full | deck | null), full, deck (mallit) }.
   let bridgeZoom = 14, bridgeCheck = 0;
   const bridgeIndex = [], chunks = new Map();
+  let bridgeEdits = new Map(); // siltakorjaukset tunnuksittain (editedBridge)
+  const editsReady = fetch(`${base}data/siltakorjaukset.json`, { cache: "no-cache" }).then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      bridgeEdits = new Map((d?.korjaukset ?? []).map((e) => [e.id, e]));
+    })
+    .catch(() => {}); // ei korjauksia
+  const applyEdits = (c) => {
+    c.list = c.raw.map((s) => editedBridge(s, bridgeEdits.get(bridgeId(s)))).filter(Boolean);
+    c.decks = c.list.map(deckOf);
+  };
   fetch(`${base}data/pelimaasto_sillat.json?v=${version}`).then((r) => (r.ok ? r.json() : { ruudut: [] }))
     .then(({ taso = 14, ruudut }) => {
       bridgeZoom = taso;
@@ -451,9 +507,10 @@ export async function createGameTerrain(map, { base, version }) {
         chunks.set(key, c);
         const chunk = c;
         fetch(`${base}tiles/pelisillat/${bridgeZoom}/${x}/${y}.json?v=${version}`).then((r) => (r.ok ? r.json() : { sillat: [] }))
-          .then(({ sillat }) => {
-            chunk.list = sillat;
-            chunk.decks = sillat.map(deckOf);
+          .then(async ({ sillat }) => {
+            await editsReady;
+            chunk.raw = sillat;
+            applyEdits(chunk);
             map.triggerRepaint();
           })
           .catch((err) => console.warn("Siltaruutua ei saatu ladattua", key, err));
@@ -580,5 +637,28 @@ export async function createGameTerrain(map, { base, version }) {
     const { id, ...worker } = await ask({ type: "stats" });
     return { siltaruutuja: chunks.size, luettelossa: bridgeIndex.length, taysia: full, siltakolmioita: triangles, ...worker };
   }
-  return { drawable: { object: root, draw, animating }, setVisible, setTrees, stats };
+  // Maastoeditoria varten: ladatut siltaosat ({ id, raw: alkuperäinen, piece: korjattu tai null, edit })
+  // ja korjausten vaihto (mallit tehdään uudelleen seuraavilla piirtokerroilla).
+  function bridgePieces() {
+    const out = [];
+    for (const c of chunks.values()) {
+      for (const s of c.raw ?? []) {
+        const id = bridgeId(s), edit = bridgeEdits.get(id);
+        out.push({ id, raw: s, piece: editedBridge(s, edit), edit });
+      }
+    }
+    return out;
+  }
+  function setBridgeEdits(list) {
+    bridgeEdits = new Map(list.map((e) => [e.id, e]));
+    for (const c of chunks.values()) {
+      if (!c.raw) continue;
+      applyEdits(c);
+      dropMesh(c, "full");
+      dropMesh(c, "deck");
+    }
+    map.triggerRepaint();
+  }
+
+  return { drawable: { object: root, draw, animating }, setVisible, setTrees, stats, bridgePieces, setBridgeEdits };
 }

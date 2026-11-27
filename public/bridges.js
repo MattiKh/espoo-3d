@@ -54,13 +54,32 @@ function buildEdgeGrid(viivat) {
   return grid;
 }
 
+// Maastoeditorilla (editori.py) käsin korjatut tiilet (scripts/maastokorjaus.py). Ne on leivottu
+// muiden tiilten päälle, joten ne tulevat ennen niitä. Editori päivittää hakemiston setTerrainFixes-funktiolla.
+const fixed = new Set();
+let fixVersion = 0;
+const fixesReady = fetch("data/maastokorjaukset.json", { cache: "no-cache" })
+  .then((r) => (r.ok ? r.json() : null))
+  .then((d) => d && setTerrainFixes(d))
+  .catch(() => {}); // ei korjauksia
+
+export function setTerrainFixes({ versio = 0, tiilet = {} }) {
+  fixed.clear();
+  for (const [z, xy] of Object.entries(tiilet)) {
+    for (let i = 0; i < xy.length; i += 2) fixed.add(`${z}/${xy[i]}/${xy[i + 1]}`);
+  }
+  fixVersion = versio;
+}
+
 // Valmiiksi muokatun korkeusmallin tiilen osoite, tai null, jos tiilessä ei ole siltaa (silloin
 // käytetään alkuperäistä). version: aineistoversio, jotta selain ei käytä vanhoja tiiliä.
 // Sillat ovat 3D-malleja (pelimaasto.js), joten niiden kohdalla korkeat jänteet ovat auki
 // (tiles/korkeus/peli); muiden siltojen kannet on nostettu (tiles/korkeus).
 export async function liftedTileUrl(z, x, y, v) {
   await ready;
+  await fixesReady;
   const key = `${z}/${x}/${y}`;
+  if (fixed.has(key)) return `tiles/korkeuskorjaus/${key}.webp?v=${fixVersion}`;
   if (gameTiles.has(key)) return `tiles/korkeus/peli/${key}.webp?v=${v}`;
   if (gameOriginal.has(key)) return null;
   if (!lifted.has(key)) return null;

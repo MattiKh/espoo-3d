@@ -812,9 +812,78 @@ viivoja ja tarkkoja luokkaruutuja ei ladata kerralla. Uusilla alueilla tarkka ma
 kuvaa kohden. Kustannus tulee viivoista ja nimistä (piilotettuina 17,2 ms), kuten Otaniemessä ennenkin;
 siltoja on lähellä noin 10 000–20 000 kolmiota.
 
+## Maastoeditori
+
+Korkeusmallissa on paikoin kuoppia, kohoumia ja piikkejä (esim. siltojen päissä tai vanhan
+keilauksen kohdalla). Niitä korjataan käsin maastoeditorilla, joka toimii vain omalla koneella:
+
+```bash
+python3 editori.py
+```
+
+Avaa sitten http://localhost:8766. Editori tarvitsee numpyn ja Pillowin (kuten `build_data.py`).
+Jos niitä ei ole asennettu, ne voi asentaa repon omaan ympäristöön, jota editori käyttää itse:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install numpy pillow
+```
+
+Editori näyttää saman kartan kuin `server.py`, ja sen oikeassa reunassa on editorin paneeli
+(`editori/`). Palvelin lisää paneelin sivulle vain paikallisesti, joten Netlifyyn se ei päädy.
+
+- **Työkalut** (näppäimet 1–6): Liiku (kartta toimii tavalliseen tapaan), Nosta ja Laske
+  (määrän verran), Tasoita (vedon alkukohdan korkeudelle tai kiinteään tasoon; Alt+klikkaus
+  poimii tason kartalta), Pehmennä (piikit ja kuopat ympäristön keskiarvoon, rinne säilyy) ja
+  Palauta (alkuperäinen maanpinta siveltimen alueelta).
+- **Sivellin**: säde (1–100 m, näppäimet `[` ja `]`) ja kovuus (keskeltä täysi vaikutus kovuus × säde
+  -etäisyydelle, sitten pehmeä reuna). Klikkaus vaikuttaa ympyrän alueelle, veto nauhana.
+- Kun työkalu on valittu, hiiren vasen painike maalaa eikä siirrä karttaa. Välilyönti pohjassa
+  karttaa voi siirtää, oikea painike kääntää ja kallistaa, ja rulla zoomaa. Ctrl/Cmd+Z kumoaa,
+  Ctrl/Cmd+Shift+Z tekee uudelleen.
+- **Silta** (näppäin 7): klikkaus valitsee 3D-sillan osan (OSM:n siltaosuus; leveä silta on usein
+  useita rinnakkaisia osia, esim. ajoradat ja kevyen liikenteen väylä). Valittu osa korostuu kannen
+  korkeudella, ja sen päät on merkitty (A = alku, L = loppu). Osan voi poistaa (myös Delete), sen päitä
+  voi jatkaa samalla korkeudella tai lyhentää metreittäin, ja päätuet voi ottaa pois tai lisätä.
+  Korjaukset tallentuvat tiedostoon `public/data/siltakorjaukset.json`, ja kartta (`pelimaasto.js`)
+  soveltaa ne siltaruutuja ladatessaan; osa tunnistetaan lajista ja alkuperäisten päiden sijainnista,
+  joten korjaukset säilyvät, kun `build_data.py` tekee sillat uudelleen. Poistetun sillan kohdalla
+  korkeusmallissa voi olla aukko (jänne on avattu 3D-siltaa varten), jonka voi täyttää Nosta- tai
+  Tasoita-työkalulla.
+- Rinnevarjostusta voi korostaa, jotta pienetkin muodot erottuvat, ja korjausten rajat voi näyttää
+  kartalla. Korjauslistasta korjauksen voi näyttää kartalla tai poistaa.
+  Paneelissa näkyy osoittimen kohdan maanpinnan korkeus. 3D-rakennukset ja -puut kannattaa ottaa
+  kartan paneelista pois maastoa korjattaessa.
+
+Jokainen veto tallentuu heti tiedostoon `korjaukset/maasto.json` (yksi korjaus riviä kohden:
+työkalu, säde, kovuus, määrä tai taso ja vedon pisteet). Palvelin leipoo korjaukset saman tien
+korkeusmallin tiiliin (`scripts/maastokorjaus.py`), ja kartta hakee muuttuneet tiilet uudelleen.
+Vedot lasketaan tarkimmille tiilille (taso 15, noin 1,2 m pikseli) sen tiilen päälle, jonka kartta
+muuten hakisi (siltojen kohdalla `build_data.py`:n nostama tai pelillinen tiili, muualla
+Mapterhornin alkuperäinen). Karkeampien tasojen (14 ja 13) korjaus on tarkimpien korjausten
+keskiarvo, joten pinta on sama kaikilla tasoilla. Pehmennys lukee myös naapuritiiliä, jottei
+tiilten saumaan jää porrasta. Korjatut tiilet ovat kansiossa `public/tiles/korkeuskorjaus`
+(häviötön WebP), ja `public/data/maastokorjaukset.json` kertoo, mitkä tiilet on korjattu.
+Selain (`bridges.js`) hakee niiden kohdalla korjatun tiilen ennen muita.
+
+**Julkaisu.** Paneelin Vie GitHubiin -nappi tekee commitin vain korjausten tiedostoista
+(`korjaukset/`, `public/data/maastokorjaukset.json`, `public/tiles/korkeuskorjaus`,
+`public/data/siltakorjaukset.json`) ja vie sen
+nykyiseen haaraan. Netlify julkaisee ne, kun ne ovat `main`-haarassa. Saman voi tehdä myös gitillä.
+Jos GitHubissa on uudempia muutoksia (esim. toiselta koneelta), aja ensin `git pull`.
+
+**Aineistojen päivitys.** Korjaukset ovat erillään `build_data.py`:n tiilistä, joten ne säilyvät:
+`build_data.py` leipoo ne uudelleen siltojen jälkeen uusien pohjatiilten päälle. Kaikki korjaukset
+voi leipoa uudelleen myös erikseen:
+
+```bash
+python3 scripts/maastokorjaus.py
+```
+
 ## Rakenne
 
 - `server.py`: paikallinen palvelin, joka jakaa `public/`-kansion ja välittää adsb.fi:n pyynnöt
+- `editori.py` ja `editori/`: maastoeditori (vain paikallisesti): palvelin, paneeli ja sivellin
+- `scripts/maastokorjaus.py`: maastoeditorin korjausten leipominen korkeusmallin tiiliin
 - `netlify.toml`: julkaisuasetukset
 - `scripts/build_data.py`: aineistojen lataus ja muunnos
 - `public/layers.js`: tasojen, värien ja selitteiden määrittelyt
@@ -823,7 +892,7 @@ siltoja on lähellä noin 10 000–20 000 kolmiota.
 - `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus, kallistus ja kyytipalkki
 - `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli (käytössä vain kameran ollessa maan alla)
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: maaston pinta (pelillinen maasto): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
-- `public/bridges.js`: siltojen kohdalla valmiiksi nostetut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
+- `public/bridges.js`: siltojen kohdalla valmiiksi nostetut ja maastoeditorilla korjatut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
 - `public/streams.js`: purot ja joet, virtaaman haku ja arviointi sekä virtausanimaatio
 - `public/roofs.js`: kaltevat katot 3D-mallista (tiilien lataus, kolmioverkot, korkeus maastosta)
 - `public/rails.js`: raideverkko, raiteelle kohdistus, raidetta pitkin kulku ja asemat

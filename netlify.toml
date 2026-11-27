@@ -24,6 +24,12 @@
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
 
+# Maastoeditorin korjaamat korkeusmallin tiilet haetaan korjausten version kanssa (?v=, maastokorjaukset.json).
+[[headers]]
+  for = "/tiles/korkeuskorjaus/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
 [[headers]]
   for = "/tiles/pelisillat/*"
   [headers.values]
