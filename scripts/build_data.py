@@ -1509,12 +1509,20 @@ def build_bridges():
     tiet, tiealat, reunat = road_cuts(viivat, edges, ways)
     log(f"  {len(viivat)} reunaviivaa, {len(kannet)} kantta, {len(kaistat)} ajoväylän kaistaletta, {len(raiteet)} raidetta, "
         f"{len(tiet)} korjattavaa tienpintaa")
-    korkeus, korkeus_peli, korkeus_peli_alkup = build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, bridge_footprints())
+    # Pelillisen maaston sillat: OSM:n siltojen kohdalla olevat kannet ja siltojen jatkeet niiden matkalle.
+    osm = landcover_osm()[0]
+    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat, bridge_footprints(osm))
+    mark_bridge_pieces(decks)
+    jatkeet = bridge_extensions(decks, osm)
+    osm = split_bridge_ways(osm, jatkeet)
+    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat, bridge_footprints(osm), road_footprints(osm, decks, edges))
+    mark_bridge_pieces(decks)
+    korkeus, korkeus_peli, korkeus_peli_alkup = build_dem(decks, reunat)
     path = os.path.join(PUBLIC_DATA, "sillat.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"lahde": "Espoon kantakartta (kanta:Silta, Liikennevayla, Kevyenliikenteenvayla, Raide), tiet © OpenStreetMap",
-                   "viivat": viivat, "korkeus": korkeus, "korkeus_peli": korkeus_peli, "korkeus_peli_alkup": korkeus_peli_alkup},
-                  fh, separators=(",", ":"))
+                   "viivat": viivat, "korkeus": korkeus, "korkeus_peli": korkeus_peli, "korkeus_peli_alkup": korkeus_peli_alkup,
+                   "jatkeet": jatkeet}, fh, separators=(",", ":"))
     log(f"  → sillat.json: {os.path.getsize(path) / 1e6:.2f} Mt")
 
 
@@ -1803,6 +1811,18 @@ PIECE_QUADS = 40  # pitkät kannet (raiteet) paloiksi, jotta tiileen osuu vain l
 # ulkopuolella maasto laskee penkereen luiskana (RAIL_SLOPE m/m) maanpintaan. Luiska täyttää vain
 # kuoppia (enintään PIT_MAX m) eikä peitä muita kansia (korkeusmalli voi olla ajalta ennen raidetta).
 RAIL_CORE, RAIL_SLOPE, SLOPE_MIN, PIT_MAX = 1.6, 0.3, 0.1, 4.5
+# Pelillisessä maastossa sillat ovat 3D-malleja OSM:n siltaosuuksista, mutta OSM:n silta on usein
+# kantakartan kantta lyhyempi tai kapeampi (esim. Turvesuontie Kehä I:n yllä: kansi jatkuu rampin yli
+# noin 20 m). Sillan kohdalla oleva kansi avataan siksi koko matkalta, missä se on vähintään OPEN_MIN
+# maanpinnan yläpuolella (mark_bridge_pieces), ja OSM:n siltaa jatketaan tien suuntaan avatun kannen
+# matkalle (bridge_extensions, enintään BRIDGE_EXT_MAX; kansi enintään BRIDGE_EXT_DZ edellisestä).
+OPEN_MIN = 2.0  # m
+BRIDGE_EXT_MAX, BRIDGE_EXT_STEP, BRIDGE_EXT_DZ = 60.0, 2.0, 1.5  # m
+# Korkeusmallista on poistettu sillat ja niiden alue täytetty alemmasta maasta, joten kannen pään
+# ulkopuolelle voi jäädä kuoppa. Kannen vapaan pään ulkopuolella maa nostetaan END_FILL metrin matkalle
+# kannen pään korkeudesta END_SLOPE kaltevuudella laskevaksi penkereeksi, jos maa on END_FILL + 2 m
+# päässä enintään END_DROP kannen pään alapuolella (tie jatkuu kannen tasolla, ei esim. portaita alas).
+END_FILL, END_SLOPE, END_DROP = 12.0, 0.25, 1.5
 # Korkeusmalli on paikoin vanhempi kuin tie: esim. Kehä I:n Laajalahden kohta on parannettu
 # keilauksen jälkeen, ja tie kulkee nyt metrejä korkeusmallia alempana. Siellä, missä ajoväylien
 # mitatut reunat ovat selvästi korkeusmallin alapuolella, tienpinta lasketaan reunoista (road_cuts).
@@ -1936,9 +1956,10 @@ def road_cuts(viivat, edges, ways):
     return edge_strips(edges, 0, osm, zone, lambda run: True, ROAD_DZ), areas, anchors
 
 
-def dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat=()):
+def dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat=(), tiealueet=()):
     """Kannet ja kaistaleet korkeusmallin nostoa varten: reunat A ja B Web Mercator -yksiköissä
-    samaan määrään pisteitä jaettuina (vastakkaiset osat) ja pitkät paloiksi."""
+    samaan määrään pisteitä jaettuina (vastakkaiset osat) ja pitkät paloiksi (ends: palan alku ja
+    loppu ovat kannen päät)."""
     import numpy as np
 
     def resample(P, n):
@@ -1948,7 +1969,7 @@ def dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat=()):
 
     out = []
     for kind, decks in (("kansi", kannet), ("kaista", kaistat), ("raide", raiteet), ("tie", tiet), ("tieala", tiealat),
-                        ("siltaala", siltaalat)):
+                        ("siltaala", siltaalat), ("tiealue", tiealueet)):
         for a, b in decks:
             A = np.array([(*merc_unit(a[i], a[i + 1]), a[i + 2]) for i in range(0, len(a), 3)])
             B = np.array([(*merc_unit(b[i], b[i + 1]), b[i + 2]) for i in range(0, len(b), 3)])
@@ -1959,7 +1980,7 @@ def dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat=()):
             for s in range(0, n - 1, PIECE_QUADS):
                 e = min(n - 1, s + PIECE_QUADS)
                 ring = np.concatenate([A[s:e + 1, :2], B[e::-1, :2] if s == 0 else B[e:s - 1:-1, :2]])
-                out.append({"A": A[s:e + 1], "B": B[s:e + 1], "ring": ring, "kind": kind,
+                out.append({"A": A[s:e + 1], "B": B[s:e + 1], "ring": ring, "kind": kind, "ends": (s == 0, e == n - 1),
                             "bbox": (*ring.min(axis=0), *ring.max(axis=0))})
     return out
 
@@ -1971,7 +1992,9 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
     LEVEL_GAP ylempänä toinen taso (silta toisen yllä), pinta on ylempi kuten ilmakuvassa. Ensin
     korjataan tienpinnat (road_cuts; anchors: mitatut reunapisteet (I, J, z) tiilen pikseleinä), joten
     kannet nostetaan korjatun maanpinnan yläpuolelle.
-    Palauttaa uudet korkeudet, maskin nostetuista pikseleistä ja korjatun maanpinnan."""
+    Palauttaa uudet korkeudet, maskin nostetuista pikseleistä, korjatun maanpinnan sekä maskit OSM:n
+    siltojen alueesta (siltaala) ja niiden kohdalla olevista kansista (mark_bridge_pieces) muiden
+    teiden ja raiteiden ulkopuolelta (tiealue)."""
     import numpy as np
     H, W = elev.shape
     n = 2 ** z
@@ -2027,10 +2050,10 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
         I, J, Z = anchors
         m = np.isnan(road[J, I])
         road[J[m], I[m]] = Z[m]
-    area, bridge_area = np.zeros((H, W), bool), np.zeros((H, W), bool)
+    area, bridge_area, bridge_deck, road_area = (np.zeros((H, W), bool) for _ in range(4))
     for d in decks:
-        if d["kind"] in ("tieala", "siltaala") and (r := raster(d)):
-            (area if d["kind"] == "tieala" else bridge_area)[r[1], r[0]] = True
+        if d["kind"] in ("tieala", "siltaala", "tiealue") and (r := raster(d)):
+            {"tieala": area, "siltaala": bridge_area, "tiealue": road_area}[d["kind"]][r[1], r[0]] = True
     px = unit * size / W  # m pikseliä kohden
 
     def spread(zr, steps, where):  # arvot naapuripikseleihin (keskiarvo), askel kerrallaan
@@ -2056,9 +2079,11 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
             ground[m] = np.clip(ground[m], zr[m] - k * px * CUT_SLOPE, zr[m] + k * px * CUT_SLOPE)
 
     for d in decks:
-        if d["kind"] in ("tie", "tieala", "siltaala") or not (r := raster(d)):
+        if d["kind"] in ("tie", "tieala", "siltaala", "tiealue") or not (r := raster(d)):
             continue
         I, J, zd, da, db = r
+        if d.get("silta"):
+            bridge_deck[J, I] = True
         if d["kind"] == "kaista":  # korjatulla tienpinnalla kaistale on turha (ja reunapalkin korkuinen)
             m = np.isnan(road[J, I])
             I, J, zd, da, db = I[m], J[m], zd[m], da[m], db[m]
@@ -2083,6 +2108,28 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
     with np.errstate(invalid="ignore"):
         fill = np.isnan(surf) & (slope - ground <= PIT_MAX)  # luiska vain sinne, missä ei ole muuta pintaa
     surf[fill] = slope[fill]
+    # Kuoppa kannen vapaan pään ulkopuolella penkereeksi (END_FILL), jos maa ei ole muun pinnan alla.
+    for d in decks:
+        if d["kind"] != "kansi" or len(d["A"]) < 2:
+            continue
+        for end, k, k2 in ((d["ends"][0], 0, 1), (d["ends"][1], -1, -2)):
+            A0, B0 = d["A"][k], d["B"][k]
+            ux, uy = (A0[:2] - d["A"][k2][:2] + B0[:2] - d["B"][k2][:2]) / 2
+            ln = math.hypot(ux, uy) * unit  # ulospäin, metri Web Mercator -yksiköinä
+            if not end or not ln:
+                continue
+            ux, uy = ux / ln, uy / ln
+            fi = math.floor(((A0[0] + B0[0]) / 2 + ux * (END_FILL + 2) - tx0) / size * W)
+            fj = math.floor(((A0[1] + B0[1]) / 2 + uy * (END_FILL + 2) - ty0) / size * H)
+            if not (0 <= fi < W and 0 <= fj < H) or ground[fj, fi] < min(A0[2], B0[2]) - END_DROP:
+                continue
+            beyond = lambda P: np.array([P[0] + ux * END_FILL, P[1] + uy * END_FILL, P[2] - END_FILL * END_SLOPE])
+            ring = np.array([A0[:2], beyond(A0)[:2], beyond(B0)[:2], B0[:2]])
+            q = {"A": np.array([A0, beyond(A0)]), "B": np.array([B0, beyond(B0)]), "ring": ring, "bbox": (*ring.min(axis=0), *ring.max(axis=0))}
+            if r := raster(q):
+                I, J, zf = r[:3]
+                m = np.isnan(surf[J, I]) & (zf > ground[J, I] + 0.3)
+                ground[J[m], I[m]] = zf[m]
     # Kaistaleiden pikselit siistitään avauksella (kuroutus ja laajennus 3 × 3 -ikkunassa): tukimuurin
     # tai luiskan reunalle osuvat 1–2 pikselin kaistat jäävät pois, mutta kansi säilyy. Tiilen
     # ulkopuoli lasketaan pinnaksi, jottei tiilten rajoille jää uria.
@@ -2098,16 +2145,17 @@ def dem_patch(elev, z, x, y, decks, anchors=()):
             near |= core[dj:dj + H, di:di + W]
     lifted = ~np.isnan(surf) & (~strip | near)
     top = np.where(np.isnan(upper), surf, upper)
-    return np.where(lifted, top, ground), lifted, ground, bridge_area
+    # Muiden teiden ja raiteiden kohdalla (tiealue) siltojen kansia ei avata, jottei tie katkea aukkoon.
+    return np.where(lifted, top, ground), lifted, ground, bridge_area, bridge_deck & ~road_area
 
 
-def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
+def build_dem(decks, reunat):
     """Korkeusmallin tiilet (DEM_ZOOMS), joissa tienpinnat on korjattu ja kannet ja kaistaleet
     nostettu maanpinnan yläpuolelle (dem_patch), kansioon public/tiles/korkeus/z/x/y.webp.
     Tarkimmista tiilistä tallennetaan nostettujen pikselien maanpinta (korkeus/maa/x/y.webp; muualla
     musta), jotta selain voi pitää sillan ali kulkevat ajoneuvot ja uomat alla olevalla pinnalla.
     Pelillistä maastoa varten tallennetaan lisäksi versio, jossa nostot ovat auki OSM:n siltojen
-    kohdalla (siltaalat; sillat ovat 3D-malleja) (korkeus/peli/z/x/y.webp), mutta vain niistä tiilistä,
+    kohdalla (siltaala ja mark_bridge_pieces; sillat ovat 3D-malleja) (korkeus/peli/z/x/y.webp), mutta vain niistä tiilistä,
     joissa jotain avataan; muualla pelillinen tiili on sama kuin tavallinen. Palauttaa tiilten luettelot
     {z: [x, y, ...]}: muutetut, pelilliset ja ne, joissa pelillinen on sama kuin alkuperäinen (kaikki
     nostot avattu)."""
@@ -2118,7 +2166,6 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
         v = h + 32768
         return np.stack([v // 256, np.floor(v) % 256, np.floor((v - np.floor(v)) * 256)], axis=-1).astype(np.uint8)
 
-    decks = dem_decks(kannet, kaistat, raiteet, tiet, tiealat, siltaalat)
     pins = np.array(reunat, float).reshape(-1, 3)  # mitatut reunapisteet Web Mercator -yksiköissä
     pins[:, 0], pins[:, 1] = (pins[:, 0] + 180) / 360, (1 - np.log(np.tan(np.pi / 4 + np.radians(pins[:, 1]) / 2)) / np.pi) / 2
     out = os.path.join(TILES, "korkeus")
@@ -2143,20 +2190,20 @@ def build_dem(kannet, kaistat, raiteet, tiet, tiealat, reunat, siltaalat=()):
             p = pins[pin_tiles.get((tx, ty), [])]
             H, W = elev.shape
             anchors = ((p[:, 0] * n - tx) * W).astype(int), ((p[:, 1] * n - ty) * H).astype(int), p[:, 2]
-            new, lifted, ground, bridge_area = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
-            opened = lifted & bridge_area
+            new, lifted, ground, bridge_area, bridge_deck = dem_patch(elev, z, tx, ty, hits, anchors if len(p) else ())
+            opened = lifted & (bridge_area | (bridge_deck & (new - ground >= OPEN_MIN)))
             if opened.any():
-                # Pelillisen maaston korkeusmalli: siltojen kohdalla (siltaalat: OSM:n sillat, jotka ovat
-                # 3D-malleja) kaikki nostot auki, muualla täytettyinä kuten ennen. Avattua kohtaa
-                # laajennetaan sillan alueella noin 3,5 m (z15: 3 pikseliä), jottei sen reunaan jää
-                # rosoista täytön seinämää.
+                # Pelillisen maaston korkeusmalli: siltojen kohdalla (OSM:n sillat, jotka ovat 3D-malleja, ja
+                # niiden kohdalla olevat korkeat kannet) nostot auki, muualla täytettyinä kuten ennen.
+                # Avattua kohtaa laajennetaan sillan alueella noin 3,5 m (z15: 3 pikseliä), jottei sen
+                # reunaan jää rosoista täytön seinämää.
                 for _ in range({15: 3, 14: 2}.get(z, 1)):
                     grown = opened.copy()
                     grown[1:] |= opened[:-1]
                     grown[:-1] |= opened[1:]
                     grown[:, 1:] |= opened[:, :-1]
                     grown[:, :-1] |= opened[:, 1:]
-                    opened = grown & lifted & bridge_area
+                    opened = grown & lifted & (bridge_area | bridge_deck)
                 game = np.where(opened, ground, new)
                 gch = np.abs(game - elev) > 1e-6
                 if gch.any():
@@ -2917,7 +2964,7 @@ def build_landcover_lines(tiles):
                 cells.add((cx * C, cy * C, cx * C + C, cy * C + C))
     cells = sorted(cells)
     log(f"  kantakartan viivat: {len(cells)} ruutua × {len(LANDCOVER_LINE_TYPES) + 1} aineistoa")
-    ways, nodes = landcover_osm()
+    ways, nodes = game_ways()
     on_bridge, road_edges = bridge_test(ways), []
     to_ll = lambda x, y: [round(v, 6) for v in merc_to_lonlat(x, y)]
     seen, count = set(), collections.Counter()
@@ -3058,8 +3105,10 @@ def dem_sampler(limit=300):
     selaimessa, bridges.js: pelillinen tiili, jos siinä on avattuja siltoja, muuten nostettu). Tiiliä
     pidetään muistissa enintään limit (koko Espoossa niitä on noin tuhat)."""
     import numpy as np
-    with open(os.path.join(PUBLIC_DATA, "sillat.json"), encoding="utf-8") as fh:
-        xy = json.load(fh).get("korkeus_peli_alkup", {}).get("15", [])
+    xy = []
+    if os.path.exists(os.path.join(PUBLIC_DATA, "sillat.json")):  # ensimmäisessä ajossa vain alkuperäinen
+        with open(os.path.join(PUBLIC_DATA, "sillat.json"), encoding="utf-8") as fh:
+            xy = json.load(fh).get("korkeus_peli_alkup", {}).get("15", [])
     orig = {(xy[i], xy[i + 1]) for i in range(0, len(xy), 2)}
     paths, tiles = {}, collections.OrderedDict()
 
@@ -3202,17 +3251,246 @@ def bridge_kind(tags):
     return None
 
 
-def bridge_footprints():
-    """Pelillisen maaston siltojen alueet (kansi + 1,5 m kummallakin puolella) kannet kuten
-    bridge_decks: vain niiden kohdalta korkeusmallin jänteet avataan (build_dem)."""
+def bridge_footprints(ways):
+    """Pelillisen maaston siltojen (OSM:n väylät, ks. landcover_osm) alueet (kansi + 1,5 m kummallakin
+    puolella) kannet kuten bridge_decks: niiden ja niiden kohdalla olevien kansien (mark_bridge_pieces)
+    kohdalta korkeusmallin jänteet avataan (build_dem)."""
     to_ll = lambda x, y: [round(x / 55462.0 + 24.7, 7), round(y / 111415.0 + 60.2, 7), 0]
     out = []
-    for tags, pts, _ in landcover_osm()[0]:
+    for tags, pts, _ in ways:
         kind = bridge_kind(tags)
         if kind and len(pts) > 1:
             d = kind[1] + 1.5
             out.append([[v for p in offset_line(pts, d) for v in to_ll(*p)], [v for p in offset_line(pts, -d) for v in to_ll(*p)]])
     return out
+
+
+def road_footprints(ways, decks=(), edges=()):
+    """Kannella kulkevien muiden ajoteiden ja raiteiden alueet (ajorata + 0,5 m) kannet kuten bridge_decks:
+    niiden kohdalla sillan kohdalla olevaa kantta (mark_bridge_pieces) ei avata (dem_patch), jottei tie
+    katkea aukkoon, jos OSM:n silta ei jatku sen kohdalle (esim. sivusta sillalle liittyvä tie, tai tie
+    kannella, jota OSM:ssä ei ole merkitty sillaksi). Tie on kannella siltä matkalta (2 m välein, + 2 m),
+    jolla sen kohdalla on kannen korkeudella (BRIDGE_EXT_DZ) kantakartan ajoradan reunaviiva (edges).
+    Sillan ali kulkevien teiden, myös sillan päästä alas laskeutuvien ramppien, reunaviivat ovat alempana."""
+    to_ll = lambda x, y: [round(x / 55462.0 + 24.7, 7), round(y / 111415.0 + 60.2, 7), 0]
+    decks_at, near_edges, dem = bridge_deck_index(decks), segment_grid(edges), dem_sampler()
+
+    def on_deck(x, y, half):
+        zs = [z for z in decks_at(x, y) if z - dem(x, y, False) >= OPEN_MIN]
+        for a, b in near_edges(x, y, half + 1.5) if zs else ():
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            t = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / ((dx * dx + dy * dy) or 1.0)))
+            ze = a[2] + (b[2] - a[2]) * t
+            if a[2] and b[2] and math.hypot(a[0] + dx * t - x, a[1] + dy * t - y) <= half + 1.5 \
+                    and any(abs(ze - z) <= BRIDGE_EXT_DZ for z in zs):
+                return True
+        return False
+
+    out = []
+    for tags, pts, _ in ways:
+        if bridge_kind(tags) or osm_covered(tags) or len(pts) < 2:
+            continue
+        if tags.get("highway", "").replace("_link", "") in VEHICLE_ROADS:
+            half = game_road_half(tags) + 0.5
+        elif tags.get("railway") in RAIL_KINDS:
+            half = 2.2
+        else:
+            continue
+        line = [(x, y) for x, y, _ in resample_line([(x, y, 0.0) for x, y in pts], 2.0)]
+        flags = [on_deck(x, y, half) for x, y in line]
+        for i0, i1, flag in runs(flags):
+            if flag:
+                part = line[max(0, i0 - 1):i1 + 2]  # + yksi näyte (2 m) kummassakin päässä
+                if len(part) > 1:
+                    out.append([[v for p in offset_line(part, half) for v in to_ll(*p)], [v for p in offset_line(part, -half) for v in to_ll(*p)]])
+    return out
+
+
+BRIDGE_CELL_MERC = 2e-5  # Web Mercator -yksikköä (noin 400 m): kansien palojen hakuruudukko
+
+
+def deck_cells(bbox):
+    x0, y0, x1, y1 = bbox
+    return [(i, j) for i in range(int(x0 // BRIDGE_CELL_MERC), int(x1 // BRIDGE_CELL_MERC) + 1)
+            for j in range(int(y0 // BRIDGE_CELL_MERC), int(y1 // BRIDGE_CELL_MERC) + 1)]
+
+
+def deck_ring(d):
+    if "_ring" not in d:
+        d["_ring"] = [tuple(p) for p in d["ring"]] + [tuple(d["ring"][0])]
+    return d["_ring"]
+
+
+def mark_bridge_pieces(decks):
+    """Merkitsee kannet, kaistaleet ja raiteet, jotka ovat OSM:n sillan alueella (siltaala), sillan
+    kohdalla oleviksi (d["silta"]). Pelillisessä maastossa ne avataan siellä, missä ne ovat vähintään
+    OPEN_MIN maanpinnan yläpuolella (build_dem), koska avaamatta jäänyt kansi näkyisi 3D-sillan
+    jatkona maaston kohoumana, jonka kyljet ovat pystysuoria seiniä. Pala on sillan kohdalla, jos sen
+    tai alueen keskiviivan piste on toisen sisällä."""
+    areas = collections.defaultdict(list)
+    for a in decks:
+        if a["kind"] == "siltaala":
+            for key in deck_cells(a["bbox"]):
+                areas[key].append(a)
+    mids = lambda d: (d["A"][:, :2] + d["B"][:, :2]) / 2
+    inside = lambda P, d: any(point_in_polygon(x, y, [deck_ring(d)]) for x, y in P)
+    for d in decks:
+        if d["kind"] not in ("kansi", "kaista", "raide"):
+            continue
+        near = {id(a): a for key in deck_cells(d["bbox"]) for a in areas.get(key, ())}.values()
+        d["silta"] = any(d["bbox"][0] <= a["bbox"][2] and a["bbox"][0] <= d["bbox"][2] and d["bbox"][1] <= a["bbox"][3]
+                         and a["bbox"][1] <= d["bbox"][3] and (inside(mids(d), a) or inside(mids(a), d)) for a in near)
+
+
+def deck_height(d, X, Y):
+    """Kannen palan korkeus pisteessä (Web Mercator) reunojen välissä kuten dem_patch."""
+    def near(P):
+        best = (math.inf, 0.0)
+        for (ax, ay, az), (bx, by, bz) in zip(P, P[1:]):
+            dx, dy = bx - ax, by - ay
+            l2 = dx * dx + dy * dy
+            t = max(0.0, min(1.0, ((X - ax) * dx + (Y - ay) * dy) / l2)) if l2 else 0.0
+            d2 = math.hypot(ax + t * dx - X, ay + t * dy - Y)
+            if d2 < best[0]:
+                best = (d2, az + (bz - az) * t)
+        return best
+    (da, za), (db, zb) = near(d["A"]), near(d["B"])
+    return (za * db + zb * da) / (da + db) if da + db > 0 else za
+
+
+def bridge_deck_index(decks):
+    """Funktio (x, y) paikallisina metreinä → sillan kohdalla olevien kansien (mark_bridge_pieces)
+    korkeudet pisteessä."""
+    grid = collections.defaultdict(list)
+    for d in decks:
+        if d.get("silta"):
+            for key in deck_cells(d["bbox"]):
+                grid[key].append(d)
+
+    def decks_at(x, y):
+        X, Y = merc_unit(x / 55462.0 + 24.7, y / 111415.0 + 60.2)
+        key = (int(X // BRIDGE_CELL_MERC), int(Y // BRIDGE_CELL_MERC))
+        return [deck_height(d, X, Y) for d in grid.get(key, ()) if d["bbox"][0] <= X <= d["bbox"][2]
+                and d["bbox"][1] <= Y <= d["bbox"][3] and point_in_polygon(X, Y, [deck_ring(d)])]
+    return decks_at
+
+
+def bridge_extensions(decks, ways):
+    """OSM:n siltojen jatkeet kantakartan kansien mukaan (OPEN_MIN). Sillan vapaasta päästä (solmu ei
+    ole toisen siltaosuuden) kuljetaan jokaista siitä lähtevää samanlajista väylää pitkin (esim. jatkava
+    tie ja sillan päästä kääntyvä tie) BRIDGE_EXT_STEP välein, niin kauan kuin kohdalla on sillan
+    kohdalla oleva kansi (mark_bridge_pieces) vähintään OPEN_MIN maanpinnan yläpuolella ja enintään
+    BRIDGE_EXT_DZ edellisestä kohdasta.
+    Palauttaa [[sillan pään solmu, jatkavan väylän toisen pään solmu, jatkeen pituus m], ...]."""
+    dem, decks_at = dem_sampler(), bridge_deck_index(decks)
+    bridge_nodes, ends = collections.Counter(), collections.defaultdict(list)
+    for k, (tags, pts, nodes) in enumerate(ways):
+        if bridge_kind(tags):
+            bridge_nodes.update(set(nodes))
+        elif len(pts) > 1:
+            ends[nodes[0]].append((k, True))
+            ends[nodes[-1]].append((k, False))
+    out = []
+    for tags, pts, nodes in ways:
+        if not (kind := bridge_kind(tags)) or len(pts) < 2:
+            continue
+        for node, p in ((nodes[0], pts[0]), (nodes[-1], pts[-1])):
+            zs = decks_at(*p)
+            if bridge_nodes[node] > 1 or not zs:
+                continue  # jatkuu toisena siltaosuutena tai ei kantta
+            for k, at_start in ends[node]:
+                out += walk_extension(ways, ends, kind[0], k, at_start, node, max(zs), decks_at, dem)
+    log(f"  siltojen jatkeet kantakartan kansien mukaan: {len(out)}, yhteensä {sum(e[2] for e in out):.0f} m")
+    return out
+
+
+def walk_extension(ways, ends, kind, k, at_start, node, zstart, decks_at, dem, budget=BRIDGE_EXT_MAX, depth=0):
+    """Sillan jatke väylää k pitkin solmusta node, josta kannen korkeus on zstart (bridge_extensions).
+    Jos kansi jatkuu väylän päähän asti (esim. liittymä sillan vieressä), jatketaan siitä lähteviä
+    samanlajisia väyliä pitkin (ends: solmu → [(väylä, alkaako se solmusta)]), enintään kolme väylää ja
+    yhteensä budget metriä. Palauttaa [[solmu, toisen pään solmu, pituus m], ...]."""
+    if (bridge_kind({**ways[k][0], "bridge": "yes"}) or ("",))[0] != kind:
+        return []
+    seq = ways[k][1] if at_start else ways[k][1][::-1]
+    dist = [0.0]
+    for a, b in zip(seq, seq[1:]):
+        dist.append(dist[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    total = dist[-1]
+    samples = [BRIDGE_EXT_STEP * j for j in range(1, int(min(budget, total) / BRIDGE_EXT_STEP) + 1)]
+    if total <= budget and (not samples or total - samples[-1] > 0.5):
+        samples.append(total)  # myös väylän pää
+    zprev, last, failed = zstart, 0.0, False
+    for s in samples:
+        i = max(0, min(len(seq) - 2, next((j for j in range(len(dist) - 1) if dist[j + 1] >= s), len(seq) - 2)))
+        f = (s - dist[i]) / ((dist[i + 1] - dist[i]) or 1.0)
+        x, y = seq[i][0] + (seq[i + 1][0] - seq[i][0]) * f, seq[i][1] + (seq[i + 1][1] - seq[i][1]) * f
+        z = min(decks_at(x, y), key=lambda v: abs(v - zprev), default=None)
+        if z is None or abs(z - zprev) > BRIDGE_EXT_DZ or z - dem(x, y, False) < OPEN_MIN:
+            failed = True
+            break
+        last, zprev = s, z
+    other = ways[k][2][-1] if at_start else ways[k][2][0]
+    if not failed and total <= budget and depth < 2:  # kansi jatkuu väylän päähän: koko väylä sillaksi
+        out = [[node, other, round(total, 1)]]
+        for k2, at_start2 in ends[other]:
+            if k2 != k:
+                out += walk_extension(ways, ends, kind, k2, at_start2, other, zprev, decks_at, dem, budget - total, depth + 1)
+        return out
+    if last < 4.0:
+        return []
+    return [[node, other, round(min(last + BRIDGE_EXT_STEP / 2, total - 0.5), 1)]]
+
+
+def split_bridge_ways(ways, jatkeet):
+    """Väylät, joissa siltojen jatkeet (bridge_extensions) on erotettu jatkavista väylistä omiksi
+    siltaosuuksikseen (tagit kuten väylällä ja bridge=yes). Leikkauskohdassa jatke ja väylän loppu
+    jakavat uuden solmun (negatiivinen tunnus), joten ne liittyvät toisiinsa."""
+    by_ends = {}
+    for k, (tags, pts, nodes) in enumerate(ways):
+        if len(pts) > 1 and not bridge_kind(tags):
+            by_ends.setdefault((nodes[0], nodes[-1]), k)
+    cuts = collections.defaultdict(lambda: [0.0, 0.0])  # väylä → [jatke alussa, jatke lopussa] (m)
+    for node, other, length in jatkeet:
+        if (k := by_ends.get((node, other))) is not None:
+            cuts[k][0] = length
+        elif (k := by_ends.get((other, node))) is not None:
+            cuts[k][1] = length
+    out, new_id = [], 0
+    for k, (tags, pts, nodes) in enumerate(ways):
+        if k not in cuts:
+            out.append((tags, pts, nodes))
+            continue
+        s = [0.0]
+        for a, b in zip(pts, pts[1:]):
+            s.append(s[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        head, tail = cuts[k]
+        bounds = [0.0, s[-1]] if head + tail >= s[-1] - 1.0 else [0.0] + [head] * bool(head) + [s[-1] - tail] * bool(tail) + [s[-1]]
+
+        def at(c):
+            i = max(0, min(len(s) - 2, next((j for j in range(len(s) - 1) if s[j + 1] >= c), len(s) - 2)))
+            f = (c - s[i]) / ((s[i + 1] - s[i]) or 1.0)
+            return (pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f)
+        ids = {}
+        for c in bounds[1:-1]:
+            new_id -= 1
+            ids[c] = new_id
+        for a, b in zip(bounds, bounds[1:]):
+            inner = [j for j in range(len(pts)) if a < s[j] < b]
+            part = [pts[0] if a == 0 else at(a)] + [pts[j] for j in inner] + [pts[-1] if b == s[-1] else at(b)]
+            part_nodes = [nodes[0] if a == 0 else ids[a]] + [nodes[j] for j in inner] + [nodes[-1] if b == s[-1] else ids[b]]
+            bridge = (head and a == 0) or (tail and b == s[-1])
+            out.append(({**tags, "bridge": "yes"} if bridge else tags, part, part_nodes))
+    return out
+
+
+def game_ways():
+    """Pelillisen maaston OSM:n väylät (landcover_osm), joissa siltoja on jatkettu kantakartan kansien
+    mukaan (sillat.json, jatkeet: bridge_extensions). Jatkeen kohdalla silta on 3D-mallina, eikä tie
+    tai sen viivat ole maanpinnassa."""
+    ways, nodes = landcover_osm()
+    with open(os.path.join(PUBLIC_DATA, "sillat.json"), encoding="utf-8") as fh:
+        jatkeet = json.load(fh).get("jatkeet", [])
+    return split_bridge_ways(ways, jatkeet), nodes
 
 
 def resample_line(pts, step):

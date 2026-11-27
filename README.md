@@ -670,7 +670,7 @@ tasaisesti (ilman niitä reuna on metrin päässä kannen reunasta). Reunaviivoi
 suuntaiset (enintään 25°) viivat kannen pään korkeudelta (±1,5 m, `EDGE_DZ`), ja jos niitä on enemmän
 kuin kaksi, uloimmat; muuten kannelle tuli jopa 12 viivaa esim. sillan alta poikittain kulkevan tien
 reunoista. Ne tehdään OpenStreetMapin siltaosuuksista
-(618 siltaa, ks. Laatat ja lataus); kannen leveys tulee kaistamäärästä
+(663 siltaa jatkeineen, ks. Laatat ja lataus); kannen leveys tulee kaistamäärästä
 (+ 1 m reunoille) ja korkeus siltojen kohdalla nostetusta korkeusmallista (kantakartan mitatut
 kannet) tai, jos se on alempana, suoraan sillan päiden välillä; päiden korkeus on tien pinnasta
 4 m sillan ulkopuolelta (esim. Kehä I:n alikulun kohdalla kantakartan kansi on mitattu 1–1,7 m
@@ -682,7 +682,25 @@ joka on yli metrin maaston yläpuolella (esim. portaisiin tai rakennukseen pää
 silta), tulee päätuki (`tu`; 35 päätä), jottei kansi jää ilmaan.
 Pelillisessä tilassa korkeusmallin tiilet vaihdetaan siltojen kohdalla versioon, jossa
 OSM:n siltojen kohdalla kaikki nostot ovat auki ja niiden ympäriltä on poistettu noin 3,5 metrin
-täyttö (`public/tiles/korkeus/peli`, `build_data.py`; 304 tiiltä, 20,5 Mt). Pelillinen tiili
+täyttö (`public/tiles/korkeus/peli`, `build_data.py`; 316 tiiltä, 21 Mt). OSM:n silta on usein
+kantakartan kantta lyhyempi tai kapeampi: esim. Turvesuontien silta Kehä I:n yllä Laajalahdessa
+jatkuu rampin yli, ja avaamatta jäänyt kansi näkyi 3D-sillan jatkona maaston kohoumana, jonka kyljet
+olivat pystysuoria seiniä sillan alla. Siksi auki ovat myös kannet, kaistaleet ja raiteet, jotka ovat
+OSM:n sillan kohdalla (`mark_bridge_pieces`), kaikkialla, missä ne ovat vähintään 2 m maanpinnan
+yläpuolella (`OPEN_MIN`), ja OSM:n siltaa jatketaan sen päästä lähteviä teitä pitkin avatun kannen
+matkalle (`bridge_extensions`, enintään 60 m; 45 jatketta, yhteensä 457 m). Kantta ei kuitenkaan avata muiden teiden
+ja raiteiden kohdalta siltä matkalta, jolla niiden kantakartan ajoradan reunaviivat on mitattu kannen
+korkeudelle (`road_footprints`): tie kulkee silloin kannella, vaikka OSM:n silta ei jatku sen
+kohdalle (esim. sivusta sillalle liittyvä tie), ja muuten se katkeaisi aukkoon. Sillan ali kulkevien
+teiden, myös sillan päästä alas laskeutuvien ramppien, reunaviivat ovat alempana. Avatun kannen kohdalle
+jää näin vain 46 m ajotietä ilman 3D-siltaa (koko Espoo, 2 m välein; ennen suojaa 160 m), ja yli
+3 m:n porraskohtia pelillisessä korkeusmallissa on 6 961 (ennen 10 834). Jatkeet tallennetaan tiedostoon `sillat.json`
+(`jatkeet`), ja pelillisen maaston viivat ja 3D-sillat tehdään väylistä, joissa jatke on erotettu
+tiestä omaksi siltaosuudekseen (`game_ways`). Korkeusmallista on poistettu sillat ja niiden alue
+täytetty alemmasta maasta, joten kannen pään ulkopuolelle jäi paikoin kuoppa (Turvesuontiellä 3 m).
+Kannen vapaan pään ulkopuolella maa nostetaan siksi 12 metrin matkalle kannen pään korkeudesta
+loivasti (1:4) laskevaksi penkereeksi, jos maa on 14 m päässä enintään 1,5 m kannen pään alapuolella
+eli tie jatkuu kannen tasolla (`END_FILL`); tämä koskee myös tavallista korkeusmallia. Pelillinen tiili
 tallennetaan vain, jos siinä avataan jotain; muuten käytetään tavallista nostettua tiiltä, ja jos
 kaikki nostot avataan, alkuperäistä (`korkeus_peli_alkup` tiedostossa `sillat.json`). Muualla kannet
 ja kuopat ovat täytettyinä. Sillan alta kulkeva tie näkyy siis sillan alla, ja
@@ -726,7 +744,7 @@ kaksinkertaiseen etäisyyteen, kauimpana lähteen alin taso). Tarkkuus seuraa si
   vain raiteet (näkyvät kauas), tasolla 14 lisäksi ajoradat, kevyen liikenteen väylät ja
   kaistaviivat (noin 2,4 km:n päähän) ja tasolla 15 kaikki (polut, suojatiet ja nimet). Lähteen alin
   taso on 12, jottei horisonttiin ulottuvassa näkymässä haeta kaukaista aluetta tason 14 tiilinä.
-- Sillat: `public/tiles/pelisillat` tason 14 ruuduittain (noin 1,2 km; 618 siltaa 121 ruudussa,
+- Sillat: `public/tiles/pelisillat` tason 14 ruuduittain (noin 1,2 km; 663 siltaa 121 ruudussa,
   luettelo `public/data/pelimaasto_sillat.json`). Ruudut ladataan kameran ympäriltä 6 km:n päähän:
   alle 1,5 km:n päässä täysi malli (kaiteet, viivat ja pilarit), kauempana pelkkä kansi. Malleja
   rakennetaan enintään kaksi piirtokertaa kohden lähimmästä alkaen, ja ruutu vapautetaan, kun se on
