@@ -1,0 +1,11 @@
+{
+ "lahde": "Maastoeditorilla tehdyt siltakorjaukset (editori.py, pelimaasto.js)",
+ "korjaukset": [
+  {"id":"raide:24.81427,60.20238:24.81434,60.20243","poista":true,"laji":"raide","keskipiste":[24.814307,60.202405],"pituus":6.9,"aika":"2026-11-27T22:42:37"},
+  {"id":"raide:24.81430,60.20245:24.81424,60.20241","poista":true,"laji":"raide","keskipiste":[24.814269,60.202428],"pituus":4.9,"aika":"2026-11-27T22:42:41"},
+  {"id":"raide:24.81434,60.20243:24.81442,60.20249","poista":true,"laji":"raide","keskipiste":[24.814382,60.202458],"pituus":7.4,"aika":"2026-11-27T22:42:43"},
+  {"id":"raide:24.81437,60.20249:24.81430,60.20245","poista":true,"laji":"raide","keskipiste":[24.814331,60.202471],"pituus":6.7,"aika":"2026-11-27T22:42:45"},
+  {"id":"raide:24.81458,60.20368:24.81437,60.20249","alku":2.0,"loppu":9.0,"laji":"raide","keskipiste":[24.814473,60.203086],"pituus":137.5,"aika":"2026-11-27T22:46:16"},
+  {"id":"raide:24.81442,60.20249:24.81463,60.20370","alku":11.0,"loppu":2.0,"laji":"raide","keskipiste":[24.814526,60.203093],"pituus":141.7,"aika":"2026-11-27T22:46:25"}
+ ]
+}
