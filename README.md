@@ -6,8 +6,8 @@ Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset s
 yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina, ja latauksessa olevat
 sähköautot näkyvät latauspaikoillaan. Bussin, raitiovaunun, junan, metron tai lautan kyytiin voi
 hypätä klikkaamalla, jolloin kartta seuraa kulkuneuvoa yläpuolelta menosuunta ylöspäin.
-"Seuraa sijaintiani" -painike keskittää kartan omaan sijaintiin ja kääntää sen liikkuessa
-menosuuntaan.
+"Seuraa sijaintiani" -painike keskittää kartan omaan sijaintiin ja kääntää sen siihen suuntaan,
+johon puhelin osoittaa (kompassi), tai liikkuessa menosuuntaan.
 
 ## Paneeli
 
@@ -393,21 +393,32 @@ zoomataan vähintään tasolle 16,5; kallistus pysyy ennallaan. Sijainti toimii 
 
 - Sijaintia merkitsee sininen piste, jonka ympärillä on tarkkuusympyrä maan pinnassa (säde on
   selaimen ilmoittama tarkkuus). Jos uutta sijaintia ei ole tullut 30 sekuntiin, piste harmaantuu.
-- Kun liikutaan vähintään 1 m/s, kartta kääntyy menosuuntaan, joten edessä oleva näkyy ylöspäin.
-  Suunta on paikantimen kulkusuunta. Jos selain ei kerro sitä, suunta lasketaan peräkkäisistä
-  sijainneista, kun siirtymää on kertynyt vähintään 8 m (tai puolet tarkkuudesta). Yli 50 m:n
-  epätarkkuudella suuntaa ei lasketa. Suunta pehmennetään, ja alle 5°:n muutoksia ei käännetä.
-  Paikallaan kartan suunta pysyy ennallaan.
-- Pisteen edessä oleva nuoli näyttää menosuunnan, ja paikallaan ollessa kompassin suunnan, jos
-  laite kertoo sen. iPhone kysyy kompassin käyttöön erikseen luvan painikkeen painalluksella.
-  Nuolen kulma näytöllä lasketaan maastossa menosuunnassa olevasta pisteestä, joten se osoittaa
-  oikein kallistetussakin näkymässä.
-- Merkki ja kartta siirtyvät uuteen sijaintiin tasaisesti samassa ajassa (sijaintien väli,
-  0,25–2 s), joten merkki pysyy seurannassa näkymän keskellä eikä hypi.
+- Kun laite kertoo suuntansa (kompassi), kartta on seurannan aikana aina siihen suuntaan, johon
+  laite osoittaa, myös paikallaan ja liikkuessa. iOS antaa suunnan valmiina
+  (`webkitCompassHeading`), ja iPhone kysyy siihen luvan painikkeen painalluksella. Muilla
+  (Android) suunta lasketaan laitteen asennosta (`deviceorientationabsolute`): vaakatasossa
+  suunta on näytön yläreunan suunta, myös sivuttain kallistettuna, ja pystyssä takapinnan suunta
+  kuten kameralla katsoessa. Vaakanäytössä yläreunana on laitteen kylki. Kompassi näyttää
+  magneettisen pohjoisen, joten suuntaan lisätään Espoon eranto, noin 11° itään (WMM2025, 2026).
+- Ilman kompassia kartta kääntyy menosuuntaan, kun liikutaan vähintään 1 m/s. Suunta on
+  paikantimen kulkusuunta. Jos selain ei kerro sitä, suunta lasketaan peräkkäisistä sijainneista,
+  kun siirtymää on kertynyt vähintään 8 m (tai puolet tarkkuudesta). Yli 50 m:n epätarkkuudella
+  suuntaa ei lasketa. Paikallaan kartan suunta pysyy silloin ennallaan.
+- Kääntyminen pehmennetään (kompassin lukemat 120 ms ja kartan kääntö 350 ms aikavakiolla).
+  Kartta alkaa kääntyä vasta yli 1,5°:n erosta ja pysähtyy alle 0,3°:n eroon, jottei kompassin
+  pieni värinä liikuta karttaa jatkuvasti.
+- Pisteen edessä oleva nuoli näyttää saman suunnan kuin kartta: kompassin tai menosuunnan. Nuolen
+  kulma näytöllä lasketaan maastossa sen suunnassa olevasta pisteestä, joten se osoittaa oikein
+  kallistetussakin näkymässä.
+- Merkki liukuu uuteen sijaintiin tasaisesti sijaintien välisessä ajassa (0,25–2 s). Seurannassa
+  näkymä asetetaan joka ruudussa (`jumpTo`) merkin kohdalle ja pehmennettyyn suuntaan, joten merkki
+  pysyy keskellä ja kartta kääntyy sujuvasti. Näkymää ei aseteta, jos mikään ei muutu, eikä
+  ennen kuin kartan tyyli on ladattu.
 - Zoomaus (rulla, nipistys, +/−), kallistus ja kierto eivät katkaise seurantaa: zoomaus tehdään
-  seurannan ajan näkymän keskipisteen ympäri. Kun karttaa siirtää selvästi sivuun, seuranta jää
-  taustalle: merkki pysyy ja painike keskittää näkymän taas sijaintiin. Seurannan aikana painike
-  lopettaa sijainnin käytön.
+  seurannan ajan näkymän keskipisteen ympäri, ja eleen aikana (sekä 0,4 s rullan tai näppäimen
+  jälkeen) näkymää ei aseteta, koska se katkaisisi eleen. Eleen jälkeen sijainti palautetaan
+  keskelle. Kun karttaa siirtää selvästi sivuun, seuranta jää taustalle: merkki pysyy ja painike
+  keskittää näkymän taas sijaintiin. Seurannan aikana painike lopettaa sijainnin käytön.
 - Kulkuneuvon kyytiin hypättäessä kyytinäkymä ohjaa karttaa ja sijainnin seuranta jää taustalle.
 - Kapealla näytöllä paneeli painetaan alas seurannan alkaessa.
 - Jos lupa evätään, sijaintia ei saada tai se on kartta-alueen ulkopuolella, painikkeiden viereen
@@ -928,7 +939,7 @@ python3 scripts/maastokorjaus.py
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus, kallistus ja kyytipalkki
-- `public/sijainti.js`: Seuraa sijaintiani -painike: oma sijainti, tarkkuusympyrä, menosuunta ja kompassi
+- `public/sijainti.js`: Seuraa sijaintiani -painike: oma sijainti, tarkkuusympyrä, kompassin tai menosuunnan mukaan kääntyvä kartta
 - `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli (käytössä vain kameran ollessa maan alla)
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: maaston pinta (pelillinen maasto): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut ja maastoeditorilla korjatut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille

@@ -1,10 +1,13 @@
 // Oma sijainti: "Seuraa sijaintiani" -painike kartan oikeassa yläkulmassa.
 //
 // Painalluksesta selain kysyy luvan sijaintiin, ja kartta keskittyy sijaintiin ja seuraa sitä.
-// Liikkuessa kartta kääntyy menosuuntaan, joten edessä oleva näkyy ylöspäin. Suunta tulee
-// paikantimelta (GPS:n kulkusuunta) tai lasketaan peräkkäisistä sijainneista, jos selain ei kerro
-// sitä. Paikallaan ollessa kartan suunta pysyy ennallaan, ja merkin nuoli näyttää kompassin
-// suunnan, jos laite kertoo sen.
+// Kartta kääntyy siihen suuntaan, johon laite osoittaa, jos laite kertoo suuntansa (kompassi).
+// Muuten kartta kääntyy liikkuessa menosuuntaan, joka tulee paikantimelta (GPS:n kulkusuunta) tai
+// lasketaan peräkkäisistä sijainneista; paikallaan kartan suunta pysyy silloin ennallaan.
+//
+// Seurannassa näkymä asetetaan joka ruudussa (jumpTo), jotta kompassin mukana kääntyvä kartta ja
+// sijainnista toiseen liukuva merkki liikkuvat tasaisesti. Käyttäjän eleen aikana näkymää ei
+// aseteta, koska se katkaisisi eleen.
 //
 // Zoomaus, kallistus ja kierto eivät katkaise seurantaa (zoomaus tehdään näkymän keskipisteen
 // ympäri). Kun karttaa siirtää selvästi sivuun, seuranta jää taustalle: merkki pysyy, ja painike
@@ -16,17 +19,24 @@ const D2R = Math.PI / 180;
 const FOLLOW_ZOOM = 16.5; // seurannan alkaessa zoomataan vähintään tähän (noin 700 m näkymän leveydeltä)
 const MIN_RECENTER_ZOOM = 14; // keskitettäessä uudelleen kauempaa zoomataan tähän
 const START_MS = 1500;
+const RECENTER_MS = 300; // eleen jälkeen sijainti palautetaan keskelle
 const MOVE_SPEED = 1; // m/s: tätä nopeammin liikuttaessa kartta kääntyy menosuuntaan
 const MIN_STEP = 8; // m: suunta lasketaan sijainneista, kun siirtymää on vähintään näin paljon
 const MAX_ACCURACY = 50; // m: tätä epätarkemmista sijainneista ei lasketa suuntaa
 const STEP_MAX_MS = 30000; // vertailukohta vanhenee, jos siirtymää ei kerry tässä ajassa
 const HEADING_SMOOTH = 0.5; // uuden suunnan osuus, jotta paikantimen kohina ei heiluta karttaa
 const HEADING_TTL = 10000; // ms: menosuunta näytetään vielä näin kauan liikkeen loputtua
-const COMPASS_TTL = 3000;
-const TURN_DEADBAND = 5; // astetta: pienempiä suunnan muutoksia ei käännetä
+// Kompassi näyttää magneettisen pohjoisen; erannon arvio Espoossa vuonna 2026 (WMM2025) noin 11° itään.
+const DECLINATION = 11;
+const COMPASS_TTL = 2000; // ms: kompassin suuntaa käytetään, kun uusi lukema on tätä tuoreempi
+const COMPASS_MS = 120; // kompassin lukemien pehmennys (aikavakio)
+const TURN_MS = 350; // kartan kääntymisen pehmennys (aikavakio)
+// Kartta alkaa kääntyä, kun ero on yli TURN_START astetta, ja pysähtyy alle TURN_STOP asteen
+// erolla, jottei kompassin pieni värinä käännä karttaa jatkuvasti.
+const TURN_START = 1.5, TURN_STOP = 0.3;
+const INPUT_PAUSE_MS = 400; // hiiren rullan tai näppäimen jälkeen näkymää ei aseteta hetkeen
 const STALE_MS = 30000; // merkki harmaaksi, jos uutta sijaintia ei ole tullut näin pitkään
 const NOTE_MS = 6000;
-const LINEAR = (t) => t;
 
 const wrap = (deg) => ((((deg + 180) % 360) + 360) % 360) - 180;
 const angleDiff = (a, b) => wrap(a - b);
@@ -69,9 +79,14 @@ export function createLocate(map) {
   let marker = null, dot = null, halo = null, arrow = null;
   let shown = null, glide = null, glideFrame = 0; // merkin kohta liukuu sijainnista seuraavaan
   let interacting = false; // käyttäjän ele (raahaus, zoomaus, kierto) käynnissä
-  let startEnd = 0; // seurannan alun siirtymä (zoomaus) kesken tähän asti; sitä ei katkaista
+  let inputAt = -Infinity; // viimeisin hiiren rulla tai näppäin
+  let startEnd = 0; // siirtymä (easeTo) kesken tähän asti; sitä ei katkaista
+  let frame = 0, lastFrame = 0, turning = false, applied = null; // seurannan ruutusilmukka
   const pointers = new Set();
   let noteTimer = null;
+  // Näkymää ei siirretä ennen kuin kartan tyyli on ladattu (app.js:n moveend-käsittelijät tarvitsevat sen).
+  let ready = map.loaded();
+  if (!ready) map.once("load", () => { ready = true; });
 
   // ------------------------------------------------------------ painike ja ilmoitus
 
@@ -133,6 +148,8 @@ export function createLocate(map) {
     stopCompass();
     for (const m of marker ?? []) m.remove();
     cancelAnimationFrame(glideFrame);
+    cancelAnimationFrame(frame);
+    frame = 0;
     marker = fix = anchor = heading = compass = shown = glide = null;
     lockZoom(false);
     state = "off";
@@ -146,8 +163,8 @@ export function createLocate(map) {
     render();
     lockZoom(true);
     const z = map.getZoom();
-    ease(START_MS, { zoom: first ? Math.max(z, FOLLOW_ZOOM) : Math.max(z, MIN_RECENTER_ZOOM), turn: moving() });
-    startEnd = performance.now() + START_MS;
+    ease(START_MS, first ? Math.max(z, FOLLOW_ZOOM) : Math.max(z, MIN_RECENTER_ZOOM));
+    if (!frame) { lastFrame = performance.now(); frame = requestAnimationFrame(loop); }
   }
 
   function release() {
@@ -186,17 +203,10 @@ export function createLocate(map) {
     const prev = fix;
     travel(p);
     fix = p;
-    // Merkki ja kartta siirtyvät uuteen sijaintiin samassa ajassa tasaisesti, jolloin merkki pysyy
-    // seurannassa näkymän keskellä eikä hypi.
-    const ms = prev ? Math.min(Math.max(p.t - prev.t, 250), 2000) : 0;
-    showMarker(ms);
-    if (riding() && state === "seuraa") release();
-    if (state === "haku") { follow(true); return; }
-    if (state !== "seuraa") return;
-    if (interacting && !map.isMoving()) interacting = false; // varmistus, jos eleen loppu jäi huomaamatta
-    if (interacting || pointers.size || document.hidden || performance.now() < startEnd) return;
-    // Menosuunta mukana joka kerta liikkeen aikana, jotta edellisen siirtymän kesken jäänyt kääntö jatkuu.
-    ease(ms, { turn: moving() });
+    // Merkki liukuu uuteen sijaintiin tasaisesti sijaintien välisessä ajassa, ja seurannassa
+    // näkymä seuraa merkkiä (loop), joten merkki pysyy näkymän keskellä eikä hypi.
+    showMarker(prev ? Math.min(Math.max(p.t - prev.t, 250), 2000) : 0);
+    if (state === "haku") follow(true);
   }
 
   function onError(err) {
@@ -228,13 +238,46 @@ export function createLocate(map) {
 
   const moving = () => heading != null && performance.now() - headingAt < HEADING_TTL;
 
-  // Kartta sijaintiin; turn: käännetään menosuuntaan.
-  function ease(ms, { zoom, turn }) {
+  const compassFresh = () => compass != null && performance.now() - compassAt < COMPASS_TTL;
+  // Näkymän suunta: laitteen osoittama suunta (kompassi), muuten liikkuessa menosuunta.
+  const viewHeading = () => (compassFresh() ? compass : moving() ? heading : null);
+
+  // Siirtymä sijaintiin (seurannan alku, keskitys eleen jälkeen); ruutusilmukka jatkaa sen jälkeen.
+  function ease(ms, zoom) {
     if (!fix || riding()) return;
-    const o = { center: [fix.lon, fix.lat], duration: ms, easing: LINEAR };
-    if (zoom != null) { o.zoom = zoom; delete o.easing; }
-    if (turn && heading != null && Math.abs(angleDiff(heading, map.getBearing())) > TURN_DEADBAND) o.bearing = heading;
+    if (!ready) { map.once("load", () => { if (state === "seuraa") ease(ms, zoom); }); return; }
+    const o = { center: [fix.lon, fix.lat], duration: ms };
+    if (zoom != null) o.zoom = zoom;
+    const h = viewHeading();
+    if (h != null) o.bearing = h;
     map.easeTo(o, { sijainti: true });
+    startEnd = performance.now() + ms;
+    applied = null;
+  }
+
+  // Seurannan näkymä joka ruudussa: keskipiste merkin kohdalle ja suunta pehmennettynä kohti
+  // näkymän suuntaa. Näkymää ei aseteta, jos mikään ei muutu, jottei karttaa piirretä turhaan.
+  function loop(now) {
+    frame = 0;
+    if (state !== "seuraa") return;
+    frame = requestAnimationFrame(loop);
+    const dt = Math.min(Math.max(now - lastFrame, 0), 200);
+    lastFrame = now;
+    if (riding()) { release(); return; }
+    if (interacting && !map.isMoving()) interacting = false; // varmistus, jos eleen loppu jäi huomaamatta
+    if (!ready || interacting || pointers.size || now - inputAt < INPUT_PAUSE_MS || now < startEnd || !shown) return;
+    const v = {};
+    if (!applied || applied.lon !== shown.lon || applied.lat !== shown.lat) v.center = [shown.lon, shown.lat];
+    const h = viewHeading();
+    if (h != null) {
+      const b = map.getBearing(), d = angleDiff(h, b);
+      if (Math.abs(d) > TURN_START) turning = true;
+      else if (Math.abs(d) < TURN_STOP) turning = false;
+      if (turning) v.bearing = b + d * (1 - Math.exp(-dt / TURN_MS));
+    } else turning = false;
+    if (!v.center && v.bearing == null) return;
+    map.jumpTo(v, { sijainti: true });
+    applied = { ...shown };
   }
 
   // ------------------------------------------------------------ käyttäjän eleet
@@ -242,6 +285,12 @@ export function createLocate(map) {
   const box = map.getCanvasContainer();
   box.addEventListener("pointerdown", (e) => pointers.add(e.pointerId));
   for (const type of ["pointerup", "pointercancel"]) window.addEventListener(type, (e) => pointers.delete(e.pointerId));
+  // Rullan ja näppäinten eleet alkavat vasta seuraavassa ruudussa; ne katkeaisivat, jos näkymä
+  // asetettaisiin sitä ennen.
+  box.addEventListener("wheel", () => { inputAt = performance.now(); }, { passive: true });
+  window.addEventListener("keydown", (e) => {
+    if (!e.target.closest?.("input, select, textarea")) inputAt = performance.now();
+  });
 
   map.on("movestart", (e) => { if (e.originalEvent) interacting = true; });
   map.on("moveend", (e) => {
@@ -252,7 +301,7 @@ export function createLocate(map) {
     const pt = map.project([fix.lon, fix.lat]), { width, height } = map.getCanvas().getBoundingClientRect();
     const off = Math.hypot(pt.x - width / 2, pt.y - height / 2);
     if (off > Math.max(60, 0.15 * Math.min(width, height))) release();
-    else ease(300, {});
+    else ease(RECENTER_MS);
   });
 
   // ------------------------------------------------------------ merkki
@@ -310,8 +359,7 @@ export function createLocate(map) {
 
   function updateArrow() {
     if (!arrow || !shown) return;
-    const now = performance.now();
-    const h = moving() ? heading : compass != null && now - compassAt < COMPASS_TTL ? compass : null;
+    const h = viewHeading();
     arrow.style.display = h == null ? "none" : "";
     if (h == null) return;
     const r = h * D2R, { lon, lat } = shown;
@@ -330,28 +378,51 @@ export function createLocate(map) {
 
   const screenAngle = () => screen.orientation?.angle ?? window.orientation ?? 0;
 
+  // Laitteen osoittama suunta (astetta magneettisesta pohjoisesta myötäpäivään) tai null.
+  // iOS kertoo sen valmiina (webkitCompassHeading). Muilla suunta lasketaan asennosta (alpha, beta,
+  // gamma; W3C:n ZXY-kierrot): näytön yläreunan vaakasuunta, johon lisätään takapinnan vaakasuunta
+  // sitä painavampana, mitä pystymmässä yläreuna on. Suunta on näin oikea sekä laite vaakatasossa
+  // (yläreuna, myös sivuttain kallistettuna) että pystyssä (takapinta, kuten kameralla katsoessa).
+  // Vaakanäytössä yläreunana käytetään laitteen kylkeä.
+  function deviceHeading(e) {
+    if (Number.isFinite(e.webkitCompassHeading)) {
+      return e.webkitCompassAccuracy < 0 ? null : e.webkitCompassHeading + screenAngle();
+    }
+    if (!e.absolute || ![e.alpha, e.beta, e.gamma].every(Number.isFinite)) return null;
+    const a = e.alpha * D2R, b = e.beta * D2R, g = e.gamma * D2R, s = screenAngle() * D2R;
+    const cA = Math.cos(a), sA = Math.sin(a), cB = Math.cos(b), sB = Math.sin(b), cG = Math.cos(g), sG = Math.sin(g);
+    // Laitteen akselit (x oikealle, y ylös, takapinta −z) maan itä- ja pohjoiskomponentteina.
+    const xE = cA * cG - sA * sB * sG, xN = sA * cG + cA * sB * sG, xU = -cB * sG;
+    const yE = -sA * cB, yN = cA * cB, yU = sB;
+    const zE = -cA * sG - sA * sB * cG, zN = -sA * sG + cA * sB * cG;
+    const cS = Math.cos(s), sS = Math.sin(s), w = Math.abs(yU * cS + xU * sS); // yläreunan pystyys
+    const vE = yE * cS + xE * sS + zE * w, vN = yN * cS + xN * sS + zN * w;
+    return Math.hypot(vE, vN) < 0.1 ? null : Math.atan2(vE, vN) / D2R;
+  }
+
   function onOrientation(e) {
-    let h = null;
-    if (Number.isFinite(e.webkitCompassHeading)) h = e.webkitCompassHeading; // iOS
-    else if (e.absolute && Number.isFinite(e.alpha)) h = 360 - e.alpha;
+    let h = deviceHeading(e);
     if (h == null) return;
-    h = norm(h + screenAngle());
+    h = norm(h + DECLINATION);
     const now = performance.now();
-    compass = compass == null || now - compassAt > COMPASS_TTL ? h : norm(compass + angleDiff(h, compass) * 0.2);
+    compass = compassFresh() ? norm(compass + angleDiff(h, compass) * (1 - Math.exp(-(now - compassAt) / COMPASS_MS))) : h;
     compassAt = now;
-    if (!moving()) updateArrow();
+    updateArrow();
   }
 
   const orientationEvent = "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation";
 
+  // Kuunnellaan aina; ilman lupaa lukemia ei vain tule. Lupa pyydetään, jos selain sitä vaatii
+  // (iOS kysyy sen painalluksen yhteydessä), ja kuuntelu varmistetaan luvan saatua.
   function startCompass() {
     const E = window.DeviceOrientationEvent;
     if (compassOn || !E) return;
     compassOn = true;
     const listen = () => { if (compassOn) window.addEventListener(orientationEvent, onOrientation); };
+    listen();
     if (typeof E.requestPermission === "function") {
       E.requestPermission().then((r) => { if (r === "granted") listen(); }).catch(() => {});
-    } else listen();
+    }
   }
 
   function stopCompass() {
