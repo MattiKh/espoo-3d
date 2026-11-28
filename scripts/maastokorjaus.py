@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Maastokorjaukset: käsin tehdyt korkeusmallin korjaukset (maastoeditori, editori.py).
 
-Korjaukset ovat tiedostossa korjaukset/maasto.json siveltimen vetoina: nosta, laske, tasoita,
-pehmennä ja palauta. Ne leivotaan korkeusmallin tiiliin kansioon public/tiles/korkeuskorjaus, ja
-public/data/maastokorjaukset.json kertoo selaimelle (bridges.js), mitkä tiilet on korjattu.
+Korjauksista tallennetaan vain lopputulos: kunkin korjatun tarkimman tiilen (taso 15, noin 1,2 m
+pikseli) erotus pohjaan, eli kuinka paljon maanpintaa on nostettu tai laskettu pikseleittäin
+(korjaukset/maasto/x/y.webp, Terrarium-koodaus, häviötön WebP; ei julkaista). Siveltimen veto
+(nosta, laske, tasoita, pehmennä, palauta) lasketaan nykyisen pinnan päälle ja tallennetaan uutena
+erotuksena, joten tiedostojen määrä ja koko riippuvat korjatusta alueesta, eivät vetojen määrästä.
 
-Pohjana on sama tiili, jonka kartta muuten hakisi: siltojen kohdalla build_data.py:n nostama tai
-pelillinen tiili (public/tiles/korkeus, sillat.json), muualla Mapterhornin alkuperäinen. Vedot
-lasketaan tarkimmille tiilille (taso 15, noin 1,2 m pikseli), ja karkeampien tasojen (14 ja 13)
-korjaus on tarkimpien korjausten keskiarvo, joten pinta on sama kaikilla tasoilla.
+Kartta saa korjatut tiilet valmiina (public/tiles/korkeuskorjaus, tasot 13–15) ja hakemiston
+public/data/maastokorjaukset.json (bridges.js). Pohjana on sama tiili, jonka kartta muuten hakisi:
+siltojen kohdalla build_data.py:n nostama tai pelillinen tiili (public/tiles/korkeus, sillat.json),
+muualla Mapterhornin alkuperäinen. Karkeampien tasojen (14 ja 13) korjaus on tarkimpien erotusten
+keskiarvo, joten pinta on sama kaikilla tasoilla.
 
-Korjaukset ovat erillään build_data.py:n tiilistä, joten aineistojen päivitys ei hävitä niitä:
+Erotukset ovat erillään build_data.py:n tiilistä, joten aineistojen päivitys ei hävitä niitä:
 build_data.py leipoo ne uudelleen siltojen jälkeen uusien pohjatiilten päälle.
 
-Käyttö:  python3 scripts/maastokorjaus.py   (leipoo kaikki korjaukset uudelleen)
+Käyttö:  python3 scripts/maastokorjaus.py   (leipoo kaikki korjaukset uudelleen erotuksista)
 """
+import io
 import json
 import math
 import os
@@ -28,7 +32,8 @@ from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC = os.path.join(ROOT, "public")
-EDITS = os.path.join(ROOT, "korjaukset", "maasto.json")  # lähde: ei julkaista, mutta on versionhallinnassa
+DELTAS = os.path.join(ROOT, "korjaukset", "maasto")  # lähde: erotustiilet (versionhallinnassa, ei julkaista)
+LEGACY = os.path.join(ROOT, "korjaukset", "maasto.json")  # aiempi vetoluettelo, muunnetaan erotuksiksi (migrate)
 INDEX = os.path.join(PUBLIC, "data", "maastokorjaukset.json")
 OUT = os.path.join(PUBLIC, "tiles", "korkeuskorjaus")
 BRIDGES = os.path.join(PUBLIC, "data", "sillat.json")
@@ -37,8 +42,8 @@ CACHE = os.path.join(ROOT, "cache", "korkeus")  # sama välimuisti kuin build_da
 DEM_URL = "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"
 UA = "espoo3d-maastoeditori/1.0"
 
-ZOOM = 15  # vedot lasketaan tälle tasolle
-COARSE = (14, 13)  # nämä kootaan tarkemman tason korjauksista
+ZOOM = 15  # vedot lasketaan ja erotukset tallennetaan tälle tasolle
+COARSE = (14, 13)  # nämä kootaan tarkimpien erotusten keskiarvona
 SIZE = 512  # korkeusmallin tiilen leveys (px)
 EARTH_CIRC = 40075016.686
 TYPES = ("nosta", "laske", "tasoita", "pehmenna", "palauta")
@@ -56,8 +61,14 @@ def lat_of(y):
 
 
 def terrarium(h):
-    v = np.clip(h + 32768, 0, 65535.996)
-    return np.stack([v // 256, np.floor(v) % 256, np.floor((v - np.floor(v)) * 256)], axis=-1).astype(np.uint8)
+    """Korkeudet (m) Terrarium-väreiksi: 1/256 m:n tarkkuus, pyöristys lähimpään (ei kertyvää virhettä,
+    kun sama arvo luetaan ja kirjoitetaan uudelleen)."""
+    v = np.clip(np.round((np.asarray(h, float) + 32768) * 256), 0, 256 ** 3 - 1).astype(np.int64)
+    return np.stack([v >> 16, (v >> 8) & 255, v & 255], axis=-1).astype(np.uint8)
+
+
+def decode(rgb):
+    return rgb[..., 0] * 256.0 + rgb[..., 1] + rgb[..., 2] / 256 - 32768
 
 
 def read_tile(path):
@@ -65,34 +76,74 @@ def read_tile(path):
     rgb = np.array(Image.open(path).convert("RGB"))
     if rgb.shape[:2] != (SIZE, SIZE):
         raise ValueError(f"Odottamaton tiilen koko {rgb.shape[:2]}: {path}")
-    return rgb, rgb[..., 0] * 256.0 + rgb[..., 1] + rgb[..., 2] / 256 - 32768
+    return rgb, decode(rgb)
 
 
 def tile_path(z, x, y):
     return os.path.join(OUT, str(z), str(x), f"{y}.webp")
 
 
-# --- Korjaukset -------------------------------------------------------------------------------------
+def remove_file(path):
+    if os.path.exists(path):
+        os.remove(path)
+        try:
+            os.removedirs(os.path.dirname(path))  # tyhjät kansiot pois (pysähtyy ensimmäiseen ei-tyhjään)
+        except OSError:
+            pass
 
-def load_edits():
-    if not os.path.exists(EDITS):
-        return []
-    with open(EDITS, encoding="utf-8") as fh:
-        return json.load(fh).get("korjaukset", [])
+
+# --- Erotustiilet (lähde) ---------------------------------------------------------------------------
+
+def delta_path(x, y):
+    return os.path.join(DELTAS, str(x), f"{y}.webp")
 
 
-def save_edits(edits):
-    """Yksi korjaus riviä kohden, jotta muutokset näkyvät versionhallinnassa selkeinä."""
-    os.makedirs(os.path.dirname(EDITS), exist_ok=True)
-    rows = ",\n".join("  " + json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in edits)
-    tmp = EDITS + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write('{\n "korjaukset": [\n' + rows + ("\n" if rows else "") + " ]\n}\n")
-    os.replace(tmp, EDITS)
+def delta_tiles():
+    """Tarkimman tason tiilet, joilla on erotus: {(x, y)}."""
+    out = set()
+    for root, _, files in os.walk(DELTAS):
+        for f in files:
+            if f.endswith(".webp"):
+                out.add((int(os.path.basename(root)), int(f[:-5])))
+    return out
 
+
+def encode_delta(d):
+    """Erotus (m) häviöttömäksi WebP:ksi, tai None, jos erotusta ei ole."""
+    if d is None or not (np.abs(d) > CHANGED).any():
+        return None
+    buf = io.BytesIO()
+    Image.fromarray(terrarium(d)).save(buf, "WEBP", lossless=True, method=4)
+    return buf.getvalue()
+
+
+def read_delta_bytes(x, y):
+    path = delta_path(x, y)
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def write_delta_bytes(x, y, data):
+    path = delta_path(x, y)
+    if data is None:
+        return remove_file(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".part", "wb") as fh:
+        fh.write(data)
+    os.replace(path + ".part", path)
+
+
+def load_delta(x, y):
+    data = read_delta_bytes(x, y)
+    return None if data is None else decode(np.array(Image.open(io.BytesIO(data)).convert("RGB")))
+
+
+# --- Vedot ------------------------------------------------------------------------------------------
 
 def clean_edit(e):
-    """Tarkistettu ja siistitty korjaus (editorin lähettämä); virheestä ValueError."""
+    """Tarkistettu ja siistitty veto (editorin lähettämä); virheestä ValueError."""
     t = e.get("tyyppi")
     if t not in TYPES:
         raise ValueError(f"Tuntematon työkalu: {t}")
@@ -225,6 +276,12 @@ class Bases:
             self.cache[k] = read_tile(self.path(z, x, y))
         return self.cache[k]
 
+    def surface(self, z, x, y):
+        """Nykyinen pinta: pohja ja tallennettu erotus (vain tarkin taso)."""
+        base = self.read(z, x, y)[1]
+        d = load_delta(x, y) if z == ZOOM else None
+        return base if d is None else base + d
+
 
 def mapterhorn(z, x, y):
     path = os.path.join(CACHE, str(z), f"{x}_{y}.webp")
@@ -245,13 +302,15 @@ def mapterhorn(z, x, y):
             time.sleep(2 * (attempt + 1))
 
 
-# --- Leipominen -------------------------------------------------------------------------------------
+# --- Vedon laskenta ---------------------------------------------------------------------------------
 
-def apply_strokes(z, tx, ty, strokes, bases):
-    """Tiilen korkeudet vetojen jälkeen: (pohjan rgb, pohja, uusi). Pehmennys lukee ympäristöä, joten
-    silloin tiilen ympärille otetaan naapuritiilistä reunus, jottei tiilten saumaan jää porrasta."""
+def apply_strokes(z, tx, ty, strokes, bases, start=None):
+    """Tiilen korkeudet vetojen jälkeen: (pohjan rgb, pohja, uusi). start(z, x, y): pinta, jonka päälle
+    vedot lasketaan (oletus pohja). Pehmennys lukee ympäristöä, joten silloin tiilen ympärille
+    otetaan naapuritiilistä reunus, jottei tiilten saumaan jää porrasta. Palauta vie kohti pohjaa."""
     n = 2 ** z
     rgb, base = bases.read(z, tx, ty)
+    start = start or (lambda zz, x, y: bases.read(zz, x, y)[1])
     px_m = EARTH_CIRC * math.cos(math.radians(lat_of((ty + 0.5) / n))) / (n * SIZE)
 
     def touches(s, margin=0.0):
@@ -265,18 +324,22 @@ def apply_strokes(z, tx, ty, strokes, bases):
     pad = min(pad, SIZE)
     # Myös reunukseen osuvat vedot, jotta pehmennys lukee naapuritiilen korjatun pinnan.
     strokes = [s for s in strokes if touches(s, pad / (n * SIZE))]
-    if pad:
-        ground = np.empty((SIZE + 2 * pad, SIZE + 2 * pad))
+
+    def mosaic(read):
+        if not pad:
+            return np.array(read(z, tx, ty), float)
+        out = np.empty((SIZE + 2 * pad, SIZE + 2 * pad))
         for dy in (-1, 0, 1):
             for dx in (-1, 0, 1):
-                h = base if dx == dy == 0 else bases.read(z, tx + dx, ty + dy)[1]
-                ys, xs = slice(max(0, SIZE - pad) if dy < 0 else 0, pad if dy > 0 else SIZE), slice(max(0, SIZE - pad) if dx < 0 else 0, pad if dx > 0 else SIZE)
+                h = read(z, tx + dx, ty + dy)
+                ys, xs = slice(SIZE - pad if dy < 0 else 0, pad if dy > 0 else SIZE), slice(SIZE - pad if dx < 0 else 0, pad if dx > 0 else SIZE)
                 oy, ox = (0 if dy < 0 else pad if dy == 0 else pad + SIZE), (0 if dx < 0 else pad if dx == 0 else pad + SIZE)
                 part = h[ys, xs]
-                ground[oy:oy + part.shape[0], ox:ox + part.shape[1]] = part
-    else:
-        ground = base.copy()
-    orig = ground.copy()
+                out[oy:oy + part.shape[0], ox:ox + part.shape[1]] = part
+        return out
+
+    ground = mosaic(start)
+    orig = mosaic(lambda zz, x, y: bases.read(zz, x, y)[1]) if any(s.e["tyyppi"] == "palauta" for s in strokes) else None
     idx = np.arange(-pad, SIZE + pad) + 0.5
     X, Y = (tx + idx / SIZE) / n, (ty + idx / SIZE) / n
     for s in strokes:
@@ -303,24 +366,56 @@ def apply_strokes(z, tx, ty, strokes, bases):
     return rgb, base, ground[pad:pad + SIZE, pad:pad + SIZE]
 
 
+def apply_edit(e, bases):
+    """Veto nykyisen pinnan päälle: uudet erotukset tallennetaan. Palauttaa muutokset
+    {(x, y): (erotus ennen, erotus jälkeen)} tavuina (None = ei erotusta) kumoamista varten."""
+    s = Stroke(e)
+    new = {}
+    for tx, ty in sorted(s.tiles(ZOOM)):  # kaikki ensin vanhasta pinnasta, jotta pehmennys on saumaton
+        _, base, h = apply_strokes(ZOOM, tx, ty, [s], bases, start=bases.surface)
+        new[(tx, ty)] = encode_delta(h - base)
+    changes = {}
+    for t, after in new.items():
+        before = read_delta_bytes(*t)
+        if before != after:
+            write_delta_bytes(*t, after)
+            changes[t] = (before, after)
+    return changes
+
+
+def restore(changes, which):
+    """Kumoa (which = 0) tai tee uudelleen (1): erotukset takaisin; palauttaa tiilet."""
+    for t, pair in changes.items():
+        write_delta_bytes(*t, pair[which])
+    return set(changes)
+
+
+def height_at(lon, lat, bases=None):
+    """Maanpinnan korkeus (m) pisteessä korjausten jälkeen (tarkin taso, lähin pikseli)."""
+    bases = bases or Bases()
+    n = 2 ** ZOOM
+    X, Y = merc(lon, lat)
+    tx, ty = int(X * n), int(Y * n)
+    h = bases.surface(ZOOM, tx, ty)
+    return float(h[min(SIZE - 1, int((Y * n - ty) * SIZE)), min(SIZE - 1, int((X * n - tx) * SIZE))])
+
+
+# --- Kartan tiilet ----------------------------------------------------------------------------------
+
 def write_tile(z, x, y, rgb, base, new):
-    """Tallentaa tiilen, jos se poikkeaa pohjasta; palauttaa korjauksen (uusi − pohja) tai None."""
+    """Tallentaa kartan tiilen, jos se poikkeaa pohjasta (vain muuttuneet pikselit koodataan uudelleen);
+    palauttaa True, jos tiili on korjattu."""
     path = tile_path(z, x, y)
     changed = np.abs(new - base) > CHANGED
     if not changed.any():
-        if os.path.exists(path):
-            os.remove(path)
-            try:
-                os.removedirs(os.path.dirname(path))  # tyhjät kansiot pois (pysähtyy ensimmäiseen ei-tyhjään)
-            except OSError:
-                pass
-        return None
+        remove_file(path)
+        return False
     out = rgb.copy()
     out[changed] = terrarium(new[changed])
     os.makedirs(os.path.dirname(path), exist_ok=True)
     Image.fromarray(out).save(path + ".part", "WEBP", lossless=True, method=4)
     os.replace(path + ".part", path)
-    return np.where(changed, new - base, 0.0)
+    return True
 
 
 def load_index():
@@ -334,7 +429,7 @@ def load_index():
 def save_index(index):
     tiles = {str(z): [v for xy in sorted(index.get(z, ())) for v in xy] for z in sorted(index, reverse=True) if index.get(z)}
     os.makedirs(os.path.dirname(INDEX), exist_ok=True)
-    data = {"lahde": "Maastoeditorilla tehdyt korjaukset (korjaukset/maasto.json, scripts/maastokorjaus.py)",
+    data = {"lahde": "Maastoeditorilla tehdyt korjaukset (korjaukset/maasto, scripts/maastokorjaus.py)",
             "versio": int(time.time() * 1000), "tiilet": tiles}
     with open(INDEX + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(data, fh, separators=(",", ":"))
@@ -342,72 +437,68 @@ def save_index(index):
     return data
 
 
-def bake(edits, changed=None, bases=None, log=print):
-    """Leipoo korjaukset tiiliin. changed: korjaukset, joiden tiilet lasketaan uudelleen (lisätyt tai
-    poistetut); None = kaikki alusta. Palauttaa hakemiston (public/data/maastokorjaukset.json)."""
-    t0 = time.time()
-    bases = bases or Bases()
-    strokes = [Stroke(e) for e in edits]
-    if changed is None:
-        shutil.rmtree(OUT, ignore_errors=True)
-        index = {}
-        todo = set().union(*(s.tiles(ZOOM) for s in strokes)) if strokes else set()
-    else:
-        index = load_index()
-        todo = set().union(*(Stroke(e).tiles(ZOOM) for e in changed)) if changed else set()
-    index.setdefault(ZOOM, set())
-    deltas = {}
-    for tx, ty in sorted(todo):
-        rgb, base, new = apply_strokes(ZOOM, tx, ty, strokes, bases)
-        deltas[(tx, ty)] = write_tile(ZOOM, tx, ty, rgb, base, new)
-        (index[ZOOM].add if deltas[(tx, ty)] is not None else index[ZOOM].discard)((tx, ty))
-    # Karkeammat tasot: korjaus on neljän tarkemman pikselin korjausten keskiarvo.
-    z_child = ZOOM
-    for z in COARSE:
+def bake_tiles(tiles, bases, index=None):
+    """Kartan tiilet erotuksista: tarkimmat tiilet (tiles) sekä niiden karkeammat yläruudut, joiden
+    erotus on tarkimpien erotusten keskiarvo. Palauttaa hakemiston (public/data/maastokorjaukset.json)."""
+    index = load_index() if index is None else index
+    for z in (ZOOM, *COARSE):
         index.setdefault(z, set())
-        parents = {(x >> 1, y >> 1) for x, y in deltas}
-        coarse = {}
-        for px, py in sorted(parents):
-            full = np.zeros((2 * SIZE, 2 * SIZE))
-            for j in (0, 1):
-                for i in (0, 1):
-                    c = (2 * px + i, 2 * py + j)
-                    if c in deltas:
-                        d = deltas[c]
-                    elif c in index[z_child] and os.path.exists(tile_path(z_child, *c)):
-                        d = read_tile(tile_path(z_child, *c))[1] - bases.read(z_child, *c)[1]
-                    else:
-                        d = None
+    for x, y in sorted(tiles):
+        rgb, base = bases.read(ZOOM, x, y)
+        d = load_delta(x, y)
+        (index[ZOOM].add if write_tile(ZOOM, x, y, rgb, base, base if d is None else base + d) else index[ZOOM].discard)((x, y))
+    for z in COARSE:
+        k = 2 ** (ZOOM - z)
+        for px, py in sorted({(x // k, y // k) for x, y in tiles}):
+            full = np.zeros((k * SIZE, k * SIZE))
+            for j in range(k):
+                for i in range(k):
+                    d = load_delta(px * k + i, py * k + j)
                     if d is not None:
                         full[j * SIZE:(j + 1) * SIZE, i * SIZE:(i + 1) * SIZE] = d
-            delta = full.reshape(SIZE, 2, SIZE, 2).mean(axis=(1, 3))
             rgb, base = bases.read(z, px, py)
-            coarse[(px, py)] = write_tile(z, px, py, rgb, base, base + delta)
-            (index[z].add if coarse[(px, py)] is not None else index[z].discard)((px, py))
-        deltas, z_child = coarse, z
-    data = save_index(index)
+            delta = full.reshape(SIZE, k, SIZE, k).mean(axis=(1, 3))
+            (index[z].add if write_tile(z, px, py, rgb, base, base + delta) else index[z].discard)((px, py))
+    return save_index(index)
+
+
+def bake_all(bases=None, log=print):
+    """Kaikki kartan tiilet uudelleen erotuksista (esim. build_data.py:n jälkeen, kun pohjat muuttuvat)."""
+    t0 = time.time()
+    bases = bases or Bases()
+    shutil.rmtree(OUT, ignore_errors=True)
+    tiles = delta_tiles()
+    data = bake_tiles(tiles, bases, index={})
     count = sum(len(v) // 2 for v in data["tiilet"].values())
-    log(f"  maastokorjaukset: {len(edits)} korjausta, {len(todo)} tarkkaa tiiltä laskettu, {count} korjattua tiiltä "
-        f"({time.time() - t0:.1f} s)")
+    log(f"  maastokorjaukset: {len(tiles)} korjattua tarkkaa tiiltä, kartalle {count} tiiltä ({time.time() - t0:.1f} s)")
     return data
 
 
-def height_at(lon, lat, edits, bases=None):
-    """Maanpinnan korkeus (m) pisteessä korjausten jälkeen (tarkin taso, lähin pikseli)."""
+def migrate(bases=None, log=print):
+    """Aiempi vetoluettelo (korjaukset/maasto.json) erotustiiliksi: vedot lasketaan kerran pohjan
+    päälle, ja luettelo poistetaan. Palauttaa muunnettujen vetojen määrän."""
+    if not os.path.exists(LEGACY):
+        return 0
+    with open(LEGACY, encoding="utf-8") as fh:
+        edits = json.load(fh).get("korjaukset", [])
     bases = bases or Bases()
-    n = 2 ** ZOOM
-    X, Y = merc(lon, lat)
-    tx, ty = int(X * n), int(Y * n)
-    h = apply_strokes(ZOOM, tx, ty, [Stroke(e) for e in edits], bases)[2]
-    return float(h[min(SIZE - 1, int((Y * n - ty) * SIZE)), min(SIZE - 1, int((X * n - tx) * SIZE))])
+    strokes = [Stroke(e) for e in edits]
+    tiles = set().union(*(s.tiles(ZOOM) for s in strokes)) if strokes else set()
+    for tx, ty in sorted(tiles):
+        _, base, h = apply_strokes(ZOOM, tx, ty, strokes, bases)
+        write_delta_bytes(tx, ty, encode_delta(h - base))
+    os.remove(LEGACY)
+    log(f"  maastokorjaukset: {len(edits)} vetoa muunnettu erotuksiksi ({len(delta_tiles())} tiiltä)")
+    return len(edits)
 
 
 def main():
-    edits = load_edits()
-    if not edits and not os.path.exists(INDEX):
-        print("Ei maastokorjauksia (korjaukset/maasto.json).")
+    bases = Bases()
+    migrate(bases)
+    if not delta_tiles() and not os.path.exists(INDEX):
+        print("Ei maastokorjauksia (korjaukset/maasto).")
         return
-    bake(edits)
+    bake_all(bases)
 
 
 if __name__ == "__main__":

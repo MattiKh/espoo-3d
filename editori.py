@@ -2,10 +2,11 @@
 """Maastoeditori: paikallinen työkalu korkeusmallin korjaamiseen (ei julkaista Netlifyyn).
 
 Avaa saman kartan kuin server.py, mutta sivulle tulee lisäksi editorin paneeli (editori/), jolla
-maastoa voi nostaa, laskea, tasoittaa ja pehmentää siveltimellä. Korjaukset tallentuvat tiedostoon
-korjaukset/maasto.json, ja ne leivotaan heti korkeusmallin tiiliin (scripts/maastokorjaus.py):
-public/tiles/korkeuskorjaus ja public/data/maastokorjaukset.json. Ne julkaistaan kuten muukin
-aineisto viemällä ne GitHubiin (editorin Julkaise-nappi tai git), jolloin Netlify julkaisee ne.
+maastoa voi nostaa, laskea, tasoittaa ja pehmentää siveltimellä ja 3D-siltoja korjata. Jokaisen vedon
+lopputulos tallentuu heti erotustiiliksi (korjaukset/maasto) ja korkeusmallin tiiliksi
+(scripts/maastokorjaus.py: public/tiles/korkeuskorjaus ja public/data/maastokorjaukset.json).
+Vedot kumotaan ja tehdään uudelleen editorin muistissa (istunnon ajan). Korjaukset julkaistaan
+viemällä ne GitHubiin (editorin Vie GitHubiin -nappi tai git), jolloin Netlify julkaisee ne.
 
 Käyttö:  python3 editori.py [--port 8766]
 Tarvitsee numpyn ja Pillowin; jos ne ovat vain kansion .venv ympäristössä, editori käyttää sitä.
@@ -41,8 +42,9 @@ EDITOR = os.path.join(HERE, "editori")
 # Siltakorjaukset: kartta (pelimaasto.js) lukee ne suoraan, joten erillistä leipomista ei ole.
 BRIDGE_EDITS = os.path.join(HERE, "public", "data", "siltakorjaukset.json")
 # Julkaistavat tiedostot: korjausten lähde, selaimen hakemisto, leivotut tiilet ja siltakorjaukset.
-PUBLISH = [os.path.relpath(p, HERE) for p in (os.path.dirname(mk.EDITS), mk.INDEX, mk.OUT, BRIDGE_EDITS)]
+PUBLISH = [os.path.relpath(p, HERE) for p in (os.path.dirname(mk.DELTAS), mk.INDEX, mk.OUT, BRIDGE_EDITS)]
 LOCK = threading.Lock()
+HISTORY_MAX = 300  # kumottavia vetoja enintään (erotukset tavuina, kymmeniä kilotavuja vetoa kohden)
 
 
 def load_bridges():
@@ -61,10 +63,11 @@ def save_bridges(edits):
 
 
 class State:
-    """Korjaukset ja pohjatiilet muistissa; kaikki muutokset LOCKin alla."""
+    """Istunnon vedot (kumoa ja tee uudelleen), siltakorjaukset ja pohjatiilet muistissa; muutokset LOCKin alla.
+    Historian alkio: {"korjaus": veto, "muutokset": {(x, y): (erotus ennen, erotus jälkeen)}}."""
 
     def __init__(self):
-        self.edits = mk.load_edits()
+        self.history, self.redo = [], []
         self.bridges = load_bridges()
         self.bases, self.bases_mtime = None, None
 
@@ -112,8 +115,8 @@ def snapshot(**extra):
     if os.path.exists(mk.INDEX):
         with open(mk.INDEX, encoding="utf-8") as fh:
             versio = json.load(fh).get("versio", 0)
-    return {"korjaukset": STATE.edits, "hakemisto": {"versio": versio, "tiilet": tiles}, "sillat": STATE.bridges,
-            "git": git_status(), **extra}
+    return {"historia": [h["korjaus"] for h in STATE.history], "voi_tehda": len(STATE.redo),
+            "hakemisto": {"versio": versio, "tiilet": tiles}, "sillat": STATE.bridges, "git": git_status(), **extra}
 
 
 def set_bridge(body):
@@ -149,39 +152,46 @@ def restore_bridge(body):
 
 
 def add_edit(body):
+    """Veto nykyisen pinnan päälle: lopputulos tallennetaan erotuksina ja kartan tiilet leivotaan."""
     e = mk.clean_edit(body)
     with LOCK:
-        if any(x["id"] == e["id"] for x in STATE.edits):
-            raise ValueError("Korjaus on jo tallennettu")
         bases = STATE.get_bases()
         if e["tyyppi"] == "tasoita" and "taso" not in e:
             # Taso on maanpinta vedon alussa aiempien korjausten jälkeen.
-            e["taso"] = round(mk.height_at(*e["pisteet"][0], STATE.edits, bases), 3)
+            e["taso"] = round(mk.height_at(*e["pisteet"][0], bases), 3)
             e = {k: e[k] for k in ("id", "tyyppi", "sade", "kovuus", "taso", "pisteet", "aika")}
-        edits = STATE.edits + [e]
-        mk.bake(edits, [e], bases)
-        mk.save_edits(edits)
-        STATE.edits = edits
+        changes = mk.apply_edit(e, bases)
+        mk.bake_tiles(set(changes), bases)
+        STATE.history = (STATE.history + [{"korjaus": e, "muutokset": changes}])[-HISTORY_MAX:]
+        STATE.redo = []
     return snapshot(lisatty=e)
 
 
-def remove_edit(body):
+def undo(_body):
     with LOCK:
-        gone = [e for e in STATE.edits if e["id"] == body.get("id")]
-        if not gone:
-            raise ValueError("Korjausta ei löytynyt")
-        edits = [e for e in STATE.edits if e["id"] != body["id"]]
-        mk.bake(edits, gone, STATE.get_bases())
-        mk.save_edits(edits)
-        STATE.edits = edits
-    return snapshot(poistettu=gone[0])
+        if not STATE.history:
+            raise ValueError("Ei kumottavaa")
+        h = STATE.history.pop()
+        mk.bake_tiles(mk.restore(h["muutokset"], 0), STATE.get_bases())
+        STATE.redo.append(h)
+    return snapshot(kumottu=h["korjaus"])
+
+
+def redo(_body):
+    with LOCK:
+        if not STATE.redo:
+            raise ValueError("Ei uudelleen tehtävää")
+        h = STATE.redo.pop()
+        mk.bake_tiles(mk.restore(h["muutokset"], 1), STATE.get_bases())
+        STATE.history.append(h)
+    return snapshot(lisatty=h["korjaus"])
 
 
 def height(query):
     q = urllib.parse.parse_qs(query)
     lon, lat = float(q["lon"][0]), float(q["lat"][0])
     with LOCK:
-        return {"korkeus": round(mk.height_at(lon, lat, STATE.edits, STATE.get_bases()), 3)}
+        return {"korkeus": round(mk.height_at(lon, lat, STATE.get_bases()), 3)}
 
 
 def publish(_body):
@@ -193,8 +203,8 @@ def publish(_body):
         staged = bool(paths) and git("diff", "--cached", "--quiet", "--", *paths, check=False).returncode != 0
         log = []
         if staged:
-            n, b = len(STATE.edits), len(STATE.bridges)
-            msg = f"Maastokorjaukset: {n} korjaus{'ta' if n != 1 else ''}, {b} siltakorjaus{'ta' if b != 1 else ''} (maastoeditori)"
+            n, b = len(mk.delta_tiles()), len(STATE.bridges)
+            msg = f"Maastokorjaukset: {n} korjattu{'a' if n != 1 else ''} tiil{'tä' if n != 1 else 'i'}, {b} siltakorjaus{'ta' if b != 1 else ''} (maastoeditori)"
             log.append(git("commit", "-m", msg, "--", *paths).stdout.strip().splitlines()[0])
         status = git_status()
         if not staged and status.get("viemattomat") == 0:
@@ -225,7 +235,7 @@ class Handler(MapHandler):
 
     def do_POST(self):
         path = self.path.partition("?")[0]
-        routes = {"/api/lisaa": add_edit, "/api/poista": remove_edit, "/api/julkaise": publish,
+        routes = {"/api/lisaa": add_edit, "/api/kumoa": undo, "/api/tee-uudelleen": redo, "/api/julkaise": publish,
                   "/api/silta": set_bridge, "/api/silta/palauta": restore_bridge}
         if path not in routes:
             return self.send_error(404)
@@ -282,7 +292,10 @@ def main():
     args = ap.parse_args()
     import http.server
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"Maastoeditori: http://localhost:{args.port}  ({len(STATE.edits)} korjausta)", flush=True)
+    # Aiempi vetoluettelo (korjaukset/maasto.json) muunnetaan kerran erotustiiliksi.
+    if mk.migrate(STATE.get_bases()):
+        mk.bake_all(STATE.get_bases())
+    print(f"Maastoeditori: http://localhost:{args.port}  ({len(mk.delta_tiles())} korjattua tiiltä)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -839,7 +839,8 @@ Editori näyttää saman kartan kuin `server.py`, ja sen oikeassa reunassa on ed
   -etäisyydelle, sitten pehmeä reuna). Klikkaus vaikuttaa ympyrän alueelle, veto nauhana.
 - Kun työkalu on valittu, hiiren vasen painike maalaa eikä siirrä karttaa. Välilyönti pohjassa
   karttaa voi siirtää, oikea painike kääntää ja kallistaa, ja rulla zoomaa. Ctrl/Cmd+Z kumoaa,
-  Ctrl/Cmd+Shift+Z tekee uudelleen.
+  Ctrl/Cmd+Shift+Z tekee uudelleen (editorin käynnissä ollessa, enintään 300 vetoa taaksepäin).
+  Aiempien istuntojen korjaukset saa pois Palauta-työkalulla.
 - **Silta** (näppäin 7): klikkaus valitsee 3D-sillan osan (OSM:n siltaosuus; leveä silta on usein
   useita rinnakkaisia osia, esim. ajoradat ja kevyen liikenteen väylä). Valittu osa korostuu kannen
   korkeudella, ja sen päät on merkitty (A = alku, L = loppu). Osan voi poistaa (myös Delete), sen päitä
@@ -849,21 +850,27 @@ Editori näyttää saman kartan kuin `server.py`, ja sen oikeassa reunassa on ed
   joten korjaukset säilyvät, kun `build_data.py` tekee sillat uudelleen. Poistetun sillan kohdalla
   korkeusmallissa voi olla aukko (jänne on avattu 3D-siltaa varten), jonka voi täyttää Nosta- tai
   Tasoita-työkalulla.
-- Rinnevarjostusta voi korostaa, jotta pienetkin muodot erottuvat, ja korjausten rajat voi näyttää
-  kartalla. Korjauslistasta korjauksen voi näyttää kartalla tai poistaa.
+- Rinnevarjostusta voi korostaa, jotta pienetkin muodot erottuvat, ja tämän istunnon vedot voi
+  näyttää kartalla. Istunnon vedon voi näyttää listasta kartalla.
   Paneelissa näkyy osoittimen kohdan maanpinnan korkeus. 3D-rakennukset ja -puut kannattaa ottaa
   kartan paneelista pois maastoa korjattaessa.
 
-Jokainen veto tallentuu heti tiedostoon `korjaukset/maasto.json` (yksi korjaus riviä kohden:
-työkalu, säde, kovuus, määrä tai taso ja vedon pisteet). Palvelin leipoo korjaukset saman tien
-korkeusmallin tiiliin (`scripts/maastokorjaus.py`), ja kartta hakee muuttuneet tiilet uudelleen.
-Vedot lasketaan tarkimmille tiilille (taso 15, noin 1,2 m pikseli) sen tiilen päälle, jonka kartta
-muuten hakisi (siltojen kohdalla `build_data.py`:n nostama tai pelillinen tiili, muualla
-Mapterhornin alkuperäinen). Karkeampien tasojen (14 ja 13) korjaus on tarkimpien korjausten
-keskiarvo, joten pinta on sama kaikilla tasoilla. Pehmennys lukee myös naapuritiiliä, jottei
-tiilten saumaan jää porrasta. Korjatut tiilet ovat kansiossa `public/tiles/korkeuskorjaus`
-(häviötön WebP), ja `public/data/maastokorjaukset.json` kertoo, mitkä tiilet on korjattu.
-Selain (`bridges.js`) hakee niiden kohdalla korjatun tiilen ennen muita.
+Korjauksista tallennetaan vain lopputulos, ei vetoja. Jokaisesta korjatusta tarkimmasta tiilestä
+(taso 15, noin 1,2 m pikseli) on erotustiili kansiossa `korjaukset/maasto/x/y.webp`: kuinka paljon
+maanpintaa on nostettu tai laskettu pikseleittäin (Terrarium-koodaus, häviötön WebP; erotus on
+suurimmaksi osaksi nollaa, joten tiili on pieni). Veto lasketaan nykyisen pinnan (pohja + erotus)
+päälle ja tallennetaan uutena erotuksena, joten tiedostojen määrä ja koko riippuvat korjatusta
+alueesta eivätkä vetojen määrästä. Pohja on se tiili, jonka kartta muuten hakisi (siltojen
+kohdalla `build_data.py`:n nostama tai pelillinen tiili, muualla Mapterhornin alkuperäinen).
+Pehmennys lukee myös naapuritiiliä, jottei tiilten saumaan jää porrasta.
+
+Palvelin leipoo kartan tiilet saman tien (`scripts/maastokorjaus.py`): tarkimmat pohja + erotus ja
+karkeammat tasot (14 ja 13) tarkimpien erotusten keskiarvona, joten pinta on sama kaikilla
+tasoilla. Kartan tiilet ovat kansiossa `public/tiles/korkeuskorjaus` (häviötön WebP), ja
+`public/data/maastokorjaukset.json` kertoo, mitkä tiilet on korjattu. Selain (`bridges.js`) hakee
+niiden kohdalla korjatun tiilen ennen muita, ja editori hakee muuttuneet tiilet uudelleen.
+Aiemmin vedot tallennettiin luetteloon `korjaukset/maasto.json`; editori ja `maastokorjaus.py`
+muuntavat sen kerran erotustiiliksi.
 
 **Julkaisu.** Paneelin Vie GitHubiin -nappi tekee commitin vain korjausten tiedostoista
 (`korjaukset/`, `public/data/maastokorjaukset.json`, `public/tiles/korkeuskorjaus`,
@@ -871,9 +878,9 @@ Selain (`bridges.js`) hakee niiden kohdalla korjatun tiilen ennen muita.
 nykyiseen haaraan. Netlify julkaisee ne, kun ne ovat `main`-haarassa. Saman voi tehdä myös gitillä.
 Jos GitHubissa on uudempia muutoksia (esim. toiselta koneelta), aja ensin `git pull`.
 
-**Aineistojen päivitys.** Korjaukset ovat erillään `build_data.py`:n tiilistä, joten ne säilyvät:
-`build_data.py` leipoo ne uudelleen siltojen jälkeen uusien pohjatiilten päälle. Kaikki korjaukset
-voi leipoa uudelleen myös erikseen:
+**Aineistojen päivitys.** Erotukset ovat erillään `build_data.py`:n tiilistä, joten ne säilyvät:
+`build_data.py` leipoo kartan tiilet uudelleen siltojen jälkeen uusien pohjatiilten päälle
+(erotus lisätään uuteen pohjaan). Kaikki korjaukset voi leipoa uudelleen myös erikseen:
 
 ```bash
 python3 scripts/maastokorjaus.py

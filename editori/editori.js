@@ -1,6 +1,6 @@
 // Maastoeditori (editori.py, vain paikallisesti). Kartan päälle tulee paneeli, jolla korkeusmallia
 // korjataan siveltimellä: nosta, laske, tasoita, pehmennä ja palauta. Jokainen veto lähetetään
-// palvelimelle, joka tallentaa sen (korjaukset/maasto.json) ja leipoo korjatut tiilet
+// palvelimelle, joka tallentaa lopputuloksen erotustiiliksi (korjaukset/maasto) ja leipoo korjatut tiilet
 // (scripts/maastokorjaus.py). Kartta hakee sen jälkeen korjatut korkeusmallin tiilet uudelleen.
 // bridges.js on sama moduuli kuin kartalla (sama osoite), joten hakemiston päivitys koskee karttaa.
 import { setTerrainFixes } from "../bridges.js";
@@ -49,11 +49,11 @@ const saveSettings = () => {
   } catch { /* yksityinen ikkuna tms. */ }
 };
 
-let edits = [], index = { versio: 0, tiilet: {} }, gitInfo = {}, bridgeEdits = [];
+// history: tämän istunnon vedot (palvelin pitää kumoamista varten), canRedo: uudelleen tehtävien määrä.
+let history = [], canRedo = 0, index = { versio: 0, tiilet: {} }, gitInfo = {}, bridgeEdits = [];
 // Silta-työkalu: osoitettu ja valittu siltaosa ({ id, raw, piece, edit } pelimaasto.js:n bridgePieces-luettelosta).
 let hoverBridge = null, selBridge = null, selId = null, lookupAt = 0;
 const game = () => window.espooGame;
-const redo = [];
 const pendingStrokes = [];
 let stroke = null, space = false, suppressClick = false, cursorAt = null;
 
@@ -98,7 +98,7 @@ function strokeFeature(e) {
 }
 
 function drawAreas() {
-  map.getSource("ed-alueet").setData({ type: "FeatureCollection", features: edits.map(strokeFeature) });
+  map.getSource("ed-alueet").setData({ type: "FeatureCollection", features: history.map(strokeFeature) });
 }
 
 function drawPreview() {
@@ -172,7 +172,8 @@ function enqueue(label, fn) {
 
 function applyState(res, reload = true) {
   const before = fixedKeys(index);
-  edits = res.korjaukset;
+  history = res.historia ?? [];
+  canRedo = res.voi_tehda ?? 0;
   index = res.hakemisto;
   gitInfo = res.git ?? {};
   setTerrainFixes(index);
@@ -277,7 +278,6 @@ function finishStroke() {
   if (s.tool === "pehmenna" || s.tool === "palauta") edit.voimakkuus = state.voimakkuus;
   pendingStrokes.push(edit);
   drawPreview();
-  redo.length = 0;
   enqueue("Lasketaan korjausta…", async () => {
     try {
       const res = await api("/api/lisaa", edit);
@@ -302,30 +302,18 @@ function pickLevel([lon, lat]) {
   });
 }
 
+// Kumoa ja tee uudelleen palvelimen istuntohistoriasta (erotukset ennen ja jälkeen vedon). Jonossa,
+// jotta keskeneräinen veto ehtii tallentua ensin.
 function undo() {
-  if (!edits.length && !pendingStrokes.length) return;
-  // Viimeinen korjaus vasta jonossa, jotta keskeneräinen veto ehtii tallentua ensin.
+  if (!history.length && !pendingStrokes.length) return;
   enqueue("Kumotaan…", async () => {
-    const last = edits.at(-1);
-    if (!last) return;
-    const res = await api("/api/poista", { id: last.id });
-    redo.push(last);
-    applyState(res);
+    if (history.length) applyState(await api("/api/kumoa", {}));
   });
 }
 
 function redoLast() {
-  const e = redo.pop();
-  if (!e) return;
-  enqueue("Tehdään uudelleen…", async () => applyState(await api("/api/lisaa", e)));
-}
-
-function removeEdit(e) {
-  enqueue("Poistetaan korjausta…", async () => {
-    const res = await api("/api/poista", { id: e.id });
-    redo.push(e);
-    applyState(res);
-  });
+  if (!canRedo) return;
+  enqueue("Tehdään uudelleen…", async () => applyState(await api("/api/tee-uudelleen", {})));
 }
 
 function setTool(id) {
@@ -605,8 +593,8 @@ const panel = h("aside", { id: "editori", "aria-label": "Maastoeditori" },
     h("section", {},
       h("h2", {}, "Näkymä"),
       h("label", { class: "check" }, els.highlight = h("input", { type: "checkbox", onchange: (e) => setSetting("korosta", e.target.checked) }), "Korosta pinnanmuodot (varjostus)"),
-      h("label", { class: "check" }, els.areas = h("input", { type: "checkbox", onchange: (e) => setSetting("alueet", e.target.checked) }), "Näytä korjausten rajat"),
-      h("p", { class: "hint" }, "Korjauksen alue näkyy myös, kun viet hiiren sen kohdalle listassa.")),
+      h("label", { class: "check" }, els.areas = h("input", { type: "checkbox", onchange: (e) => setSetting("alueet", e.target.checked) }), "Näytä tämän istunnon vedot"),
+      h("p", { class: "hint" }, "Vedon alue näkyy myös, kun viet hiiren sen kohdalle listassa.")),
     h("section", {},
       h("div", { class: "ed-head" },
         els.count = h("h2", {}, "Korjaukset"),
@@ -698,20 +686,21 @@ function show(e) {
 const ICON_SHOW = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 const ICON_DEL = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
 
+// Tämän istunnon vedot (uusin ensin). Lopputulos on tallessa erotuksina, joten aiempien istuntojen
+// vetoja ei ole; vanhan korjauksen saa pois Palauta-työkalulla.
 function renderList() {
-  els.count.textContent = `Korjaukset (${edits.length})`;
-  els.undo.disabled = !edits.length;
-  els.redo.disabled = !redo.length;
-  els.list.replaceChildren(...(!edits.length ? [h("li", {}, h("p", { class: "ed-empty" }, "Ei vielä korjauksia. Valitse työkalu ja maalaa maastoon."))]
-    : [...edits].reverse().map((e) => {
+  els.count.textContent = `Tämän istunnon vedot (${history.length})`;
+  els.undo.disabled = !history.length;
+  els.redo.disabled = !canRedo;
+  els.list.replaceChildren(...(!history.length ? [h("li", {}, h("p", { class: "ed-empty" }, "Ei vielä vetoja tässä istunnossa. Valitse työkalu ja maalaa maastoon. Aiemmat korjaukset ovat tallessa; ne saa pois Palauta-työkalulla."))]
+    : [...history].reverse().map((e) => {
       const t = TOOL[e.tyyppi], len = strokeLength(e);
       const time = e.aika ? new Date(e.aika).toLocaleTimeString("fi-FI", { hour: "2-digit", minute: "2-digit" }) : "";
       return h("li", { onmouseenter: () => highlight(e.id), onmouseleave: () => highlight(null) },
         h("span", { class: "dot", style: `--tool:${t?.color ?? "#888"}` }),
         h("div", { class: "what" }, h("b", {}, t?.name ?? e.tyyppi), ` ${describe(e)}`,
           h("span", {}, [`säde ${fmtR(e.sade)} m`, len > 0.5 ? `veto ${Math.round(len)} m` : null, time ? `klo ${time}` : null].filter(Boolean).join(" · "))),
-        h("button", { type: "button", title: "Näytä kartalla", "aria-label": "Näytä kartalla", html: ICON_SHOW, onclick: () => show(e) }),
-        h("button", { type: "button", title: "Poista korjaus", "aria-label": "Poista korjaus", html: ICON_DEL, onclick: () => removeEdit(e) }));
+        h("button", { type: "button", title: "Näytä kartalla", "aria-label": "Näytä kartalla", html: ICON_SHOW, onclick: () => show(e) }));
     })));
 }
 
@@ -770,8 +759,8 @@ function showBridge(e) {
   if (e.keskipiste?.[0]) map.easeTo({ center: e.keskipiste, zoom: Math.max(map.getZoom(), 17.5), duration: 800 });
 }
 
-const tileCount = () =>Object.values(index.tiilet ?? {}).reduce((n, xy) => n + xy.length / 2, 0);
-const idleText = () => `Tallennettu · ${edits.length} korjaus${edits.length === 1 ? "" : "ta"} · ${tileCount()} korjattua tiiltä`;
+const fineTiles = () => (index.tiilet?.["15"]?.length ?? 0) / 2;
+const idleText = () => `Tallennettu · ${fineTiles()} korjattu${fineTiles() === 1 ? " tiili" : "a tiiltä"} · istunnossa ${history.length} veto${history.length === 1 ? "" : "a"}`;
 
 function setStatus(text, kind = "") {
   els.status.className = `ed-status ${kind}`;
@@ -792,7 +781,7 @@ function renderPublish() {
   else parts.push("Korjaukset ovat GitHubissa.");
   if (g.haara && g.haara !== "main") parts.push("Netlify julkaisee korjaukset, kun haara yhdistetään main-haaraan.");
   els.gitText.textContent = parts.join(" ");
-  els.publishBtn.disabled = !(g.muuttuneet || g.viemattomat || (g.viemattomat === null && edits.length));
+  els.publishBtn.disabled = !(g.muuttuneet || g.viemattomat || (g.viemattomat === null && fineTiles()));
 }
 
 function publish() {

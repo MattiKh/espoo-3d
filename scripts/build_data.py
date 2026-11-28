@@ -1528,10 +1528,11 @@ def build_bridges():
                    "viivat": viivat, "korkeus": korkeus, "korkeus_peli": korkeus_peli, "korkeus_peli_alkup": korkeus_peli_alkup,
                    "jatkeet": jatkeet}, fh, separators=(",", ":"))
     log(f"  → sillat.json: {os.path.getsize(path) / 1e6:.2f} Mt")
-    # Maastoeditorin korjaukset (korjaukset/maasto.json) leivotaan uusien pohjatiilten päälle.
+    # Maastoeditorin korjaukset (erotukset, korjaukset/maasto) leivotaan uusien pohjatiilten päälle.
     import maastokorjaus
-    if maastokorjaus.load_edits():
-        maastokorjaus.bake(maastokorjaus.load_edits(), log=log)
+    maastokorjaus.migrate(log=log)
+    if maastokorjaus.delta_tiles():
+        maastokorjaus.bake_all(log=log)
 
 
 def bridge_decks(viivat):
