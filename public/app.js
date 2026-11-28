@@ -4,6 +4,7 @@ import {
   WMS_SERVICES, detailRadius,
 } from "./layers.js";
 import { liftedTileUrl } from "./bridges.js";
+import { createLocate } from "./sijainti.js";
 
 const ATTR_ESPOO = '© <a href="https://kartat.espoo.fi" target="_blank" rel="noopener">Espoon kaupunki</a>';
 const ATTR_HSY = '© <a href="https://www.hsy.fi/avoindata" target="_blank" rel="noopener">HSY</a>';
@@ -336,6 +337,7 @@ window.addEventListener("online", reloadErroredTiles);
 document.addEventListener("visibilitychange", () => document.hidden || reloadErroredTiles());
 setInterval(reloadErroredTiles, 30000);
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+map.addControl(createLocate(map), "top-right"); // Seuraa sijaintiani (sijainti.js)
 map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
 
 map.on("load", () => {

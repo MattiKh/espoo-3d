@@ -275,6 +275,42 @@ footer { padding-top: 12px; font-size: 11.5px; color: var(--muted); }
 #map.riding .maplibregl-canvas-container { touch-action: none; }
 #map.ride-drag .maplibregl-canvas-container { cursor: ns-resize; }
 
+/* Oma sijainti (sijainti.js): painike kartan painikkeiden alla ja merkki maan pinnassa */
+.locate-button svg { display: block; margin: auto; fill: none; stroke: #333; }
+.locate-button.haku svg { stroke: var(--accent); animation: pulse 0.8s infinite alternate; }
+.locate-button.seuraa svg { fill: var(--accent); stroke: var(--accent); }
+.locate-button.vapaa svg { stroke: var(--accent); }
+.locate-marker, .locate-pin { pointer-events: none; }
+.locate-marker, .locate-pin { width: 24px; height: 24px; }
+.locate-marker > *, .locate-pin > * { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.locate-accuracy {
+  border-radius: 50%;
+  background: rgba(26, 115, 232, 0.13);
+  border: 1px solid rgba(26, 115, 232, 0.35);
+}
+.locate-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #1a73e8;
+  border: 3px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.locate-dot.stale { background: #8a96a0; }
+/* Suuntanuoli pisteen edessä: kärki ylöspäin ennen kiertoa (updateArrow) */
+.locate-heading { width: 56px; height: 56px; }
+.locate-heading::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  border-bottom: 15px solid #1a73e8;
+  filter: drop-shadow(0 0 1.5px #fff) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+}
+
 /* Kapea näyttö: paneeli alareunaan */
 @media (max-width: 700px) {
   #panel {

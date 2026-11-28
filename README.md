@@ -6,6 +6,8 @@ Espoon bussit, raitiovaunut, junat ja metro, Espoon vesillä liikkuvat alukset s
 yllä lentävät koneet liikkuvat kartalla aina reaaliajassa 3D-malleina, ja latauksessa olevat
 sähköautot näkyvät latauspaikoillaan. Bussin, raitiovaunun, junan, metron tai lautan kyytiin voi
 hypätä klikkaamalla, jolloin kartta seuraa kulkuneuvoa yläpuolelta menosuunta ylöspäin.
+"Seuraa sijaintiani" -painike keskittää kartan omaan sijaintiin ja kääntää sen liikkuessa
+menosuuntaan.
 
 ## Paneeli
 
@@ -381,6 +383,35 @@ navigointinapit ovat seurannan ajan piilossa; paneeli on yhtä läpikuultava (`-
   pysyy tilattuna, vaikka näkymä siirtyisi toiseen ruutuun.
 - Kapealla näytöllä paneeli painetaan alas seurannan ajaksi. Kun liikettä vähennetään
   (`prefers-reduced-motion`), kartta siirtyy seurantaan ja takaisin ilman siirtymää.
+
+## Oma sijainti
+
+Kartan painikkeiden alla oleva "Seuraa sijaintiani" -painike (`public/sijainti.js`) kysyy selaimelta
+sijainnin (Geolocation API, tarkka paikannus) ja keskittää kartan siihen. Seurannan alkaessa
+zoomataan vähintään tasolle 16,5; kallistus pysyy ennallaan. Sijainti toimii vain https-yhteydellä
+(Netlify) tai paikallisesti (`localhost`).
+
+- Sijaintia merkitsee sininen piste, jonka ympärillä on tarkkuusympyrä maan pinnassa (säde on
+  selaimen ilmoittama tarkkuus). Jos uutta sijaintia ei ole tullut 30 sekuntiin, piste harmaantuu.
+- Kun liikutaan vähintään 1 m/s, kartta kääntyy menosuuntaan, joten edessä oleva näkyy ylöspäin.
+  Suunta on paikantimen kulkusuunta. Jos selain ei kerro sitä, suunta lasketaan peräkkäisistä
+  sijainneista, kun siirtymää on kertynyt vähintään 8 m (tai puolet tarkkuudesta). Yli 50 m:n
+  epätarkkuudella suuntaa ei lasketa. Suunta pehmennetään, ja alle 5°:n muutoksia ei käännetä.
+  Paikallaan kartan suunta pysyy ennallaan.
+- Pisteen edessä oleva nuoli näyttää menosuunnan, ja paikallaan ollessa kompassin suunnan, jos
+  laite kertoo sen. iPhone kysyy kompassin käyttöön erikseen luvan painikkeen painalluksella.
+  Nuolen kulma näytöllä lasketaan maastossa menosuunnassa olevasta pisteestä, joten se osoittaa
+  oikein kallistetussakin näkymässä.
+- Merkki ja kartta siirtyvät uuteen sijaintiin tasaisesti samassa ajassa (sijaintien väli,
+  0,25–2 s), joten merkki pysyy seurannassa näkymän keskellä eikä hypi.
+- Zoomaus (rulla, nipistys, +/−), kallistus ja kierto eivät katkaise seurantaa: zoomaus tehdään
+  seurannan ajan näkymän keskipisteen ympäri. Kun karttaa siirtää selvästi sivuun, seuranta jää
+  taustalle: merkki pysyy ja painike keskittää näkymän taas sijaintiin. Seurannan aikana painike
+  lopettaa sijainnin käytön.
+- Kulkuneuvon kyytiin hypättäessä kyytinäkymä ohjaa karttaa ja sijainnin seuranta jää taustalle.
+- Kapealla näytöllä paneeli painetaan alas seurannan alkaessa.
+- Jos lupa evätään, sijaintia ei saada tai se on kartta-alueen ulkopuolella, painikkeiden viereen
+  tulee ilmoitus ja seuranta päättyy.
 
 ## Kelikamerat
 
@@ -897,6 +928,7 @@ python3 scripts/maastokorjaus.py
 - `public/app.js`: kartta ja käyttöliittymä (MapLibre GL JS)
 - `public/transit.js`: reaaliaikaiset ajoneuvot, lentokoneet ja latauksessa olevat sähköautot, liikkeen tasoitus ja 3D-mallit (three.js)
 - `public/ride.js`: kyytinäkymä: kulkuneuvon seuranta yläpuolelta menosuunta ylöspäin, zoomaus, kallistus ja kyytipalkki
+- `public/sijainti.js`: Seuraa sijaintiani -painike: oma sijainti, tarkkuusympyrä, menosuunta ja kompassi
 - `public/metrotunnel.js`: metrotunnelien ja asemien sisäpuoli (käytössä vain kameran ollessa maan alla)
 - `public/pelimaasto.js` ja `public/pelimaasto_worker.js`: maaston pinta (pelillinen maasto): maanpeiteluokat tekstuureina, viivat, 3D-sillat ruuduittain ja 3D-puut
 - `public/bridges.js`: siltojen kohdalla valmiiksi nostetut ja maastoeditorilla korjatut korkeusmallin tiilet, sillan alla oleva maanpinta ja kannen korkeus ajoneuvoille
